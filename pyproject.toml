@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentkline"
+version = "0.3.0"
+description = "AgentKline — a self-hosted, scriptable, agent-ready K-line trading board (lightweight-charts + MCP)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "AgentKline Team" }]
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.0.0",
+    "websockets>=12.0",
+    "mcp>=1.0.0",
+    "ccxt>=4.0.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["requests>=2.0.0"]
+
+[project.scripts]
+# Web 服务（FastAPI + 前端 + /mcp Streamable HTTP）
+agentkline = "agentkline.api.app:main_entry"
+
+[tool.setuptools]
+packages = ["agentkline", "agentkline.core", "agentkline.api"]

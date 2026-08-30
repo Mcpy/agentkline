@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
+    <title>AgentKline - 交互式K线画板</title>
+</head>
+<body>
+    <!-- 顶部工具栏：画板 -->
+    <div class="toolbar">
+        <h1>📊 AgentKline</h1>
+        <span class="bar-label">画板:</span>
+        <div class="board-tabs" id="board-tabs"></div>
+        <div class="status-bar">
+            <span id="ws-status" class="disconnected">● 未连接</span>
+            <span id="data-info" style="margin-left: 12px;"></span>
+        </div>
+    </div>
+
+    <!-- 周期栏（独立一行） -->
+    <div class="timeframe-bar">
+        <span class="bar-label">周期:</span>
+        <div class="timeframe-tabs" id="timeframe-tabs"></div>
+    </div>
+
+    <!-- 指标栏（显隐切换） -->
+    <div class="indicator-bar" id="indicator-bar">
+        <span class="label">指标:</span>
+    </div>
+
+    <!-- 主区域：左绘图工具栏 + 图表 -->
+    <div class="main-row">
+        <div class="draw-toolbar" id="draw-toolbar">
+            <div class="draw-toolbar-title">划线<br>工具</div>
+            <div class="draw-tool" data-tool="hline" title="水平线">─</div>
+            <div class="draw-tool" data-tool="trend" title="趋势线">╱</div>
+        </div>
+        <div class="chart-container">
+            <div id="main-chart"></div>
+            <div id="subplots"></div>
+            <div class="loading-overlay" id="loading">
+                <div class="loading-text">正在执行脚本...</div>
+            </div>
+            <div class="empty-state" id="empty-state">
+                <h2>暂无数据</h2>
+                <p>使用 API 推送 K 线数据，或配置数据源脚本</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 日志面板（默认折叠） -->
+    <div class="log-panel collapsed" id="log-panel">
+        <div class="log-header">
+            <span>📋 日志</span>
+            <span style="margin-left: auto;" id="log-toggle">▲</span>
+        </div>
+        <div class="log-content collapsed" id="log-content"></div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+</body>
+</html>
