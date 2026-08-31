@@ -125,6 +125,11 @@ class IndicatorPush(BaseModel):
     markers: Optional[list[dict]] = None
     lines: Optional[list[dict]] = None
     replace: Optional[bool] = True
+    # 计算型：给 script 则执行脚本得出值（等价 run_script save_as=indicator）
+    script: Optional[str] = None
+    params: Optional[dict] = None
+    scope: Optional[str] = None
+    display_name: Optional[str] = None
 
 class SubplotCreate(BaseModel):
     name: str

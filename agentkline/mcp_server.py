@@ -33,17 +33,19 @@ def list_boards() -> str:
 
 @mcp.tool()
 def create_board(board_id: str, name: str = None, intervals: list = None) -> str:
-    """创建画板。intervals 如 ["1d","4h"]"""
+    """创建画板。intervals 为初始周期列表（如 ["1d","4h"]），首个为默认周期。
+    建板后用 set_datasource 或 run_script 灌K线。"""
     return _j(service.create_board(board_id, name, intervals))
 
 @mcp.tool()
 def delete_board(board_id: str) -> str:
-    """删除画板"""
+    """删除画板（连同其所有周期、K线、指标、副图与画线，不可恢复）。"""
     return _j(service.delete_board(board_id))
 
 @mcp.tool()
 def switch_board(board_id: str) -> str:
-    """切换当前画板"""
+    """切换当前画板，前端随之显示该画板（广播其默认周期状态）；用于 AI 主动展示。
+    增删查工具仍需显式传 board_id。"""
     return _j(service.switch_board(board_id))
 
 
@@ -55,13 +57,19 @@ def list_timeframes(board_id: str) -> str:
 
 @mcp.tool()
 def create_timeframe(board_id: str, interval: str) -> str:
-    """给画板添加时间周期，如 1d/4h/1h"""
+    """给画板添加时间周期（如 1d/4h/1h）。新周期初始为空白，需另行 set_datasource 灌数据。"""
     return _j(service.create_timeframe(board_id, interval))
 
 @mcp.tool()
 def delete_timeframe(board_id: str, timeframe: str) -> str:
-    """删除时间周期"""
+    """删除时间周期（连同其K线/指标/画线）。若删的是当前周期，自动回退到默认周期。"""
     return _j(service.delete_timeframe(board_id, timeframe))
+
+@mcp.tool()
+def switch_timeframe(board_id: str, timeframe: str) -> str:
+    """切换当前时间周期，前端随之显示该周期（广播该周期状态）；用于 AI 主动展示，类比 switch_board。
+    取数等工具仍需显式传 timeframe。"""
+    return _j(service.switch_timeframe(board_id, timeframe))
 
 
 # ============ 数据 ============
@@ -74,7 +82,11 @@ def set_datasource(board_id: str, timeframe: str, path: str, params: dict = None
 
 @mcp.tool()
 def load_history(board_id: str, timeframe: str, limit: int = 200) -> str:
-    """向左加载更早的历史K线（前插）"""
+    """向左补充更早的历史K线（前插到现有最早一根之前）。
+    场景：图表向左滚动、已加载的最早K线不够看时，回溯拉取更早行情（前端左滑也会自动触发）。
+    前提：该画板/周期已配置数据源，且数据源脚本支持 until 参数（按时间回溯取数，如 ccxt_binance_btc）；
+    数据源不支持 until（如 mock）时无数据可补，返回 prepended=0。
+    返回：prepended(本次前插根数) / total(当前总根数)。"""
     return _j(service.load_history(board_id, timeframe, limit))
 
 @mcp.tool()
@@ -87,27 +99,42 @@ def run_script(board_id: str, timeframe: str, path: str, params: dict = None,
                                  indicator_name, subplot, scope, display_name))
 
 @mcp.tool()
-def get_state(board_id: str, timeframe: str) -> str:
-    """获取画板+周期的完整状态（K线/指标/副图）"""
-    return _j(service.get_state(board_id, timeframe))
+def overview(board_id: str, timeframe: str) -> str:
+    """轻量结构总览：品种/周期/数据源/指标元信息/副图名/画线与标记计数等，
+    不含K线与指标数值数组（省token）。探查'图上有什么'首选本工具；取数用 get_kline/get_indicators。"""
+    return _j(service.get_overview(board_id, timeframe))
 
 @mcp.tool()
 def get_current_view() -> str:
     """获取用户当前视图（画板/周期/可见时间窗口），由前端上报"""
     return _j(service.current_view or {})
 
+@mcp.tool()
+def set_view_range(board_id: str, timeframe: str, from_time: int, to_time: int) -> str:
+    """让前端聚焦到指定时间窗口（AI 主动把画面拉到某段时间，如回测亏损区间）。
+    需先 switch_board/switch_timeframe 切到目标板/周期（前端只在当前显示的板/周期上应用）。
+    from_time/to_time 为毫秒时间戳（误传秒自动×1000），需 from<to 且在已加载数据范围内。
+    建议顺序：set_markers/add_drawing → switch_board → switch_timeframe → set_view_range。"""
+    return _j(service.set_view_range(board_id, timeframe, from_time, to_time))
+
 
 # ============ 指标 ============
 @mcp.tool()
 def add_indicator(board_id: str, timeframe: str, name: str, values: list = None,
                   subplot: str = None, style: dict = None, type: str = None,
-                  lines: list = None) -> str:
-    """直接推送指标（静态值或多线 lines）"""
-    return _j(service.add_indicator(board_id, timeframe, name, values, subplot, style, type, None, lines))
+                  lines: list = None, script: str = None, params: dict = None,
+                  scope: str = "board", display_name: str = None) -> str:
+    """加指标（统一入口）。
+    - 计算型：给 script（如 'macd.py'）+params，服务端执行脚本算出值；例 add_indicator(name='MACD', script='macd.py')
+    - 现成型：给 values 或多线 lines，直接落值
+    - 两者皆无会报错。"""
+    return _j(service.add_indicator(board_id, timeframe, name, values, subplot, style, type,
+                                    None, lines, True, script=script, params=params,
+                                    scope=scope, display_name=display_name))
 
 @mcp.tool()
 def delete_indicator(board_id: str, timeframe: str, name: str) -> str:
-    """删除指标"""
+    """按名称删除指标（从图表移除；查看现有指标名可用 overview）。"""
     return _j(service.delete_indicator(board_id, timeframe, name))
 
 @mcp.tool()
@@ -122,14 +149,16 @@ def update_indicator(board_id: str, timeframe: str, name: str, params: dict = No
 
 @mcp.tool()
 def list_scripts() -> str:
-    """列出可用的指标/数据源脚本"""
+    """列出 scripts/ 下可用脚本名，可作 run_script 的 path、add_indicator 的 script、
+    set_datasource 的 path。"""
     return _j({"scripts": service.script_engine.list_scripts()})
 
 
 # ============ 副图 ============
 @mcp.tool()
 def create_subplot(board_id: str, timeframe: str, name: str, height: int = 150, title: str = None) -> str:
-    """创建副图"""
+    """创建副图——主图下方的独立小面板，用于放置指标（如 MACD/KDJ/成交量）。
+    建好后用 add_indicator(subplot=名称) 把指标放进该副图；查看用 list_subplots。"""
     return _j(service.create_subplot(board_id, timeframe, name, height, title))
 
 @mcp.tool()
@@ -141,8 +170,9 @@ def delete_subplot(board_id: str, timeframe: str, name: str) -> str:
 # ============ 标记 ============
 @mcp.tool()
 def set_markers(board_id: str, timeframe: str, markers: list) -> str:
-    """在K线主图设置标记（覆盖式）。time 为毫秒时间戳，需与K线bar时间对齐。
-    字段: time/position(aboveBar|belowBar)/color/shape(arrowUp|arrowDown)/text"""
+    """在K线主图设置标记（覆盖式，替换该周期已有全部标记；读取用 get_markers）。
+    单个标记字段：time(毫秒，需与某根K线bar时间对齐)/position(aboveBar|belowBar|inBar)/
+    color/shape(circle|square|arrowUp|arrowDown)/text。"""
     return _j(service.set_markers(board_id, timeframe, markers))
 
 @mcp.tool()
@@ -175,9 +205,29 @@ def list_drawings(board_id: str, timeframe: str) -> str:
     return _j(service.list_drawings(board_id, timeframe))
 
 @mcp.tool()
-def get_data(board_id: str, timeframe: str, start: int = None, end: int = None) -> str:
-    """获取区间K线+指标值+划线。不传start/end=用户当前view窗口。时间毫秒。"""
-    return _j(service.get_data(board_id, timeframe, start, end))
+def list_subplots(board_id: str, timeframe: str) -> str:
+    """列出画板+周期的所有副图"""
+    return _j(service.list_subplots(board_id, timeframe))
+
+@mcp.tool()
+def get_kline(board_id: str, timeframe: str, start: int = None, end: int = None) -> str:
+    """获取区间K线（含成交量）。不传start/end=用户当前view窗口。
+    start/end 为毫秒时间戳 epoch_ms（如 1755000000000）；若误传秒（<1e11）会自动×1000。"""
+    return _j(service.get_kline(board_id, timeframe, start, end))
+
+@mcp.tool()
+def get_indicators(board_id: str, timeframe: str, start: int = None, end: int = None,
+                   names: str = None) -> str:
+    """获取区间指标值，范围逻辑同 get_kline（不传=当前view）。
+    names 逗号分隔可指定一个/多个指标（如 'MACD,sma_10'），不传=全部。"""
+    name_list = [x.strip() for x in names.split(",") if x.strip()] if names else None
+    return _j(service.get_indicators(board_id, timeframe, start, end, name_list))
+
+@mcp.tool()
+def get_markers(board_id: str, timeframe: str) -> str:
+    """读取主图标记（买卖点等）。返回标记数组，字段同 set_markers（time/position/color/shape/text）；
+    设置/覆盖用 set_markers。"""
+    return _j(service.get_markers(board_id, timeframe))
 
 
 # ============ 截图 ============

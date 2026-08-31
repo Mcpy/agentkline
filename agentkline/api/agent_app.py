@@ -30,7 +30,7 @@ async def _lifespan(app: FastAPI):
 
 
 def create_agent_app() -> FastAPI:
-    app = FastAPI(title="AgentKline Agent", version="0.3.0", lifespan=_lifespan)
+    app = FastAPI(title="AgentKline Agent", version="0.3.1", lifespan=_lifespan)
 
     @app.middleware("http")
     async def require_token(request, call_next):
@@ -42,6 +42,7 @@ def create_agent_app() -> FastAPI:
 
     routes.register_read(app)
     routes.register_exec(app)
+    routes.register_manage(app)
 
     # MCP over Streamable HTTP，共享同一 service
     try:

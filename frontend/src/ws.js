@@ -1,7 +1,7 @@
 import { state } from './state.js';
 import { log } from './log.js';
 import { renderBoardTabs, renderTimeframeTabs, switchTimeframe } from './ui.js';
-import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnapshot } from './render.js';
+import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnapshot, setVisibleTimeRange } from './render.js';
 
     // ============================================================
     // WebSocket
@@ -170,6 +170,15 @@ import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnap
                     renderChart();
                 }
                 log('ws', `timeframe_switch: ${msg.board_id}/${msg.timeframe}`);
+                break;
+            case 'view_set':
+                if (msg.board_id === state.currentBoard && msg.timeframe === state.currentTimeframe) {
+                    // 服务端已归一到毫秒，这里转秒给 LWC
+                    const fromSec = Math.floor((msg.from_time < 1e11 ? msg.from_time * 1000 : msg.from_time) / 1000);
+                    const toSec = Math.ceil((msg.to_time < 1e11 ? msg.to_time * 1000 : msg.to_time) / 1000);
+                    setVisibleTimeRange(fromSec, toSec);
+                }
+                log('ws', `view_set: ${msg.board_id}/${msg.timeframe} [${msg.from_time},${msg.to_time}]`);
                 break;
             case 'subplot_create':
                 if (msg.board_id === state.currentBoard && msg.timeframe === state.currentTimeframe) {

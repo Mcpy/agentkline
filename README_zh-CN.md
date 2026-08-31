@@ -30,6 +30,7 @@ AgentKline 不是给人"点来点去"的图表工具，而是让 **AI 全权掌�
 - 🔌 **可插拔数据源** — 数据源同样是脚本（内置 mock、ccxt 等），可轮询实时刷新
 - ✏️ **划线与标记** — 水平线 / 趋势线、买卖标记，WS 实时同步到所有客户端
 - 📸 **快照** — 服务端合成截图（含 DOM 覆盖层：最新价标签 / OHLC / 图例），agent 可直接读图
+- 🎯 **AI 引导呈现** — `switch_board` / `switch_timeframe` / `set_view_range` 让 AI 把用户屏幕带到任意画板/周期/时间段（如回测回撤区间），标记与划线已画好，无需人工翻找
 - 🤖 **Agent 原生** — 双端口架构 + 标准 MCP（Streamable HTTP），AI 可读、可写、可执行
 
 ## 🏗 架构：双端口
@@ -67,8 +68,12 @@ cd frontend && npm install && npm run build && cd ..
 }
 ```
 
-常用工具：`list_boards` / `get_data` / `run_script` / `add_drawing` / `set_markers` /
+常用工具：`overview` / `get_kline` / `get_indicators` / `add_indicator` / `run_script` /
+`add_drawing` / `set_markers` / `set_view_range` /
 `take_snapshot`（返回标准 image 块，多模态模型可直接读图）。
+
+读取接口按省 token 拆分：`overview`（仅结构）/ `get_kline`（K线+成交量）/
+`get_indicators`（指标值，可过滤）/ `get_markers` / `list_drawings`。
 
 ## ⚙️ 配置
 

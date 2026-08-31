@@ -16,6 +16,14 @@ from .datasource import DataSourceManager
 logger = logging.getLogger("agentkline.service")
 
 
+def _to_ms(v):
+    """时间戳秒→毫秒自适应：|v|<1e11 视为秒（epoch_s），×1000；否则视为已是毫秒。"""
+    if v is None:
+        return None
+    v = int(v)
+    return v * 1000 if abs(v) < 10**11 else v
+
+
 class AgentKlineService:
     """AgentKline 业务核心"""
 
@@ -114,7 +122,18 @@ class AgentKlineService:
 
     # ============ 指标 ============
     def add_indicator(self, board_id, timeframe, name, values=None, subplot=None,
-                      style=None, type=None, markers=None, lines=None, replace=True):
+                      style=None, type=None, markers=None, lines=None, replace=True,
+                      script=None, params=None, scope="board", display_name=None):
+        """加指标（统一入口）。
+        - 给 script：计算型 → 委托 run_script(save_as=indicator) 执行脚本得出值
+        - 给 values/lines：现成型 → 直接落值
+        - 两者皆无：返回 400 空指标错误"""
+        if script:
+            return self.run_script(board_id, timeframe, script, params, save_as="indicator",
+                                   indicator_name=name, subplot=subplot, scope=scope,
+                                   display_name=display_name)
+        if values is None and not lines:
+            return {"error": "EMPTY_INDICATOR: 需要 script（计算型）或 values/lines（现成型）"}
         existing = self.state.get_indicator(board_id, timeframe, name)
         if existing and not replace:
             return {"error": "INDICATOR_EXISTS"}
@@ -343,29 +362,52 @@ class AgentKlineService:
     def list_drawings(self, board_id, timeframe):
         return {"drawings": self.state.list_drawings(board_id, timeframe)}
 
-    # ============ 区间数据（默认当前 view） ============
-    def get_data(self, board_id, timeframe, start=None, end=None):
+    # ============ 区间只读（默认当前 view，秒→毫秒自适应） ============
+    def _resolve_range(self, board_id, timeframe, start, end):
+        """返回 (ohlcv, i0, i1)；不传 start/end 默认当前 view 窗口。"""
         ohlcv = self.state.get_ohlcv(board_id, timeframe)
         if not ohlcv:
-            return {"error": "No data"}
+            return None, 0, -1
+        start = _to_ms(start)
+        end = _to_ms(end)
         n = len(ohlcv)
-        # 默认范围 = 当前 view（若匹配），否则全量
         if start is None and end is None:
             view = self.current_view
             if view and view.get("board_id") == board_id and view.get("timeframe") == timeframe \
                     and view.get("from_time") and view.get("to_time"):
                 start, end = view["from_time"], view["to_time"]
-        i0 = 0
-        i1 = n - 1
+        i0, i1 = 0, n - 1
         if start is not None:
             i0 = next((i for i, b in enumerate(ohlcv) if b["timestamp"] >= start), 0)
         if end is not None:
             i1 = next((i for i in range(n - 1, -1, -1) if ohlcv[i]["timestamp"] <= end), n - 1)
-        sliced = ohlcv[i0:i1 + 1]
+        return ohlcv, i0, i1
 
-        indicators = {}
+    def get_kline(self, board_id, timeframe, start=None, end=None):
+        """纯 K 线（含成交量）区间切片；不传范围=当前 view。"""
+        ohlcv, i0, i1 = self._resolve_range(board_id, timeframe, start, end)
+        if not ohlcv:
+            return {"error": "No data"}
+        sliced = ohlcv[i0:i1 + 1]
         tf_state = self.state.get_board(board_id).get_tf(timeframe)
+        return {
+            "board_id": board_id, "timeframe": timeframe, "symbol": tf_state.symbol,
+            "range": {"from": sliced[0]["timestamp"] if sliced else None,
+                      "to": sliced[-1]["timestamp"] if sliced else None},
+            "ohlcv": sliced,
+        }
+
+    def get_indicators(self, board_id, timeframe, start=None, end=None, names=None):
+        """指标值区间切片，范围逻辑同 get_kline；names 指定一个/多个指标，默认全部。"""
+        ohlcv, i0, i1 = self._resolve_range(board_id, timeframe, start, end)
+        if not ohlcv:
+            return {"error": "No data"}
+        tf_state = self.state.get_board(board_id).get_tf(timeframe)
+        wanted = set(names) if names else None
+        indicators = {}
         for name, ind in tf_state.indicators.items():
+            if wanted is not None and name not in wanted:
+                continue
             if ind.get("lines"):
                 indicators[name] = {"lines": [
                     {"name": l.get("name"), "type": l.get("type"),
@@ -373,15 +415,67 @@ class AgentKlineService:
                     for l in ind["lines"]]}
             else:
                 indicators[name] = {"values": (ind.get("values") or [])[i0:i1 + 1]}
+        return {"board_id": board_id, "timeframe": timeframe,
+                "range": {"from": ohlcv[i0]["timestamp"] if i0 <= i1 else None,
+                          "to": ohlcv[i1]["timestamp"] if i0 <= i1 else None},
+                "indicators": indicators}
 
+    def get_markers(self, board_id, timeframe):
+        """读取主图标记。"""
+        board = self.state.get_board(board_id)
+        tf_state = board.get_tf(timeframe) if board else None
+        if not tf_state:
+            return {"error": "No such board/timeframe"}
+        return {"board_id": board_id, "timeframe": timeframe, "markers": tf_state.markers}
+
+    def get_overview(self, board_id, timeframe):
+        """轻量结构总览：只回结构与计数，不回 K 线/指标数值数组（省 token）。"""
+        board = self.state.get_board(board_id)
+        tf_state = board.get_tf(timeframe) if board else None
+        if not tf_state:
+            return {"error": "No such board/timeframe"}
+        ind_meta = {}
+        for name, ind in tf_state.indicators.items():
+            ind_meta[name] = {
+                "type": ind.get("type"), "subplot": ind.get("subplot"),
+                "display_name": ind.get("display_name"), "params": ind.get("params"),
+                "kind": "lines" if ind.get("lines") else "values",
+                "dynamic": bool(ind.get("script_path")),
+            }
+        view = self.current_view if (self.current_view
+                                     and self.current_view.get("board_id") == board_id
+                                     and self.current_view.get("timeframe") == timeframe) else None
         return {
             "board_id": board_id, "timeframe": timeframe,
-            "range": {"from": sliced[0]["timestamp"] if sliced else None,
-                      "to": sliced[-1]["timestamp"] if sliced else None},
-            "ohlcv": sliced,
-            "indicators": indicators,
-            "drawings": self.state.list_drawings(board_id, timeframe),
+            "symbol": tf_state.symbol, "interval": tf_state.interval,
+            "last_updated": tf_state.last_updated, "bars": len(tf_state.ohlcv),
+            "view": {"from_time": view.get("from_time"), "to_time": view.get("to_time")} if view else None,
+            "datasource": self.datasource.get(board_id, timeframe),
+            "indicators": ind_meta,
+            "subplots": [s.get("name") for s in tf_state.subplots.values()],
+            "markers_count": len(tf_state.markers),
+            "drawings_count": len(tf_state.drawings),
         }
+
+    def set_view_range(self, board_id, timeframe, from_time, to_time):
+        """让前端聚焦到指定时间窗口（AI 主动把画面拉到某段时间，如回测亏损区间）。
+        写入 current_view 并广播 view_set；前端仅在当前显示的板/周期上应用。"""
+        board = self.state.get_board(board_id)
+        tf_state = board.get_tf(timeframe) if board else None
+        if not tf_state:
+            return {"error": "No such board/timeframe"}
+        from_time = _to_ms(from_time)
+        to_time = _to_ms(to_time)
+        if from_time is None or to_time is None or from_time >= to_time:
+            return {"error": "Invalid range: need from < to"}
+        self.current_view = {"board_id": board_id, "timeframe": timeframe,
+                             "from_time": from_time, "to_time": to_time,
+                             "updated_at": datetime.now().isoformat()}
+        self._bc({"type": "view_set", "board_id": board_id, "timeframe": timeframe,
+                  "from_time": from_time, "to_time": to_time})
+        return {"status": "ok", "board_id": board_id, "timeframe": timeframe,
+                "from_time": from_time, "to_time": to_time}
+
     def create_subplot(self, board_id, timeframe, name, height=150, title=None):
         result = self.state.create_subplot(board_id, timeframe, name, height, title)
         if not result.get("error"):

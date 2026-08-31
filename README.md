@@ -28,6 +28,7 @@ while "understanding & deciding" stays with the human.
 - 🔌 **Pluggable datasources** — datasources are scripts too (mock, ccxt, …), with optional realtime polling
 - ✏️ **Drawings & markers** — hline / trendline, buy-sell markers, synced to all clients over WebSocket
 - 📸 **Snapshot** — server-composed screenshots (incl. DOM overlays: last-price label / OHLC / legends) that agents can read directly
+- 🎯 **AI-guided walkthrough** — `switch_board` / `switch_timeframe` / `set_view_range` let the AI bring the user's screen to any board, timeframe and time window (e.g. a backtest drawdown), with its markers & drawings already on it — no manual hunting
 - 🤖 **Agent-native** — dual-port architecture + standard MCP (Streamable HTTP): AI can read, write and execute
 
 ## 🏗 Architecture: dual-port
@@ -65,8 +66,12 @@ cd frontend && npm install && npm run build && cd ..
 }
 ```
 
-Common tools: `list_boards` / `get_data` / `run_script` / `add_drawing` / `set_markers` /
+Common tools: `overview` / `get_kline` / `get_indicators` / `add_indicator` / `run_script` /
+`add_drawing` / `set_markers` / `set_view_range` /
 `take_snapshot` (returns a standard image block — multimodal models can read the chart directly).
+
+Read APIs are split for token efficiency: `overview` (structure only) / `get_kline` (candles+volume) /
+`get_indicators` (values, filterable) / `get_markers` / `list_drawings`.
 
 ## ⚙️ Configuration
 

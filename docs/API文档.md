@@ -74,10 +74,14 @@ K 线对象：`{timestamp, open, high, low, close, volume}`。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/indicator?board_id&timeframe` | 推指标（单线/多线），`replace` 默认 true |
+| POST | `/api/indicator?board_id&timeframe` | **加指标（统一入口）**：`script` 计算型 / `values`·`lines` 现成型，`replace` 默认 true |
 | DELETE | `/api/indicator/{name}?board_id&timeframe` | 删除指标 |
 | POST | `/api/indicator/refresh/{name}?board_id&timeframe` | 手动重算（需有脚本） |
 | POST | `/api/indicator/update/{name}?board_id&timeframe` | **统一更新**：改参数/样式/显示名（见下） |
+
+**加指标两种模式**（二选一，皆无则 `400 EMPTY_INDICATOR`）：
+- 计算型：给 `script`（如 `macd.py`）+`params`，服务端执行脚本算出值；例 `{"name":"MACD","script":"macd.py"}`
+- 现成型：给 `values`（单线）或 `lines`（多线），直接落值
 
 同名指标：`replace=true`（默认）覆盖；`replace=false` 且已存在 → `400 INDICATOR_EXISTS`。
 
@@ -107,24 +111,35 @@ K 线对象：`{timestamp, open, high, low, close, volume}`。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
+| GET | `/api/scripts` | 列出可用指标/数据源脚本（与 MCP `list_scripts` 对齐） |
 | POST | `/api/run-script?board_id&timeframe` | 执行脚本 `{path, params?, save_as?, indicator_name?, subplot?, scope?, display_name?}` |
 | POST | `/api/board/{id}/timeframe/{tf}/datasource` | 配置数据源 `{path, params?, poll_interval?, indicators?}` |
 | GET | `/api/board/{id}/timeframe/{tf}/datasource` | 查看数据源状态 |
 | DELETE | `/api/board/{id}/timeframe/{tf}/datasource` | 停止数据源 |
 | POST | `/api/board/{id}/timeframe/{tf}/refresh` | 手动刷新（重拉K线+重算指标） |
-| POST | `/api/board/{id}/timeframe/{tf}/history` | 向左加载历史 `{limit?}`（前插） |
+| POST | `/api/board/{id}/timeframe/{tf}/history` | 向左补更早K线（前插）`{limit?}`；需数据源支持 `until` 回溯，否则 `prepended=0` |
 
 `run-script.save_as`：`ohlcv`（存K线）/ `indicator`（存指标）/ 不传（只返回数据）。
 `run-script.scope`（仅 indicator）：`board`=作用于所有周期（默认）/ `timeframe`=仅本周期。
 `run-script.display_name`：可选显示名覆盖；不传则按「根名(参数)」自动命名。
 `datasource.poll_interval`：秒，>0 则轮询实时刷新；不传为一次性。
 
-## 7. 状态 / 配置
+## 7. 状态 / 只读查询
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/state?board_id&timeframe` | 完整状态（ohlcv/indicators/subplots/markers） |
+| GET | `/api/overview?board_id&timeframe` | **轻量结构总览**：指标元信息/副图/数据源/画线·标记计数，无数值数组（省 token） |
+| GET | `/api/kline?board_id&timeframe&start&end` | 纯 K 线（含成交量）区间切片；不传范围=当前 view |
+| GET | `/api/indicators?board_id&timeframe&start&end&names` | 指标值区间切片；`names` 逗号分隔可指定一个/多个，默认全部 |
+| GET | `/api/markers?board_id&timeframe` | 读取主图标记 |
+| GET | `/api/drawings?board_id&timeframe` | 读取画线 |
+| GET | `/api/subplots?board_id&timeframe` | 读取副图 |
+| GET | `/api/state?board_id&timeframe` | **完整渲染快照**（全量，前端启动用；费 token，agent 请优先用上面分项） |
+| GET | `/api/view` | 用户当前视图窗口 |
+| GET | `/api/snapshot?board_id&timeframe` | 读取最新快照（image/png） |
 | GET | `/api/config` | 当前配置（只读） |
+
+`start`/`end` 为**毫秒**时间戳，误传秒（<1e11）自动×1000；`/api/kline` 与 `/api/indicators` 范围逻辑一致。
 
 ---
 
@@ -204,15 +219,17 @@ agent 操作实时推 WS 到浏览器。agent 端口全量鉴权。
 | `list_timeframes` / `create_timeframe` / `delete_timeframe` | 周期管理 |
 | `set_datasource` | 配置数据源（可轮询） |
 | `load_history` | 向左加载历史 |
-| `run_script` | 执行脚本（save_as: ohlcv/indicator/None；display_name 覆盖自动命名） |
-| `get_state` | 获取完整状态 |
-| `add_indicator` / `delete_indicator` / `update_indicator` | 指标增删/改(参数/样式/显示名) |
+| `run_script` | 通用脚本执行（save_as: ohlcv/indicator/None）；加指标更推荐用 `add_indicator(script=…)` |
+| `overview` | **轻量结构总览**（无数值数组，省token）：探查"图上有什么"首选 |
+| `add_indicator` | **加指标统一入口**：`script`=脚本计算 / `values`·`lines`=现成值（两者皆无报错） |
+| `delete_indicator` / `update_indicator` | 指标删/改(参数/样式/显示名) |
 | `list_scripts` | 列出可用脚本 |
 | `create_subplot` / `delete_subplot` | 副图增删 |
 | `set_markers` | 主图标记（time 为毫秒，需与 bar 对齐；秒会自动×1000） |
 | `take_snapshot` / `get_snapshot` | 截图（触发前端截图/读取最新，含图例+最新价标签） |
 
-划线/取数：`add_drawing` / `update_drawing` / `delete_drawing` / `list_drawings` / `get_data` / `get_current_view`。
+划线/取数：`add_drawing` / `update_drawing` / `delete_drawing` / `list_drawings` /
+`get_kline` / `get_indicators` / `get_markers` / `list_subplots` / `get_current_view`。
 时间单位统一为**毫秒**（ohlcv/划线/markers），仅渲染边界转秒。
 截图依赖浏览器连接 `/ws`；合成图含 主图+成交量+副图 拼接及 OHLC/指标图例/最新价标签。
 

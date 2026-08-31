@@ -3,6 +3,7 @@
 - register_page / register_ws      : 页面 + WebSocket（仅 web）
 - register_read                    : 只读（两端口都有）
 - register_user_write              : 用户交互写（web 开放）
+- register_manage                  : 管理删改：删板/删周期/删改指标（两端口都有）
 - register_exec                    : 执行/管理类（仅 agent，全量鉴权）
 """
 from datetime import datetime
@@ -80,12 +81,39 @@ def register_read(app):
         board_id, timeframe = _resolve(board_id, timeframe)
         return service.get_state(board_id, timeframe)
 
-    @app.get("/api/data")
-    async def get_data(board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None),
-                       start: Optional[int] = Query(None), end: Optional[int] = Query(None)):
+    @app.get("/api/kline")
+    async def get_kline(board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None),
+                        start: Optional[int] = Query(None), end: Optional[int] = Query(None)):
+        """纯 K 线（含成交量）区间切片；不传范围=当前 view"""
         board_id, timeframe = _resolve(board_id, timeframe)
-        r = service.get_data(board_id, timeframe, start, end)
+        r = service.get_kline(board_id, timeframe, start, end)
         if r.get("error"): raise HTTPException(400, r["error"])
+        return r
+
+    @app.get("/api/indicators")
+    async def get_indicators(board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None),
+                             start: Optional[int] = Query(None), end: Optional[int] = Query(None),
+                             names: Optional[str] = Query(None)):
+        """指标值区间切片；names 逗号分隔可指定一个/多个，默认全部"""
+        board_id, timeframe = _resolve(board_id, timeframe)
+        name_list = [x.strip() for x in names.split(",") if x.strip()] if names else None
+        r = service.get_indicators(board_id, timeframe, start, end, name_list)
+        if r.get("error"): raise HTTPException(400, r["error"])
+        return r
+
+    @app.get("/api/markers")
+    async def get_markers(board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
+        board_id, timeframe = _resolve(board_id, timeframe)
+        r = service.get_markers(board_id, timeframe)
+        if r.get("error"): raise HTTPException(404, r["error"])
+        return r
+
+    @app.get("/api/overview")
+    async def get_overview(board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
+        """轻量结构总览（不含 K 线/指标数值数组）"""
+        board_id, timeframe = _resolve(board_id, timeframe)
+        r = service.get_overview(board_id, timeframe)
+        if r.get("error"): raise HTTPException(404, r["error"])
         return r
 
     @app.get("/api/subplots")
@@ -100,7 +128,7 @@ def register_read(app):
 
     @app.get("/api/config")
     async def get_config():
-        return {"scripts_dir": str(SCRIPTS_DIR), "version": "0.2.0"}
+        return {"scripts_dir": str(SCRIPTS_DIR), "version": "0.3.1"}
 
     @app.get("/api/view")
     async def get_view():
@@ -141,6 +169,22 @@ def register_user_write(app):
         if r.get("error"): raise HTTPException(404, r["error"])
         return r
 
+    @app.post("/api/board/{board_id}/timeframe/{tf}/history")
+    async def load_history(board_id: str, tf: str, req: dict = None):
+        return service.load_history(board_id, tf, (req or {}).get("limit", 200))
+
+    @app.post("/api/view")
+    async def report_view(req: dict):
+        service.current_view = {**req, "updated_at": datetime.now().isoformat()}
+        return {"status": "ok"}
+
+    @app.post("/api/snapshot")
+    async def push_snapshot(req: SnapshotPush):
+        return _save_snapshot(req)
+
+
+# ============ 管理（删板/删周期/删改指标；web 与 agent 均挂载） ============
+def register_manage(app):
     @app.delete("/api/indicator/{name}")
     async def delete_indicator(name: str, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
         board_id, timeframe = _resolve(board_id, timeframe)
@@ -168,19 +212,6 @@ def register_user_write(app):
         if r.get("error"): raise HTTPException(404, r["error"])
         return r
 
-    @app.post("/api/board/{board_id}/timeframe/{tf}/history")
-    async def load_history(board_id: str, tf: str, req: dict = None):
-        return service.load_history(board_id, tf, (req or {}).get("limit", 200))
-
-    @app.post("/api/view")
-    async def report_view(req: dict):
-        service.current_view = {**req, "updated_at": datetime.now().isoformat()}
-        return {"status": "ok"}
-
-    @app.post("/api/snapshot")
-    async def push_snapshot(req: SnapshotPush):
-        return _save_snapshot(req)
-
 
 def _save_snapshot(req: SnapshotPush):
     import base64 as b64
@@ -197,6 +228,19 @@ def _save_snapshot(req: SnapshotPush):
 
 # ============ 执行/管理（agent 全量鉴权） ============
 def register_exec(app):
+    @app.get("/api/scripts")
+    async def list_scripts():
+        """列出可用指标/数据源脚本（供纯 REST agent；与 MCP list_scripts 对齐）"""
+        return {"scripts": service.script_engine.list_scripts()}
+
+    @app.post("/api/view/range")
+    async def set_view_range(req: dict, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
+        """让前端聚焦到指定时间窗口 {from, to}（毫秒；AI 主动展示某段时间）"""
+        board_id, timeframe = _resolve(board_id, timeframe)
+        r = service.set_view_range(board_id, timeframe, req.get("from"), req.get("to"))
+        if r.get("error"): raise HTTPException(400, r["error"])
+        return r
+
     @app.post("/api/run-script")
     async def run_script(req: ScriptRun, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
         board_id, timeframe = _resolve(board_id, timeframe)
@@ -232,7 +276,9 @@ def register_exec(app):
     async def push_indicator(req: IndicatorPush, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
         board_id, timeframe = _resolve(board_id, timeframe)
         r = service.add_indicator(board_id, timeframe, req.name, req.values, req.subplot,
-                                  req.style, req.type, req.markers, req.lines, req.replace)
+                                  req.style, req.type, req.markers, req.lines, req.replace,
+                                  script=req.script, params=req.params, scope=req.scope or "board",
+                                  display_name=req.display_name)
         if r.get("error"): raise HTTPException(400, r["error"])
         return r
 

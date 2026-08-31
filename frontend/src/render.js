@@ -1017,4 +1017,20 @@ import { attachDrawingInteraction } from './draw_interact.js';
         }
     }
 
-export { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnapshot };
+// 程序化设置可见时间窗口（秒），并同步副图；_programmaticRange 防止误触发历史加载
+function setVisibleTimeRange(fromSec, toSec) {
+    const main = state.charts.main;
+    if (!main || !state.ohlcv.length || !(toSec > fromSec)) return;
+    try {
+        state._programmaticRange = true;
+        main.timeScale().setVisibleRange({ from: fromSec, to: toSec });
+        const lr = main.timeScale().getVisibleLogicalRange();
+        Object.entries(state.charts).forEach(([key, other]) => {
+            if (key !== 'main' && lr) other.timeScale().setVisibleLogicalRange(lr);
+        });
+    } catch (e) {
+        log('render', `setVisibleTimeRange failed: ${e && e.message ? e.message : e}`);
+    }
+}
+
+export { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnapshot, setVisibleTimeRange };
