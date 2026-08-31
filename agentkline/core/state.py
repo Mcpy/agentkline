@@ -2,8 +2,20 @@
 AgentKline - 内存状态管理
 管理画板、时间周期、K线、指标、副图
 """
+import math
 from typing import Optional
 from datetime import datetime
+
+
+def _clean(obj):
+    """NaN/Inf -> None，防止非法 JSON 破坏前端 JSON.parse。递归处理 list/dict。"""
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _clean(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_clean(v) for v in obj]
+    return obj
 
 
 class TimeframeState:
@@ -185,6 +197,10 @@ class StateManager:
             return {"error": f"Board '{board_id}' not found"}
         tf_state = board.ensure_tf(timeframe)
         existing = tf_state.indicators.get(name, {})
+        # NaN/Inf 清洗（用户脚本可能产出，避免非法 JSON）
+        values = _clean(values)
+        lines = _clean(lines)
+        markers = _clean(markers)
         # 合并更新：只覆盖非 None 的字段，保留其余（重算时不丢 subplot/style/script_path）
         tf_state.indicators[name] = {
             "name": name,

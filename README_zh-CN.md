@@ -31,6 +31,7 @@ AgentKline 不是给人"点来点去"的图表工具，而是让 **AI 全权掌�
 - ✏️ **划线与标记** — 水平线 / 趋势线、买卖标记，WS 实时同步到所有客户端
 - 📸 **快照** — 服务端合成截图（含 DOM 覆盖层：最新价标签 / OHLC / 图例），agent 可直接读图
 - 🎯 **AI 引导呈现** — `switch_board` / `switch_timeframe` / `set_view_range` 让 AI 把用户屏幕带到任意画板/周期/时间段（如回测回撤区间），标记与划线已画好，无需人工翻找
+- 📚 **内置 Skills** — `skills/` 随仓库发布领域知识（`script-authoring` / `ai-walkthrough`），经 `list_skills` / `load_skill` 按需加载，agent 无需试错即可编写合法脚本
 - 🤖 **Agent 原生** — 双端口架构 + 标准 MCP（Streamable HTTP），AI 可读、可写、可执行
 
 ## 🏗 架构：双端口
@@ -69,8 +70,11 @@ cd frontend && npm install && npm run build && cd ..
 ```
 
 常用工具：`overview` / `get_kline` / `get_indicators` / `add_indicator` / `run_script` /
-`add_drawing` / `set_markers` / `set_view_range` /
+`add_drawing` / `set_markers` / `set_view_range` / `list_skills` / `load_skill` /
 `take_snapshot`（返回标准 image 块，多模态模型可直接读图）。
+
+健壮性：越界标记时间会被丢弃并在 `dropped` 数组回报（不静默）；指标 `NaN`/`Inf`
+清洗为 `null`，保证浏览器 JSON 合法。
 
 读取接口按省 token 拆分：`overview`（仅结构）/ `get_kline`（K线+成交量）/
 `get_indicators`（指标值，可过滤）/ `get_markers` / `list_drawings`。
@@ -88,6 +92,7 @@ cd frontend && npm install && npm run build && cd ..
 
 - `docs/API文档.md` — REST / WS / MCP 全量接口
 - `docs/开发文档.md` — 模块结构、构建与部署
+- `docs/脚本编写指南.md` / `skills/script-authoring.md` — 如何编写合法的指标/数据源脚本
 
 ## License
 

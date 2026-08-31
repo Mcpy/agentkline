@@ -1,6 +1,6 @@
 # AgentKline API 文档
 
-> 版本：v0.2.0 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server
+> 版本：v0.3.2 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server
 > 基础地址（本地）：`http://localhost:8000`（或 `./start.sh <port>` 指定）
 
 AgentKline 是一个交互式 K 线画板：多画板 × 多时间周期，全脚本化数据源/指标，实时轮询，

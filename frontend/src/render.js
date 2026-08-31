@@ -256,11 +256,15 @@ import { attachDrawingInteraction } from './draw_interact.js';
 
         // Markers on candlestick (v5 API: createSeriesMarkers)
         if (state.markers && state.markers.length > 0) {
+            // 越界过滤：范围外标记不送进 LWC（否则吸附首/末根画错位置），与后端校验双保险
+            const lo = candleData.length ? candleData[0].time : -Infinity;
+            const hi = candleData.length ? candleData[candleData.length - 1].time : Infinity;
             const markers = state.markers.map(m => ({
                 ...m,
                 // 单位自适应：<1e11 视为秒→转毫秒，再统一 /1000 给 LWC(秒)
                 time: Math.floor((m.time < 1e11 ? m.time * 1000 : m.time) / 1000)
-            })).sort((a, b) => a.time - b.time);
+            })).filter(m => m.time >= lo && m.time <= hi)
+              .sort((a, b) => a.time - b.time);
             LightweightCharts.createSeriesMarkers(candleSeries, markers);
         }
 

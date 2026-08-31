@@ -128,7 +128,7 @@ def register_read(app):
 
     @app.get("/api/config")
     async def get_config():
-        return {"scripts_dir": str(SCRIPTS_DIR), "version": "0.3.1"}
+        return {"scripts_dir": str(SCRIPTS_DIR), "version": "0.3.2"}
 
     @app.get("/api/view")
     async def get_view():

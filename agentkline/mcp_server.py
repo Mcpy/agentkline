@@ -12,6 +12,8 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent
 
+from .core import skills as _skills
+
 # service 由 api.app 绑定为与 Web 共享的同一实例
 service = None
 
@@ -172,7 +174,9 @@ def delete_subplot(board_id: str, timeframe: str, name: str) -> str:
 def set_markers(board_id: str, timeframe: str, markers: list) -> str:
     """在K线主图设置标记（覆盖式，替换该周期已有全部标记；读取用 get_markers）。
     单个标记字段：time(毫秒，需与某根K线bar时间对齐)/position(aboveBar|belowBar|inBar)/
-    color/shape(circle|square|arrowUp|arrowDown)/text。"""
+    color/shape(circle|square|arrowUp|arrowDown)/text。
+    越界处理：time 超出已加载K线范围的标记会被**丢弃**（不静默），并在返回的
+    dropped 数组中列出（含 time 与原因），便于调用者自我纠正。"""
     return _j(service.set_markers(board_id, timeframe, markers))
 
 @mcp.tool()
@@ -267,3 +271,17 @@ def get_snapshot(board_id: str = None, timeframe: str = None):
 
 
 
+
+
+@mcp.tool()
+def list_skills() -> str:
+    """列出可用 skills（name+description）。先用它发现，再用 load_skill 读全文。
+    skills 随项目仓库发布，教 agent 编写合法脚本/使用引导呈现等领域知识。"""
+    return _j(_skills.list_skills())
+
+
+@mcp.tool()
+def load_skill(name: str) -> str:
+    """加载指定 skill 的完整文档（如 script-authoring / ai-walkthrough）。
+    写新指标/数据源脚本前请先 load_skill('script-authoring')。"""
+    return _j(_skills.load_skill(name))

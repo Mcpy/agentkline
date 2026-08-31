@@ -29,6 +29,7 @@ while "understanding & deciding" stays with the human.
 - ✏️ **Drawings & markers** — hline / trendline, buy-sell markers, synced to all clients over WebSocket
 - 📸 **Snapshot** — server-composed screenshots (incl. DOM overlays: last-price label / OHLC / legends) that agents can read directly
 - 🎯 **AI-guided walkthrough** — `switch_board` / `switch_timeframe` / `set_view_range` let the AI bring the user's screen to any board, timeframe and time window (e.g. a backtest drawdown), with its markers & drawings already on it — no manual hunting
+- 📚 **Bundled skills** — on-demand domain knowledge shipped in `skills/` (`script-authoring`, `ai-walkthrough`), loaded via `list_skills` / `load_skill` so any agent can author legal scripts without trial-and-error
 - 🤖 **Agent-native** — dual-port architecture + standard MCP (Streamable HTTP): AI can read, write and execute
 
 ## 🏗 Architecture: dual-port
@@ -67,8 +68,11 @@ cd frontend && npm install && npm run build && cd ..
 ```
 
 Common tools: `overview` / `get_kline` / `get_indicators` / `add_indicator` / `run_script` /
-`add_drawing` / `set_markers` / `set_view_range` /
+`add_drawing` / `set_markers` / `set_view_range` / `list_skills` / `load_skill` /
 `take_snapshot` (returns a standard image block — multimodal models can read the chart directly).
+
+Robustness: out-of-range marker times are dropped and reported in a `dropped` array (never silent);
+indicator `NaN`/`Inf` are sanitized to `null` so JSON stays valid for the browser.
 
 Read APIs are split for token efficiency: `overview` (structure only) / `get_kline` (candles+volume) /
 `get_indicators` (values, filterable) / `get_markers` / `list_drawings`.
@@ -86,6 +90,7 @@ See `config.example.yaml`. Highlights:
 
 - `docs/API文档.md` — full REST / WS / MCP reference
 - `docs/开发文档.md` — module layout, build & deployment
+- `docs/脚本编写指南.md` / `skills/script-authoring.md` — how to write legal indicator & datasource scripts
 
 ## License
 

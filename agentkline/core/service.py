@@ -107,10 +107,25 @@ class AgentKlineService:
         return result
 
     def set_markers(self, board_id, timeframe, markers):
+        markers = list(markers or [])
+        dropped = []
+        bars = self.state.get_ohlcv(board_id, timeframe)
+        if bars:  # 有K线才做范围校验；越界丢弃并回报，不静默吞掉
+            lo, hi = bars[0]["timestamp"], bars[-1]["timestamp"]
+            kept = []
+            for m in markers:
+                t = m.get("time")
+                if t is not None and lo <= t <= hi:
+                    kept.append(m)
+                else:
+                    dropped.append({"time": t, "reason": "out_of_range"})
+            markers = kept
         result = self.state.set_markers(board_id, timeframe, markers)
         if not result.get("error"):
             self._bc({"type": "markers_update", "board_id": board_id, "timeframe": timeframe,
                       "markers": markers})
+            if dropped:
+                result["dropped"] = dropped
         return result
 
     def load_csv(self, board_id, timeframe, path, time_col="timestamp"):
