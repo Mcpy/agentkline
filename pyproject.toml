@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentkline"
-version = "0.3.2"
+version = "0.4.0"
 description = "AgentKline — a self-hosted, scriptable, agent-ready K-line trading board (lightweight-charts + MCP)"
 readme = "README.md"
 requires-python = ">=3.9"

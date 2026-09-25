@@ -12,11 +12,12 @@ from typing import Optional
 from fastapi import Query, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
 
+from ..core import skills as _skills
 from .common import (service, ws_manager, WEB_DIST, SCRIPTS_DIR, SNAPSHOT_DIR,
                      _err, _resolve, logger,
-                     BoardCreate, TimeframeCreate, OhlcvPush, IndicatorPush,
+                     BoardCreate, TimeframeCreate, IndicatorPush,
                      SubplotCreate, SubplotUpdate, MarkersPush, ScriptRun,
-                     IndicatorUpdate, DataSourceConfig, LoadCsv, SnapshotPush)
+                     IndicatorUpdate, KlineSourceConfig, SnapshotPush)
 
 
 # ============ 页面 / 静态 ============
@@ -39,15 +40,17 @@ def register_ws(app):
             board_id = service.state.current_board_id
             if board_id:
                 tf = service.state.get_default_timeframe(board_id)
-                await ws.send_json({"type": "init", "data": service.get_state(board_id, tf),
-                                    "board_id": board_id, "timeframe": tf,
-                                    "boards": service.state.list_boards()})
+                await ws.send_json(ws_manager.envelope(
+                    {"type": "init", "data": service.get_state_windowed(board_id, tf),
+                     "board_id": board_id, "timeframe": tf,
+                     "boards": service.state.list_boards()}, ws))
             else:
-                await ws.send_json({"type": "init", "data": {}, "boards": []})
+                await ws.send_json(ws_manager.envelope(
+                    {"type": "init", "data": {}, "boards": []}, ws))
             while True:
                 data = await ws.receive_text()
                 if data == "ping":
-                    await ws.send_json({"type": "pong"})
+                    await ws.send_json(ws_manager.envelope({"type": "pong"}, ws))
         except WebSocketDisconnect:
             ws_manager.disconnect(ws)
 
@@ -57,6 +60,31 @@ def register_read(app):
     @app.get("/api/boards")
     async def list_boards():
         return service.list_boards()
+
+    @app.get("/api/skills")
+    async def list_skills():
+        """skills 目录列表（与 MCP list_skills 对齐的 REST 薄镜像）"""
+        return {"skills": _skills.list_skills()}
+
+    @app.get("/api/skills/{name}")
+    async def load_skill(name: str):
+        """skill 全文（与 MCP load_skill 对齐）"""
+        r = _skills.load_skill(name)
+        if r.get("error"):
+            raise HTTPException(404, r["error"])
+        return r
+
+    @app.get("/api/board/{board_id}/interval_options")
+    async def interval_options(board_id: str):
+        """周期"+"按钮数据：{online, supported, current, addable}；仅实时源 online=True"""
+        r = service.interval_options(board_id)
+        if r.get("error"): raise HTTPException(404, r["error"])
+        return r
+
+    @app.get("/api/search")
+    async def search_symbols(q: str = "", refresh: bool = False):
+        """标的搜索（P1 搜索流，web+agent）：行=完整二元组(源,裸符号)+●现场徽标；索引 TTL 日级"""
+        return service.search_symbols(q, refresh)
 
     @app.get("/api/board/{board_id}")
     async def switch_board(board_id: str):
@@ -93,11 +121,11 @@ def register_read(app):
     @app.get("/api/indicators")
     async def get_indicators(board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None),
                              start: Optional[int] = Query(None), end: Optional[int] = Query(None),
-                             names: Optional[str] = Query(None)):
-        """指标值区间切片；names 逗号分隔可指定一个/多个，默认全部"""
+                             instances: Optional[str] = Query(None)):
+        """指标值区间切片；instances 逗号分隔按 inst_id 过滤，默认全部"""
         board_id, timeframe = _resolve(board_id, timeframe)
-        name_list = [x.strip() for x in names.split(",") if x.strip()] if names else None
-        r = service.get_indicators(board_id, timeframe, start, end, name_list)
+        inst_list = [x.strip() for x in instances.split(",") if x.strip()] if instances else None
+        r = service.get_indicators(board_id, timeframe, start, end, inst_list)
         if r.get("error"): raise HTTPException(400, r["error"])
         return r
 
@@ -128,7 +156,7 @@ def register_read(app):
 
     @app.get("/api/config")
     async def get_config():
-        return {"scripts_dir": str(SCRIPTS_DIR), "version": "0.3.2"}
+        return {"scripts_dir": str(SCRIPTS_DIR), "version": "0.4.0"}
 
     @app.get("/api/view")
     async def get_view():
@@ -148,6 +176,17 @@ def register_read(app):
 
 # ============ 用户交互写（web 开放） ============
 def register_user_write(app):
+    @app.post("/api/board")
+    async def create_board(req: BoardCreate):
+        """建板即锁（用户搜索流/带 symbol 的 agent）。裸板=agent 端口 /api/board/empty 或 MCP 不传 symbol"""
+        if not req.symbol or not req.source:
+            raise HTTPException(400, "LOCK_REQUIRES_SOURCE: POST /api/board 需 symbol+source"
+                                  "（裸板请走 agent 端口 /api/board/empty 或 MCP create_board）")
+        r = service.create_board(req.id, req.name, req.intervals, req.symbol,
+                                 req.source, req.params, req.poll_s)
+        if r.get("error"): raise _err(r)
+        return r
+
     @app.post("/api/drawing")
     async def add_drawing(req: dict, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
         board_id, timeframe = _resolve(board_id, timeframe)
@@ -169,9 +208,10 @@ def register_user_write(app):
         if r.get("error"): raise HTTPException(404, r["error"])
         return r
 
-    @app.post("/api/board/{board_id}/timeframe/{tf}/history")
-    async def load_history(board_id: str, tf: str, req: dict = None):
-        return service.load_history(board_id, tf, (req or {}).get("limit", 200))
+    @app.post("/api/board/{board_id}/timeframe/{tf}/backfill")
+    async def backfill(board_id: str, tf: str, req: dict = None):
+        """向左补更早历史（原 /history 硬切改名）；CAPS.backfill 门控"""
+        return service.backfill(board_id, tf, (req or {}).get("limit", 200))
 
     @app.post("/api/view")
     async def report_view(req: dict):
@@ -184,20 +224,37 @@ def register_user_write(app):
 
 
 # ============ 管理（删板/删周期/删改指标；web 与 agent 均挂载） ============
-def register_manage(app):
-    @app.delete("/api/indicator/{name}")
-    async def delete_indicator(name: str, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
+
+    @app.post("/api/markers")
+    async def push_markers(req: MarkersPush, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
         board_id, timeframe = _resolve(board_id, timeframe)
-        r = service.delete_indicator(board_id, timeframe, name)
+        r = service.set_markers(board_id, timeframe, req.markers)
+        if r.get("error"): raise _err(r)
+        return r
+
+    @app.post("/api/board/{board_id}/timeframe")
+    async def create_timeframe(board_id: str, req: TimeframeCreate):
+        """加周期（web 发起权）：在线板自动注入 {script, identity+interval}；服务端排序+INTERVALS 校验"""
+        r = service.create_timeframe(board_id, req.interval)
+        if r.get("error"): raise _err(r)
+        return r
+
+
+def register_manage(app):
+    @app.delete("/api/indicator/{inst_id}")
+    async def delete_indicator(inst_id: str, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
+        board_id, timeframe = _resolve(board_id, timeframe)
+        r = service.delete_indicator(board_id, timeframe, inst_id)
         if r.get("error"): raise HTTPException(404, r["error"])
         return r
 
-    @app.post("/api/indicator/update/{name}")
-    async def update_indicator(name: str, req: IndicatorUpdate, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
+    @app.put("/api/indicator/{inst_id}")
+    async def update_indicator(inst_id: str, req: IndicatorUpdate, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
+        """统一更新（杂交路径清理：原 POST /api/indicator/update/{name} 改 PUT 声明式）"""
         board_id, timeframe = _resolve(board_id, timeframe)
-        r = service.update_indicator(board_id, timeframe, name, req.params, req.style,
+        r = service.update_indicator(board_id, timeframe, inst_id, req.params, req.style,
                                      req.lines_style, req.display_name, req.auto_label)
-        if r.get("error"): raise HTTPException(500, r["error"])
+        if r.get("error"): raise _err(r)
         return r
 
     @app.delete("/api/board/{board_id}")
@@ -230,8 +287,26 @@ def _save_snapshot(req: SnapshotPush):
 def register_exec(app):
     @app.get("/api/scripts")
     async def list_scripts():
-        """列出可用指标/数据源脚本（供纯 REST agent；与 MCP list_scripts 对齐）"""
+        """列出全部脚本（双根；与 MCP list_scripts 对齐）：[{id,kind,source,display,desc,params,caps,identity}]"""
         return {"scripts": service.script_engine.list_scripts()}
+
+    @app.post("/api/board/empty")
+    async def create_empty_board(req: BoardCreate):
+        """裸板（未锁定初始态）：仅 agent 端口。用户侧无空板（建板即锁/删光落引导页）"""
+        r = service.create_board(req.id, req.name, req.intervals)
+        if r.get("error"): raise _err(r)
+        return r
+
+    @app.post("/api/scripts")
+    async def save_script(req: dict):
+        """保存自定义脚本到 custom 根（保存即校验）。body: {id: 'kind/name', code: '...'}"""
+        sid, code = req.get("id"), req.get("code")
+        if not sid or not code:
+            raise HTTPException(400, "SAVE_EMPTY: 需要 id 与 code")
+        r = service.save_script(sid, code)
+        if r.get("error"):
+            raise HTTPException(400, r["error"])
+        return r
 
     @app.post("/api/view/range")
     async def set_view_range(req: dict, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
@@ -242,56 +317,26 @@ def register_exec(app):
         return r
 
     @app.post("/api/run-script")
-    async def run_script(req: ScriptRun, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
-        board_id, timeframe = _resolve(board_id, timeframe)
-        r = service.run_script(board_id, timeframe, req.path, req.params, req.save_as,
-                               req.indicator_name, req.subplot, req.scope or "board",
-                               req.display_name)
+    async def run_script(req: ScriptRun):
+        """执行脚本（窄身）：只返回结果，图上不留痕。script 为 id（kind/name）"""
+        r = service.run_script(req.script, req.params)
         if r.get("error"): raise HTTPException(500, r["error"])
-        return r
-
-    @app.post("/api/ohlcv")
-    async def push_ohlcv(req: OhlcvPush, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
-        board_id, timeframe = _resolve(board_id, timeframe)
-        if not board_id: raise HTTPException(400, "No board")
-        r = service.set_ohlcv(board_id, timeframe, req.ohlcv, req.markers)
-        if r.get("error"): raise _err(r)
-        return r
-
-    @app.post("/api/markers")
-    async def push_markers(req: MarkersPush, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
-        board_id, timeframe = _resolve(board_id, timeframe)
-        r = service.set_markers(board_id, timeframe, req.markers)
-        if r.get("error"): raise _err(r)
-        return r
-
-    @app.post("/api/load-csv")
-    async def load_csv(req: LoadCsv, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
-        board_id, timeframe = _resolve(board_id, timeframe)
-        r = service.load_csv(board_id, timeframe, req.path, req.time_col)
-        if r.get("error"): raise _err(r)
         return r
 
     @app.post("/api/indicator")
     async def push_indicator(req: IndicatorPush, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
         board_id, timeframe = _resolve(board_id, timeframe)
-        r = service.add_indicator(board_id, timeframe, req.name, req.values, req.subplot,
-                                  req.style, req.type, req.markers, req.lines, req.replace,
-                                  script=req.script, params=req.params, scope=req.scope or "board",
-                                  display_name=req.display_name)
+        r = service.add_indicator(board_id, timeframe, inst_id=req.inst_id, values=req.values,
+                                  subplot=req.subplot, style=req.style, markers=req.markers,
+                                  lines=req.lines, script=req.script, params=req.params,
+                                  scope=req.scope, display_name=req.display_name)
         if r.get("error"): raise HTTPException(400, r["error"])
         return r
 
-    @app.post("/api/indicator/refresh/{name}")
-    async def refresh_indicator(name: str, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
+    @app.post("/api/indicator/refresh/{inst_id}")
+    async def refresh_indicator(inst_id: str, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
         board_id, timeframe = _resolve(board_id, timeframe)
-        r = service.refresh_indicator(board_id, timeframe, name)
-        if r.get("error"): raise HTTPException(400, r["error"])
-        return r
-
-    @app.post("/api/board")
-    async def create_board(req: BoardCreate):
-        r = service.create_board(req.id, req.name, req.intervals)
+        r = service.refresh_indicator(board_id, timeframe, inst_id)
         if r.get("error"): raise _err(r)
         return r
 
@@ -301,33 +346,20 @@ def register_exec(app):
         if r.get("error"): raise HTTPException(404, r["error"])
         return r
 
-    @app.post("/api/board/{board_id}/timeframe")
-    async def create_timeframe(board_id: str, req: TimeframeCreate):
-        r = service.create_timeframe(board_id, req.interval)
+    @app.put("/api/board/{board_id}/timeframe/{tf}/kline_source")
+    async def set_kline_source(board_id: str, tf: str, req: KlineSourceConfig):
+        """声明式幂等配置 K 线来源；撞锁=409 SOURCE_LOCKED（detail 带 suggestion 一键改道）"""
+        r = service.set_kline_source(board_id, tf, req.script, req.params, req.poll_s)
         if r.get("error"): raise _err(r)
         return r
 
-    @app.post("/api/board/{board_id}/timeframe/{tf}/datasource")
-    async def set_datasource(board_id: str, tf: str, req: DataSourceConfig):
-        r = service.set_datasource(board_id, tf, req.path, req.params, req.poll_interval, req.indicators)
-        if r.get("error"): raise HTTPException(500, r["error"])
-        return r
-
-    @app.get("/api/board/{board_id}/timeframe/{tf}/datasource")
-    async def get_datasource(board_id: str, tf: str):
-        return service.get_datasource(board_id, tf)
-
-    @app.delete("/api/board/{board_id}/timeframe/{tf}/datasource")
-    async def delete_datasource(board_id: str, tf: str):
-        return service.delete_datasource(board_id, tf)
+    @app.get("/api/board/{board_id}/timeframe/{tf}/kline_source")
+    async def get_kline_source(board_id: str, tf: str):
+        return service.get_kline_source(board_id, tf)
 
     @app.post("/api/board/{board_id}/timeframe/{tf}/refresh")
     async def refresh_timeframe(board_id: str, tf: str):
         return service.refresh_timeframe(board_id, tf)
-
-    @app.post("/api/board/{board_id}/timeframe/{tf}/history")
-    async def load_history(board_id: str, tf: str, req: dict = None):
-        return service.load_history(board_id, tf, (req or {}).get("limit", 200))
 
     @app.post("/api/subplot")
     async def create_subplot(req: SubplotCreate, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
@@ -351,23 +383,3 @@ def register_exec(app):
         return r
 
     # agent 也可经 REST 画线（鉴权）
-    @app.post("/api/drawing")
-    async def add_drawing(req: dict, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
-        board_id, timeframe = _resolve(board_id, timeframe)
-        r = service.add_drawing(board_id, timeframe, req)
-        if r.get("error"): raise _err(r)
-        return r
-
-    @app.post("/api/drawing/{drawing_id}")
-    async def update_drawing(drawing_id: str, req: dict, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
-        board_id, timeframe = _resolve(board_id, timeframe)
-        r = service.update_drawing(board_id, timeframe, drawing_id, req)
-        if r.get("error"): raise HTTPException(404, r["error"])
-        return r
-
-    @app.delete("/api/drawing/{drawing_id}")
-    async def delete_drawing(drawing_id: str, board_id: Optional[str] = Query(None), timeframe: Optional[str] = Query(None)):
-        board_id, timeframe = _resolve(board_id, timeframe)
-        r = service.delete_drawing(board_id, timeframe, drawing_id)
-        if r.get("error"): raise HTTPException(404, r["error"])
-        return r

@@ -7,9 +7,9 @@ import { log } from './log.js';
 const LINE_STYLES = [[0, '实线'], [1, '点线'], [2, '虚线']];
 
 function post(name, payload) {
-    const url = `/api/indicator/update/${encodeURIComponent(name)}?board_id=${encodeURIComponent(state.currentBoard)}&timeframe=${encodeURIComponent(state.currentTimeframe)}`;
+    const url = `/api/indicator/${encodeURIComponent(name)}?board_id=${encodeURIComponent(state.currentBoard)}&timeframe=${encodeURIComponent(state.currentTimeframe)}`;  // v0.4: inst_id + PUT 声明式
     return fetch(url, {
-        method: 'POST',
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
     }).then(r => r.json());

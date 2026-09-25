@@ -30,7 +30,7 @@ async def _lifespan(app: FastAPI):
 
 
 def create_agent_app() -> FastAPI:
-    app = FastAPI(title="AgentKline Agent", version="0.3.2", lifespan=_lifespan)
+    app = FastAPI(title="AgentKline Agent", version="0.4.0", lifespan=_lifespan)
 
     @app.middleware("http")
     async def require_token(request, call_next):
@@ -41,6 +41,7 @@ def create_agent_app() -> FastAPI:
         return await call_next(request)
 
     routes.register_read(app)
+    routes.register_user_write(app)  # agent 端口全量表面（Bearer 鉴权下与 web 写能力平权）
     routes.register_exec(app)
     routes.register_manage(app)
 

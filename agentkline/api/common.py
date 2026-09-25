@@ -21,8 +21,8 @@ SNAPSHOT_DIR.mkdir(exist_ok=True)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("agentkline")
 
-# 单一 service 实例，web/agent 两端口共享
-service = AgentKlineService(str(SCRIPTS_DIR))
+# 单一 service 实例，web/agent 两端口共享（CONFIG 加载后构造，见文件下方）
+service = None
 
 
 # ============ WebSocket 广播（共享连接表） ============
@@ -32,17 +32,29 @@ class ConnectionManager:
 
     async def connect(self, ws):
         await ws.accept()
+        ws._ak_seq = 0  # 每连接自增 seq（排障用，无 ACK；恢复=重连重拉 init）
         self.active.append(ws)
 
     def disconnect(self, ws):
         if ws in self.active:
             self.active.remove(ws)
 
+    def envelope(self, message: dict, ws=None) -> dict:
+        """v0.4 标准信封硬切：{v, type, seq, ts, payload}；业务字段全进 payload"""
+        import time as _t
+        seq = 0
+        if ws is not None:
+            ws._ak_seq = getattr(ws, "_ak_seq", 0) + 1
+            seq = ws._ak_seq
+        return {"v": 1, "type": message.get("type"), "seq": seq,
+                "ts": int(_t.time() * 1000),
+                "payload": {k: v for k, v in message.items() if k != "type"}}
+
     async def broadcast(self, message: dict):
         dead = []
         for ws in self.active:
             try:
-                await ws.send_json(message)
+                await ws.send_json(self.envelope(message, ws))
             except Exception:
                 dead.append(ws)
         for ws in dead:
@@ -66,9 +78,6 @@ def _sync_notify(message: dict):
         pass
 
 
-service.notify = _sync_notify
-
-
 # ============ 配置 / 鉴权 token ============
 def load_config() -> dict:
     cfg_path = BASE_DIR / "config.yaml"
@@ -83,6 +92,8 @@ def load_config() -> dict:
 
 
 CONFIG = load_config()
+service = AgentKlineService(str(SCRIPTS_DIR), (CONFIG.get("limits") or {}))
+service.notify = _sync_notify
 AUTH_TOKEN = (os.environ.get("AGENTKLINE_TOKEN")
               or (CONFIG.get("auth") or {}).get("token")
               or "").strip() or None
@@ -108,24 +119,23 @@ class BoardCreate(BaseModel):
     id: str
     name: Optional[str] = None
     intervals: Optional[list[str]] = None
+    # v0.4 建板即锁：symbol+source 齐 = 锁定现场；皆无 = 空板（仅 agent 端口 /api/board/empty 或 MCP）
+    symbol: Optional[str] = None
+    source: Optional[str] = None
+    params: Optional[dict] = None
+    poll_s: Optional[int] = None
 
 class TimeframeCreate(BaseModel):
     interval: str
 
-class OhlcvPush(BaseModel):
-    ohlcv: list[dict]
-    markers: Optional[list[dict]] = None
-
 class IndicatorPush(BaseModel):
-    name: str
+    """v0.4 指标实例：inst_id 把手（不传自动生成）；script=计算型 / values|lines=冻结 blob"""
+    inst_id: Optional[str] = None
     values: Optional[list] = None
     subplot: Optional[str] = None
     style: Optional[dict] = None
-    type: Optional[str] = None
     markers: Optional[list[dict]] = None
     lines: Optional[list[dict]] = None
-    replace: Optional[bool] = True
-    # 计算型：给 script 则执行脚本得出值（等价 run_script save_as=indicator）
     script: Optional[str] = None
     params: Optional[dict] = None
     scope: Optional[str] = None
@@ -144,13 +154,9 @@ class MarkersPush(BaseModel):
     markers: list[dict]
 
 class ScriptRun(BaseModel):
-    path: str
+    """v0.4 窄身：只执行返回，图上不留痕（save_as 废除）"""
+    script: str
     params: Optional[dict] = None
-    save_as: Optional[str] = None
-    indicator_name: Optional[str] = None
-    subplot: Optional[str] = None
-    scope: Optional[str] = "board"
-    display_name: Optional[str] = None
 
 class IndicatorUpdate(BaseModel):
     params: Optional[dict] = None
@@ -159,15 +165,11 @@ class IndicatorUpdate(BaseModel):
     display_name: Optional[str] = None
     auto_label: Optional[bool] = None
 
-class DataSourceConfig(BaseModel):
-    path: str
+class KlineSourceConfig(BaseModel):
+    """槽配置（PUT 声明式幂等）：script 为 id；IDENTITY 键在 params 内须与板锁全等"""
+    script: str
     params: Optional[dict] = None
-    poll_interval: Optional[int] = None
-    indicators: Optional[list[dict]] = None
-
-class LoadCsv(BaseModel):
-    path: str
-    time_col: Optional[str] = "timestamp"
+    poll_s: Optional[int] = None
 
 class SnapshotPush(BaseModel):
     image: str
@@ -176,6 +178,9 @@ class SnapshotPush(BaseModel):
 
 
 def _err(result):
+    """错误码→HTTP 状态：SOURCE_LOCKED=409（带结构化 suggestion 一键改道）；其余 400"""
+    if result.get("code") == "SOURCE_LOCKED":
+        return HTTPException(status_code=409, detail=result)
     return HTTPException(status_code=400, detail=result["error"])
 
 

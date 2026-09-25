@@ -66,3 +66,4 @@ web_dist/          # 前端构建输出（临时调试用）
 # ========================================
 config.yaml
 !config.example.yaml
+docs/ARCH_DISCUSSION_v0.4.md

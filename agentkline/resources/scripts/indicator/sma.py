@@ -1,21 +1,18 @@
 """
 示例指标脚本：计算 SMA (简单移动平均)
-用于测试 AgentKline 指标功能
 """
 
-# 参数默认值（用于自动命名 SMA(20) 与设置弹窗回显）
+NAME = "SMA"
+DESC = "简单移动平均线"
 PARAMS = {"period": 20}
 
 
 def main(params: dict, ohlcv: list) -> list:
     """
     计算 SMA
-    params:
-        period: 均线周期 (默认 20)
-    ohlcv: K线数据 [{timestamp, open, high, low, close, volume}, ...]
-    返回: [null, null, ..., sma_value, sma_value, ...]
+    返回: [null, ..., sma_value, ...]（warmup 用 None）
     """
-    period = params.get("period", 20)
+    period = int(params.get("period", 20))
 
     if not ohlcv:
         return []

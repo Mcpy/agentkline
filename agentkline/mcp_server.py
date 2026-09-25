@@ -34,10 +34,14 @@ def list_boards() -> str:
     return _j(service.list_boards())
 
 @mcp.tool()
-def create_board(board_id: str, name: str = None, intervals: list = None) -> str:
+def create_board(board_id: str, name: str = None, intervals: list = None,
+                 symbol: str = None, source: str = None, params: dict = None,
+                 poll_s: int = None) -> str:
     """创建画板。intervals 为初始周期列表（如 ["1d","4h"]），首个为默认周期。
-    建板后用 set_datasource 或 run_script 灌K线。"""
-    return _j(service.create_board(board_id, name, intervals))
+    给 symbol+source = 建板即锁（一标的一板：source_lock={script, identity 快照}），并自动配置默认周期；
+    皆无 = 裸板（未锁定初始态，仅 AI 可建），首配 set_kline_source 时锁定。
+    换标的/换源被锁禁掉 → 请新建画板（撞锁返回 SOURCE_LOCKED+suggestion）。"""
+    return _j(service.create_board(board_id, name, intervals, symbol, source, params, poll_s))
 
 @mcp.tool()
 def delete_board(board_id: str) -> str:
@@ -59,7 +63,8 @@ def list_timeframes(board_id: str) -> str:
 
 @mcp.tool()
 def create_timeframe(board_id: str, interval: str) -> str:
-    """给画板添加时间周期（如 1d/4h/1h）。新周期初始为空白，需另行 set_datasource 灌数据。"""
+    """给画板添加时间周期（如 1d/4h/1h）。已锁定在线板：新周期槽由系统自动注入
+    {script, identity+interval} 直接出图；离线/裸板新槽为空白待配。"""
     return _j(service.create_timeframe(board_id, interval))
 
 @mcp.tool()
@@ -76,29 +81,29 @@ def switch_timeframe(board_id: str, timeframe: str) -> str:
 
 # ============ 数据 ============
 @mcp.tool()
-def set_datasource(board_id: str, timeframe: str, path: str, params: dict = None,
-                   poll_interval: int = None, indicators: list = None) -> str:
-    """配置数据源脚本（scripts/ 下的 .py）。poll_interval>0 则轮询实时刷新。
-    indicators 可附带指标配置列表（随数据源一起加载）。"""
-    return _j(service.set_datasource(board_id, timeframe, path, params, poll_interval, indicators))
+def set_kline_source(board_id: str, timeframe: str, script: str, params: dict = None,
+                     poll_s: int = None) -> str:
+    """声明式配置 K 线来源（幂等，PUT 语义）。script 为 id（kind/name，如 datasource/ccxt_binance）。
+    空板首配=锁定；已锁板须 script 与 IDENTITY 键全等，违则 SOURCE_LOCKED（带 suggestion 一键改道建板）。
+    IDENTITY 之外 params=操作参数自由改（改即重拉）；仅 poll_s 变=不碰数据；poll_s>0 轮询实时刷新。
+    附指标请用 add_indicator（打包参已废除）。"""
+    return _j(service.set_kline_source(board_id, timeframe, script, params, poll_s))
 
 @mcp.tool()
-def load_history(board_id: str, timeframe: str, limit: int = 200) -> str:
+def backfill(board_id: str, timeframe: str, limit: int = 200) -> str:
     """向左补充更早的历史K线（前插到现有最早一根之前）。
     场景：图表向左滚动、已加载的最早K线不够看时，回溯拉取更早行情（前端左滑也会自动触发）。
-    前提：该画板/周期已配置数据源，且数据源脚本支持 until 参数（按时间回溯取数，如 ccxt_binance_btc）；
-    数据源不支持 until（如 mock）时无数据可补，返回 prepended=0。
+    前提：该画板/周期已配置数据源，且其 CAPS.backfill=True（如 datasource/ccxt_binance、datasource/mock_btc）；
+    无 backfill 徽章（如 datasource/csv）返回 prepended=0 并注明 NO_BACKFILL。
     返回：prepended(本次前插根数) / total(当前总根数)。"""
-    return _j(service.load_history(board_id, timeframe, limit))
+    return _j(service.backfill(board_id, timeframe, limit))
 
 @mcp.tool()
-def run_script(board_id: str, timeframe: str, path: str, params: dict = None,
-               save_as: str = None, indicator_name: str = None, subplot: str = None,
-               scope: str = "board", display_name: str = None) -> str:
-    """执行脚本。save_as: ohlcv/indicator/None。scope: board=所有周期(默认)/timeframe=仅本周期。
-    save_as=indicator 且不传 indicator_name 时自动命名(前3参数+…)；display_name 可覆盖显示名。"""
-    return _j(service.run_script(board_id, timeframe, path, params, save_as,
-                                 indicator_name, subplot, scope, display_name))
+def run_script(script: str, params: dict = None) -> str:
+    """执行脚本并返回结果（窄身：图上不留痕，save_as 已废除）。
+    script 为 id（kind/name，如 indicator/macd、datasource/mock_btc）；裸文件名已废弃。
+    指标上图 = save_script + add_indicator(script=...)；K线入图 = set_kline_source 配方。"""
+    return _j(service.run_script(script, params))
 
 @mcp.tool()
 def overview(board_id: str, timeframe: str) -> str:
@@ -122,38 +127,58 @@ def set_view_range(board_id: str, timeframe: str, from_time: int, to_time: int) 
 
 # ============ 指标 ============
 @mcp.tool()
-def add_indicator(board_id: str, timeframe: str, name: str, values: list = None,
-                  subplot: str = None, style: dict = None, type: str = None,
+def add_indicator(board_id: str, timeframe: str, inst_id: str = None, values: list = None,
+                  subplot: str = None, style: dict = None,
                   lines: list = None, script: str = None, params: dict = None,
-                  scope: str = "board", display_name: str = None) -> str:
-    """加指标（统一入口）。
-    - 计算型：给 script（如 'macd.py'）+params，服务端执行脚本算出值；例 add_indicator(name='MACD', script='macd.py')
-    - 现成型：给 values 或多线 lines，直接落值
-    - 两者皆无会报错。"""
-    return _j(service.add_indicator(board_id, timeframe, name, values, subplot, style, type,
-                                    None, lines, True, script=script, params=params,
+                  scope: str = None, display_name: str = None) -> str:
+    """加指标（统一入口，inst_id 把手）。
+    - 计算型 recipe：给 script（id 格式 kind/name，如 'indicator/macd'）+params，随K线自动重算
+    - 冻结 blob：给 values 或多线 lines，钉死本周期（传 scope 报 BLOB_SCOPE）
+    - inst_id 撞名报 INST_EXISTS；不传自动 macd_2 式生成；两者皆无报 EMPTY_INDICATOR。"""
+    return _j(service.add_indicator(board_id, timeframe, inst_id=inst_id, values=values,
+                                    subplot=subplot, style=style, lines=lines,
+                                    script=script, params=params,
                                     scope=scope, display_name=display_name))
 
 @mcp.tool()
-def delete_indicator(board_id: str, timeframe: str, name: str) -> str:
-    """按名称删除指标（从图表移除；查看现有指标名可用 overview）。"""
-    return _j(service.delete_indicator(board_id, timeframe, name))
+def delete_indicator(board_id: str, timeframe: str, inst_id: str) -> str:
+    """按 inst_id 删除指标实例（登记处+各周期物化一次删净；现有 inst_id 见 overview）。"""
+    return _j(service.delete_indicator(board_id, timeframe, inst_id))
 
 @mcp.tool()
-def update_indicator(board_id: str, timeframe: str, name: str, params: dict = None,
+def update_indicator(board_id: str, timeframe: str, inst_id: str, params: dict = None,
                      style: dict = None, lines_style: dict = None,
                      display_name: str = None, auto_label: bool = None) -> str:
-    """更新已推指标。params=新参数(触发重算)；style=整体样式；
+    """更新指标实例（inst_id 把手）。params=新参数(重声明配方触发重算)；style=整体样式；
     lines_style={线名:{color,lineWidth,lineStyle}}；display_name=覆盖显示名；
-    auto_label=true 恢复自动命名。"""
-    return _j(service.update_indicator(board_id, timeframe, name, params, style,
+    auto_label=true 恢复自动命名。blob 改 params 报错。"""
+    return _j(service.update_indicator(board_id, timeframe, inst_id, params, style,
                                        lines_style, display_name, auto_label))
 
 @mcp.tool()
 def list_scripts() -> str:
-    """列出 scripts/ 下可用脚本名，可作 run_script 的 path、add_indicator 的 script、
-    set_datasource 的 path。"""
+    """列出全部脚本（双根：builtin 内置只读 / custom 可写）。
+    返回 [{id, kind, source, display, desc, params, caps, identity}]：
+    id=kind/name 是一切引用的唯一格式；caps=能力徽章（backfill/symbols/ticker）；
+    identity=板锁身份键（如 ["symbol"]）。写新脚本前先读 load_skill('script-authoring')。"""
     return _j({"scripts": service.script_engine.list_scripts()})
+
+
+@mcp.tool()
+def search_symbols(q: str = "", refresh: bool = False) -> str:
+    """标的搜索（P1）：返回 rows=[{symbol, source, display, has_board}]，行=完整二元组(源,裸符号)；
+    has_board=True=该二元组已有现场(●徽标，防重复建板)。索引=CAPS.symbols 源首用全量+TTL 日级，
+    搜索永不穿透交易所；refresh=true 强刷索引。无徽章源用 @源名 裸符号 直配。"""
+    return _j(service.search_symbols(q, refresh))
+
+
+@mcp.tool()
+def save_script(id: str, code: str) -> str:
+    """保存自定义脚本到 custom 根（保存即校验：main 存在/CAPS 一致性/字面元数据合法）。
+    id=kind/name（kind∈datasource/indicator/strategy）；内置脚本不可改。
+    契约：datasource main(params[, until])→bars；indicator main(params, ohlcv)→values|{values,lines,markers}；
+    元数据 NAME/DESC/PARAMS/CAPS/IDENTITY 必须模块顶层字面常量。错误当场返回。"""
+    return _j(service.save_script(id, code))
 
 
 # ============ 副图 ============
@@ -221,11 +246,11 @@ def get_kline(board_id: str, timeframe: str, start: int = None, end: int = None)
 
 @mcp.tool()
 def get_indicators(board_id: str, timeframe: str, start: int = None, end: int = None,
-                   names: str = None) -> str:
+                   instances: str = None) -> str:
     """获取区间指标值，范围逻辑同 get_kline（不传=当前view）。
-    names 逗号分隔可指定一个/多个指标（如 'MACD,sma_10'），不传=全部。"""
-    name_list = [x.strip() for x in names.split(",") if x.strip()] if names else None
-    return _j(service.get_indicators(board_id, timeframe, start, end, name_list))
+    instances 逗号分隔按 inst_id 过滤（如 'macd,sma_2'），不传=全部。"""
+    inst_list = [x.strip() for x in instances.split(",") if x.strip()] if instances else None
+    return _j(service.get_indicators(board_id, timeframe, start, end, inst_list))
 
 @mcp.tool()
 def get_markers(board_id: str, timeframe: str) -> str:
@@ -258,7 +283,12 @@ def _snapshot_content(board_id, timeframe):
 @mcp.tool()
 async def take_snapshot(board_id: str = None, timeframe: str = None, wait: float = 1.5):
     """触发前端截图并返回图片+路径。需有浏览器连着 /ws。
-    发送 snapshot_request 后等待 wait 秒再读取最新快照。"""
+    发送 snapshot_request 后等待 wait 秒再读取最新快照。
+    无浏览器在线时明确报 NO_BROWSER（不回退磁盘旧图，防僵尸快照误导）。"""
+    from .api.common import ws_manager
+    if not ws_manager.active:
+        return {"error": "NO_BROWSER: 无浏览器连接 /ws，快照需在线前端；"
+                         "请先打开 Web UI（或确认目标标签页存活）再截图"}
     service.notify({"type": "snapshot_request", "board_id": board_id, "timeframe": timeframe})
     await asyncio.sleep(wait)
     return _snapshot_content(board_id, timeframe)

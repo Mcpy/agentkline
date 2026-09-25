@@ -25,12 +25,24 @@ class TimeframeState:
         self.interval = interval
         self.ohlcv: list[dict] = []
         self.markers: list[dict] = []
-        self.indicators: dict[str, dict] = {}  # name -> indicator data
+        # 物化缓存（v0.4 指标实例模型）：inst_id -> {values, lines, markers}
+        self.ind_cache: dict[str, dict] = {}
         self.subplots: dict[str, dict] = {}    # name -> subplot config
-        self.dynamic_indicators: list[dict] = []  # 动态指标（K线更新时自动重算）
         self.drawings: dict[str, dict] = {}    # id -> drawing (划线)
         self.symbol: str = ""
         self.last_updated: str = ""
+
+
+_TF_UNIT = {"m": 0, "h": 1, "d": 2, "w": 3, "M": 4}
+
+
+def tf_rank(iv: str):
+    """周期排序键：时间短→长（15m < 1h < 4h < 1d < 1w < 1M）"""
+    import re
+    m = re.match(r"^(\d+)([mhdwM])$", iv or "")
+    if not m:
+        return (99, 0)
+    return (_TF_UNIT.get(m.group(2), 99), int(m.group(1)))
 
 
 class Board:
@@ -39,14 +51,26 @@ class Board:
     def __init__(self, board_id: str, name: str = None, intervals: list[str] = None):
         self.id = board_id
         self.name = name or board_id
-        self.intervals = intervals or ["1d"]
-        self.current_timeframe = self.intervals[0] if self.intervals else "1d"
+        self.intervals = sorted(intervals or ["1d"], key=tf_rank)
+        # 初始当前周期：1d 在列则用（交易面板惯例），否则最短档
+        self.current_timeframe = ("1d" if "1d" in self.intervals
+                                  else (self.intervals[0] if self.intervals else "1d"))
         self.timeframes: dict[str, TimeframeState] = {}
         for iv in self.intervals:
             self.timeframes[iv] = TimeframeState(iv)
-        # 画板级指标定义（scope=board，作用于所有周期）
-        self.board_indicators: dict[str, dict] = {}
+        # 指标实例登记处（v0.4）：inst_id -> instance
+        # instance = {inst_id, kind: recipe|blob, script, params, scope: board|timeframe,
+        #             tf, target(副图名|None), style, lines_style, display_name,
+        #             custom_label, auto_label, blob}
+        self.ind_registry: dict[str, dict] = {}
+        # 板锁（v0.4 一标的一板）：None=初始态(未锁定，仅 AI 可建)；
+        # 锁定后 = {"script": id, "identity": {IDENTITY键: 值快照}}，不可变
+        self.source_lock: Optional[dict] = None
         self.created_at = datetime.now().isoformat()
+
+    @property
+    def locked(self) -> bool:
+        return self.source_lock is not None
 
     def get_tf(self, tf: str) -> Optional[TimeframeState]:
         return self.timeframes.get(tf)
@@ -76,11 +100,21 @@ class StateManager:
         return {"id": board_id, "name": board.name, "intervals": board.intervals}
 
     def list_boards(self) -> list[dict]:
-        return [
-            {"id": b.id, "name": b.name, "intervals": b.intervals,
-             "current_timeframe": b.current_timeframe}
-            for b in self.boards.values()
-        ]
+        out = []
+        for b in self.boards.values():
+            lock = b.source_lock or {}
+            ident = lock.get("identity") or {}
+            out.append({
+                "id": b.id, "name": b.name, "intervals": b.intervals,
+                "current_timeframe": b.current_timeframe,
+                "source_lock": b.source_lock,
+                "locked": b.locked,
+                # 显示链统一格式：源名: 标的名（去 kind/ 前缀；仅显示，非存储）
+                "identity_display": (f"{str(lock.get('script', '')).split('/')[-1]}: {ident.get('symbol')}"
+                                     if ident.get("symbol") and lock.get("script")
+                                     else (ident.get("symbol") or lock.get("script") or b.id)),
+            })
+        return out
 
     def switch_board(self, board_id: str) -> dict:
         if board_id not in self.boards:
@@ -117,7 +151,8 @@ class StateManager:
             return {"error": f"Timeframe '{interval}' already exists"}
         board.timeframes[interval] = TimeframeState(interval)
         board.intervals.append(interval)
-        return {"status": "ok", "interval": interval}
+        board.intervals.sort(key=tf_rank)  # 短→长排序（优化点2）
+        return {"status": "ok", "interval": interval, "intervals": board.intervals}
 
     def delete_timeframe(self, board_id: str, tf: str) -> dict:
         board = self.boards.get(board_id)
@@ -156,17 +191,27 @@ class StateManager:
 
     # ========== K线数据 ==========
 
+    MAX_BARS_PER_SLOT = 50000  # R8 上限护栏：越界截最旧 + dropped 回报（config 化留收口）
+
     def set_ohlcv(self, board_id: str, timeframe: str, ohlcv: list[dict],
                   markers: list[dict] = None) -> dict:
         board = self.boards.get(board_id)
         if not board:
             return {"error": f"Board '{board_id}' not found"}
         tf_state = board.ensure_tf(timeframe)
+        dropped = 0
+        if len(ohlcv) > self.MAX_BARS_PER_SLOT:
+            dropped = len(ohlcv) - self.MAX_BARS_PER_SLOT
+            ohlcv = ohlcv[-self.MAX_BARS_PER_SLOT:]
         tf_state.ohlcv = ohlcv
         if markers is not None:
             tf_state.markers = markers
         tf_state.last_updated = datetime.now().isoformat()
-        return {"status": "ok", "count": len(ohlcv)}
+        out = {"status": "ok", "count": len(ohlcv)}
+        if dropped:
+            out["dropped"] = dropped
+            out["drop_reason"] = f"max_bars_per_slot={self.MAX_BARS_PER_SLOT} 越界截最旧"
+        return out
 
     def get_ohlcv(self, board_id: str, timeframe: str) -> list[dict]:
         board = self.boards.get(board_id)
@@ -185,121 +230,81 @@ class StateManager:
 
     # ========== 指标管理 ==========
 
-    def set_indicator(self, board_id: str, timeframe: str, name: str,
-                      values: list = None, subplot: str = None,
-                      style: dict = None, type: str = None,
-                      markers: list = None, lines: list = None,
-                      script_path: str = None, params: dict = None,
-                      scope: str = None, display_name: str = None,
-                      custom_label: bool = None) -> dict:
+    # ========== 指标实例（v0.4：登记处 board 级 + 物化缓存 tf 级） ==========
+    def add_instance(self, board_id: str, inst: dict) -> dict:
         board = self.boards.get(board_id)
         if not board:
             return {"error": f"Board '{board_id}' not found"}
-        tf_state = board.ensure_tf(timeframe)
-        existing = tf_state.indicators.get(name, {})
-        # NaN/Inf 清洗（用户脚本可能产出，避免非法 JSON）
-        values = _clean(values)
-        lines = _clean(lines)
-        markers = _clean(markers)
-        # 合并更新：只覆盖非 None 的字段，保留其余（重算时不丢 subplot/style/script_path）
-        tf_state.indicators[name] = {
-            "name": name,
-            "values": values if values is not None else existing.get("values"),
-            "subplot": subplot if subplot is not None else existing.get("subplot"),
-            "style": style if style is not None else existing.get("style"),
-            "type": type if type is not None else existing.get("type"),
-            "markers": markers if markers is not None else existing.get("markers"),
-            "lines": lines if lines is not None else existing.get("lines"),
-            "script_path": script_path if script_path is not None else existing.get("script_path"),
-            "params": params if params is not None else existing.get("params"),
-            "scope": scope if scope is not None else existing.get("scope"),
-            "display_name": display_name if display_name is not None else existing.get("display_name"),
-            "custom_label": custom_label if custom_label is not None else existing.get("custom_label", False),
-        }
-        return {"status": "ok", "name": name}
+        board.ind_registry[inst["inst_id"]] = inst
+        return {"status": "ok", "inst_id": inst["inst_id"]}
 
-    def get_indicator(self, board_id: str, timeframe: str, name: str) -> Optional[dict]:
+    def get_instance(self, board_id: str, inst_id: str) -> Optional[dict]:
         board = self.boards.get(board_id)
-        if not board:
-            return None
-        tf_state = board.get_tf(timeframe)
-        if not tf_state:
-            return None
-        return tf_state.indicators.get(name)
+        return board.ind_registry.get(inst_id) if board else None
 
-    def delete_indicator(self, board_id: str, timeframe: str, name: str) -> dict:
+    def list_instances(self, board_id: str) -> list[dict]:
         board = self.boards.get(board_id)
-        if not board:
-            return {"error": f"Board '{board_id}' not found"}
-        tf_state = board.get_tf(timeframe)
-        if not tf_state:
-            return {"error": f"Timeframe '{timeframe}' not found"}
-        if name not in tf_state.indicators:
-            return {"error": f"Indicator '{name}' not found"}
-        del tf_state.indicators[name]
+        return list(board.ind_registry.values()) if board else []
+
+    def update_instance(self, board_id: str, inst_id: str, patch: dict) -> dict:
+        board = self.boards.get(board_id)
+        if not board or inst_id not in board.ind_registry:
+            return {"error": f"Indicator '{inst_id}' not found"}
+        board.ind_registry[inst_id].update(patch)
         return {"status": "ok"}
 
-    def register_dynamic_indicator(self, board_id: str, timeframe: str,
-                                   name: str, path: str, params: dict = None,
-                                   subplot: str = None):
-        """注册动态指标（K线更新时自动重算）"""
+    def delete_instance(self, board_id: str, inst_id: str) -> dict:
+        """登记处 + 各 tf 物化一次删净"""
         board = self.boards.get(board_id)
         if not board:
-            return
-        tf_state = board.ensure_tf(timeframe)
-        # 避免重复注册
-        for ind in tf_state.dynamic_indicators:
-            if ind["name"] == name:
-                ind["path"] = path
-                ind["params"] = params or {}
-                if subplot is not None:
-                    ind["subplot"] = subplot
-                return
-        tf_state.dynamic_indicators.append({
-            "name": name, "path": path, "params": params or {}, "subplot": subplot
-        })
+            return {"error": f"Board '{board_id}' not found"}
+        existed = board.ind_registry.pop(inst_id, None) is not None
+        for tf in board.timeframes.values():
+            tf.ind_cache.pop(inst_id, None)
+        if not existed:
+            return {"error": f"Indicator '{inst_id}' not found"}
+        return {"status": "ok"}
 
-    def remove_dynamic_indicator(self, board_id: str, timeframe: str, name: str):
-        board = self.boards.get(board_id)
-        if not board:
-            return
-        tf_state = board.get_tf(timeframe)
-        if not tf_state:
-            return
-        tf_state.dynamic_indicators = [i for i in tf_state.dynamic_indicators if i["name"] != name]
-
-    def get_dynamic_indicators(self, board_id: str, timeframe: str) -> list[dict]:
+    def tf_instances(self, board_id: str, timeframe: str) -> list[dict]:
+        """本周期生效实例：scope=board 或 (scope=timeframe 且 tf 匹配)"""
         board = self.boards.get(board_id)
         if not board:
             return []
-        tf_state = board.get_tf(timeframe)
-        return tf_state.dynamic_indicators if tf_state else []
+        return [i for i in board.ind_registry.values()
+                if i["scope"] == "board"
+                or (i["scope"] == "timeframe" and i.get("tf") == timeframe)]
 
-    # ========== 画板级指标（scope=board，作用于所有周期） ==========
-
-    def register_board_indicator(self, board_id: str, name: str, path: str,
-                                 params: dict = None, subplot: str = None):
-        """注册画板级指标定义"""
+    def set_cache(self, board_id: str, timeframe: str, inst_id: str,
+                  values: list = None, lines: list = None, markers: list = None) -> None:
+        """物化缓存写入（NaN/Inf 清洗挂这里，覆盖所有入值路径）"""
         board = self.boards.get(board_id)
         if not board:
             return
-        board.board_indicators[name] = {"name": name, "path": path,
-                                        "params": params or {}, "subplot": subplot}
+        tf = board.ensure_tf(timeframe)
+        tf.ind_cache[inst_id] = {"values": _clean(values), "lines": _clean(lines),
+                                 "markers": _clean(markers)}
 
-    def get_board_indicators(self, board_id: str) -> list[dict]:
+    def get_cache(self, board_id: str, timeframe: str, inst_id: str) -> Optional[dict]:
         board = self.boards.get(board_id)
-        return list(board.board_indicators.values()) if board else []
+        tf = board.get_tf(timeframe) if board else None
+        return tf.ind_cache.get(inst_id) if tf else None
 
-    def remove_board_indicator(self, board_id: str, name: str):
+    def shift_blob_caches(self, board_id: str, timeframe: str, prepended: int) -> None:
+        """backfill 前插后：blob 缓存头部补 None 保持索引对齐（recipe 随后全量重算不受影响）"""
         board = self.boards.get(board_id)
-        if board and name in board.board_indicators:
-            del board.board_indicators[name]
-
-    def propagate_board_indicators(self, board_id: str, timeframe: str):
-        """把画板级指标注册到指定周期（使其在该周期被计算）"""
-        for ind in self.get_board_indicators(board_id):
-            self.register_dynamic_indicator(board_id, timeframe, ind["name"],
-                                            ind["path"], ind["params"], ind.get("subplot"))
+        tf = board.get_tf(timeframe) if board else None
+        if not tf or prepended <= 0:
+            return
+        for inst_id, c in tf.ind_cache.items():
+            inst = board.ind_registry.get(inst_id)
+            if not inst or inst["kind"] != "blob":
+                continue
+            pad = [None] * prepended
+            if c.get("values") is not None:
+                c["values"] = pad + c["values"]
+            for ln in (c.get("lines") or []):
+                if ln.get("values") is not None:
+                    ln["values"] = pad + ln["values"]
 
     # ========== 副图管理 ==========
 
@@ -337,10 +342,9 @@ class StateManager:
         if not tf_state or name not in tf_state.subplots:
             return {"error": f"Subplot '{name}' not found"}
         del tf_state.subplots[name]
-        # 同时删除该副图上的所有指标
-        to_remove = [k for k, v in tf_state.indicators.items() if v.get("subplot") == name]
-        for k in to_remove:
-            del tf_state.indicators[k]
+        # 同时删除 target 为该副图的所有指标实例（登记处+各tf缓存一次删净）
+        for inst in [i for i in board.ind_registry.values() if i.get("target") == name]:
+            self.delete_instance(board_id, inst["inst_id"])
         return {"status": "ok"}
 
     def list_subplots(self, board_id: str, timeframe: str) -> list[dict]:
@@ -405,7 +409,7 @@ class StateManager:
             "intervals": board.intervals,
             "current_timeframe": board.current_timeframe,
             "timeframes": {
-                tf: self._tf_state_to_dict(board.timeframes[tf])
+                tf: self._tf_state_to_dict(board_id, board.timeframes[tf])
                 for tf in board.timeframes
             }
         }
@@ -418,20 +422,30 @@ class StateManager:
         tf_state = board.get_tf(timeframe)
         if not tf_state:
             return {}
-        result = self._tf_state_to_dict(tf_state)
+        result = self._tf_state_to_dict(board_id, tf_state)
         result["board_id"] = board_id
         result["timeframe"] = timeframe
         return result
 
-    def _tf_state_to_dict(self, tf_state: TimeframeState) -> dict:
+    def _tf_state_to_dict(self, board_id: str, tf_state: TimeframeState) -> dict:
+        # 指标 wire 格式：inst_id -> 物化缓存 + 实例元信息（前端/ init / switch 共用）
+        indicators = {}
+        for inst in self.tf_instances(board_id, tf_state.interval):
+            c = tf_state.ind_cache.get(inst["inst_id"], {})
+            indicators[inst["inst_id"]] = {
+                **c,
+                "inst_id": inst["inst_id"], "kind": inst["kind"],
+                "script": inst["script"], "params": inst["params"],
+                "scope": inst["scope"], "subplot": inst["target"],
+                "style": inst["style"], "lines_style": inst["lines_style"],
+                "display_name": inst.get("display_name") or inst.get("auto_label")
+                                or inst["inst_id"],
+            }
         return {
             "interval": tf_state.interval,
             "ohlcv": tf_state.ohlcv,
             "markers": tf_state.markers,
-            "indicators": {
-                name: {k: v for k, v in ind.items() if k != "script_path"}
-                for name, ind in tf_state.indicators.items()
-            },
+            "indicators": indicators,
             "subplots": list(tf_state.subplots.values()),
             "drawings": list(tf_state.drawings.values()),
             "symbol": tf_state.symbol,

@@ -1,10 +1,10 @@
 import { state } from './state.js';
 import { log } from './log.js';
-import { renderBoardTabs, renderTimeframeTabs, switchTimeframe } from './ui.js';
+import { renderBoardTabs, renderTimeframeTabs, switchBoard, switchTimeframe, refreshIntervalOptions } from './ui.js';
 import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnapshot, setVisibleTimeRange } from './render.js';
 
     // ============================================================
-    // WebSocket
+    // WebSocket（v0.4 标准信封 {v,type,seq,ts,payload} 硬切）
     // ============================================================
     function connectWebSocket() {
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -30,9 +30,18 @@ import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnap
         };
 
         state.ws.onmessage = (event) => {
-            const msg = JSON.parse(event.data);
+            const env = JSON.parse(event.data);
+            // 信封硬切：业务字段在 payload；缺 payload 的平铺消息视为非法（同版发布无混合）
+            const msg = env && env.payload
+                ? { ...env.payload, type: env.type, _seq: env.seq }
+                : env;
             handleWsMessage(msg);
         };
+    }
+
+    function _syncLocks(boards) {
+        state.locks = state.locks || {};
+        (boards || []).forEach(b => { state.locks[b.id] = b.source_lock || null; });
     }
 
     function handleWsMessage(msg) {
@@ -42,53 +51,44 @@ import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnap
                 break;
             case 'ohlcv_update':
                 if (msg.board_id === state.currentBoard && msg.timeframe === state.currentTimeframe) {
-                    state.ohlcv = msg.data;
-                    state.markers = msg.markers || [];
-                    applyDataUpdate(msg.prepended || 0);
+                    // R8 差量合并：前插/追加/按 ts 替换
+                    const prep = msg.prepended || [];
+                    const app = msg.appended || [];
+                    const upd = msg.updated || [];
+                    if (prep.length) state.ohlcv = [...prep, ...state.ohlcv];
+                    if (app.length) state.ohlcv = [...state.ohlcv, ...app];
+                    if (upd.length) {
+                        const idx = new Map(state.ohlcv.map((b, i) => [b.timestamp, i]));
+                        for (const b of upd) {
+                            const i = idx.get(b.timestamp);
+                            if (i !== undefined) state.ohlcv[i] = b;
+                        }
+                    }
+                    if (msg.markers) state.markers = msg.markers;
+                    applyDataUpdate(prep.length);
                 }
-                log('ws', `ohlcv_update: ${msg.board_id}/${msg.timeframe} (${msg.data?.length || 0} bars)`);
+                log('ws', `ohlcv_update: ${msg.board_id}/${msg.timeframe} (+${(msg.prepended || []).length}/~${(msg.appended || []).length + (msg.updated || []).length})`);
                 break;
             case 'indicator_add':
             case 'indicator_update':
                 if (msg.board_id === state.currentBoard && msg.timeframe === state.currentTimeframe) {
-                    const prev = state.indicators[msg.name] || {};
-                    state.indicators[msg.name] = {
-                        name: msg.name,
-                        values: msg.values,
-                        subplot: msg.subplot,
-                        style: msg.style,
-                        type: msg.indicator_type,
-                        markers: msg.markers,
-                        lines: msg.lines,
-                        scope: msg.scope,
+                    state.indicators[msg.inst_id] = {
+                        inst_id: msg.inst_id, kind: msg.kind, script: msg.script,
+                        values: msg.values, lines: msg.lines, markers: msg.markers,
+                        subplot: msg.subplot, style: msg.style, lines_style: msg.lines_style,
+                        scope: msg.scope, params: msg.params,
                         display_name: msg.display_name,
-                        params: msg.params !== undefined ? msg.params : prev.params
                     };
                     renderChart();
                 }
-                log('ws', `${msg.type}: ${msg.name}`);
-                break;
-            case 'indicator_refresh':
-                if (msg.board_id === state.currentBoard && msg.timeframe === state.currentTimeframe) {
-                    if (state.indicators[msg.name]) {
-                        if (msg.lines) {
-                            state.indicators[msg.name].lines = msg.lines;
-                            state.indicators[msg.name].values = null;
-                        } else {
-                            state.indicators[msg.name].values = msg.values;
-                        }
-                        if (msg.display_name) state.indicators[msg.name].display_name = msg.display_name;
-                        applyDataUpdate();
-                    }
-                }
-                log('ws', `indicator_refresh: ${msg.name}`);
+                log('ws', `${msg.type}: ${msg.inst_id}`);
                 break;
             case 'indicator_remove':
                 if (msg.board_id === state.currentBoard && msg.timeframe === state.currentTimeframe) {
-                    delete state.indicators[msg.name];
+                    delete state.indicators[msg.inst_id];
                     renderChart();
                 }
-                log('ws', `indicator_remove: ${msg.name}`);
+                log('ws', `indicator_remove: ${msg.inst_id}`);
                 break;
             case 'markers_update':
                 if (msg.board_id === state.currentBoard && msg.timeframe === state.currentTimeframe) {
@@ -98,18 +98,12 @@ import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnap
                 log('ws', `markers_update: ${msg.markers?.length || 0} markers`);
                 break;
             case 'drawing_add':
-                if (msg.board_id === state.currentBoard && msg.timeframe === state.currentTimeframe) {
-                    state.drawings[msg.drawing.id] = msg.drawing;
-                    syncDrawings();
-                }
-                log('ws', `drawing_add: ${msg.drawing.type} (${msg.drawing.id})`);
-                break;
             case 'drawing_update':
                 if (msg.board_id === state.currentBoard && msg.timeframe === state.currentTimeframe) {
                     state.drawings[msg.drawing.id] = msg.drawing;
                     syncDrawings();
                 }
-                log('ws', `drawing_update: ${msg.drawing.id}`);
+                log('ws', `${msg.type}: ${msg.drawing.type} (${msg.drawing.id})`);
                 break;
             case 'drawing_remove':
                 if (msg.board_id === state.currentBoard && msg.timeframe === state.currentTimeframe) {
@@ -120,14 +114,29 @@ import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnap
                 break;
             case 'board_create':
                 state.boards.push(msg.board);
+                _syncLocks([msg.board]);
                 renderBoardTabs();
                 log('ws', `board_create: ${msg.board.id}`);
                 break;
             case 'board_remove':
                 state.boards = state.boards.filter(b => b.id !== msg.board_id);
-                state.currentBoard = msg.current_board;
-                renderBoardTabs();
-                log('ws', `board_remove: ${msg.board_id}`);
+                delete state.locks[msg.board_id];
+                if (!msg.current_board) {
+                    // 删光 = 全白户：清当前视图数据 → renderChart 落引导页（不留旧K线残影）
+                    state.currentBoard = null;
+                    state.currentTimeframe = null;
+                    applyState({});
+                    renderBoardTabs();
+                    renderTimeframeTabs();
+                    renderChart();
+                    } else if (msg.current_board !== state.currentBoard) {
+                    // 删的是当前板且还有剩余：切过去（服务端广播 board_switch 带状态）
+                    switchBoard(msg.current_board);
+                    renderBoardTabs();
+                } else {
+                    renderBoardTabs();
+                }
+                log('ws', `board_remove: ${msg.board_id} → current=${msg.current_board}`);
                 break;
             case 'board_switch':
                 state.currentBoard = msg.board_id;
@@ -138,13 +147,24 @@ import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnap
                 renderBoardTabs();
                 renderTimeframeTabs();
                 renderChart();
+                refreshIntervalOptions();
                 log('ws', `board_switch: ${msg.board_id}`);
+                break;
+            case 'board_locked':
+                state.locks = state.locks || {};
+                state.locks[msg.board_id] = msg.source_lock;
+                log('ws', `board_locked: ${msg.board_id} → ${msg.source_lock?.script}`);
+                break;
+            case 'kline_source_set':
+                log('info', `kline_source: ${msg.board_id}/${msg.timeframe} → ${msg.script} (poll_s=${msg.poll_s ?? 'once'})`);
+                break;
+            case 'scripts_changed':
+                log('info', `脚本库变化: ${msg.id}（搜索/列表下次读取生效）`);
                 break;
             case 'timeframe_create':
                 if (msg.board_id === state.currentBoard) {
                     const b = state.boards.find(x => x.id === state.currentBoard);
-                    if (b && !(b.intervals || []).includes(msg.interval)) (b.intervals ||= []).push(msg.interval);
-                    renderTimeframeTabs();
+                    refreshIntervalOptions();  // 以服务端 interval_options.current 同步排序后的列表
                 }
                 log('ws', `timeframe_create: ${msg.board_id}/${msg.interval}`);
                 break;
@@ -155,7 +175,7 @@ import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnap
                     if (b) b.intervals = (b.intervals || []).filter(i => i !== msg.interval);
                     state.currentTimeframe = msg.default_timeframe;
                     renderTimeframeTabs();
-                    // 删的是当前周期 → 拉取新默认周期的状态并重绘
+                    refreshIntervalOptions();
                     if (wasCurrent && state.currentTimeframe) switchTimeframe(state.currentTimeframe);
                 }
                 log('ws', `timeframe_remove: ${msg.board_id}/${msg.interval}`);
@@ -173,7 +193,6 @@ import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnap
                 break;
             case 'view_set':
                 if (msg.board_id === state.currentBoard && msg.timeframe === state.currentTimeframe) {
-                    // 服务端已归一到毫秒，这里转秒给 LWC
                     const fromSec = Math.floor((msg.from_time < 1e11 ? msg.from_time * 1000 : msg.from_time) / 1000);
                     const toSec = Math.ceil((msg.to_time < 1e11 ? msg.to_time * 1000 : msg.to_time) / 1000);
                     setVisibleTimeRange(fromSec, toSec);
@@ -194,12 +213,6 @@ import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnap
                 }
                 log('ws', `subplot_remove: ${msg.name}`);
                 break;
-            case 'datasource_start':
-                log('info', `数据源启动: ${msg.board_id}/${msg.timeframe} (间隔 ${msg.poll_interval || '一次性'}s)`);
-                break;
-            case 'datasource_stop':
-                log('info', `数据源停止: ${msg.board_id}/${msg.timeframe}`);
-                break;
             case 'datasource_error':
                 log('error', `数据源错误: ${msg.board_id}/${msg.timeframe}: ${msg.error}`);
                 break;
@@ -218,19 +231,21 @@ import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnap
         state.boards = msg.boards || [];
         state.currentBoard = msg.board_id;
         state.currentTimeframe = msg.timeframe;
+        _syncLocks(state.boards);
         if (msg.data) {
             applyState(msg.data);
         }
         renderBoardTabs();
         renderTimeframeTabs();
         renderChart();
+        refreshIntervalOptions();
         log('info', `初始化完成: ${state.currentBoard}/${state.currentTimeframe}`);
     }
 
     function applyState(data) {
         state.ohlcv = data.ohlcv || [];
         state.markers = data.markers || [];
-        state.indicators = data.indicators || {};
+        state.indicators = data.indicators || {};  // v0.4: inst_id 键
         state.drawings = {};
         (data.drawings || []).forEach(d => { state.drawings[d.id] = d; });
         state.subplots = {};

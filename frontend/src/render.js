@@ -1,4 +1,5 @@
 import { state } from './state.js';
+import { openSearch } from './search.js';
 import { isIntraday, formatTimeCN } from './format.js';
 import { log } from './log.js';
 import { LightweightCharts } from './lwc.js';
@@ -31,8 +32,9 @@ import { attachDrawingInteraction } from './draw_interact.js';
         const up = last.close >= prev.close;
         const y = candle.priceToCoordinate(last.close);
         if (y == null) { lab.style.display = 'none'; return; }
-        const inner = container.querySelector('div');
-        const paneH = Math.max(50, (inner ? inner.clientHeight : container.clientHeight) - 30);
+        //  pane 高度直接量容器（勿用 querySelector('div')：标签自身可能成为首个 div
+        //  导致 paneH 恒=50、标签被 ▼ 吸附钳死直到刷新）
+        const paneH = Math.max(50, container.clientHeight - 30);
         let yy = y, arrow = '';
         if (y < 0) { yy = 4; arrow = '▲ '; }          // 最新价高于可视区 → 吸附顶部
         else if (y > paneH) { yy = paneH - 4; arrow = '▼ '; }  // 低于可视区 → 吸附底部
@@ -51,6 +53,12 @@ import { attachDrawingInteraction } from './draw_interact.js';
             return ind.lines[0].style.color;
         }
         return '#4fc3f7';
+    }
+
+    function updateDataInfo() {
+        // 左上统计（bars | indicators）：init/全渲染/增量更新统一走这里，保证实时
+        document.getElementById('data-info').textContent =
+            `${state.ohlcv.length} bars | ${Object.keys(state.indicators).length} indicators`;
     }
 
     function renderIndicatorBar() {
@@ -163,13 +171,25 @@ import { attachDrawingInteraction } from './draw_interact.js';
         const container = document.getElementById('main-chart');
         const emptyState = document.getElementById('empty-state');
 
+        // 全白户引导页：无板 = 搜索流建现场（用户侧无空板）
+        const guide = document.getElementById('guide');
+        if (!state.boards || state.boards.length === 0) {
+            guide.style.display = 'block';
+            emptyState.style.display = 'none';
+            container.innerHTML = '';
+            clearSubplots();
+            renderIndicatorBar();
+            updateDataInfo();
+            return;
+        }
+        guide.style.display = 'none';
+
         if (!state.ohlcv || state.ohlcv.length === 0) {
             emptyState.style.display = 'block';
             container.innerHTML = '';
             clearSubplots();  // 无数据时也要清空副图，避免残留
             renderIndicatorBar();  // 无数据时也要刷新指标栏，避免残留旧chip
-            document.getElementById('data-info').textContent =
-                `0 bars | ${Object.keys(state.indicators).length} indicators`;  // 刷新统计，避免残留旧值
+            updateDataInfo();  // 刷新统计，避免残留旧值
             return;
         }
         emptyState.style.display = 'none';
@@ -228,12 +248,21 @@ import { attachDrawingInteraction } from './draw_interact.js';
         });
         state.charts.main = chart;
 
+        // 历史回溯只由真实用户手势触发：程序化渲染重置，手势置位（一次性绑定防叠加）
+        state._userTouched = false;
+        if (!container._akGestureBound) {
+            container._akGestureBound = true;
+            ['wheel', 'pointerdown', 'touchstart'].forEach(ev =>
+                container.addEventListener(ev, () => { state._userTouched = true; }, { passive: true }));
+        }
+
         // 向左平移到接近最左 → 按需加载更早历史
         // （程序化设置视口不触发，只有用户手动操作才触发）
         chart.timeScale().subscribeVisibleLogicalRangeChange(range => {
             reportView();  // 视口变化即上报（节流）
             updateLastPriceLabel();  // 滚动/缩放时刷新最新价标签吸附
             if (state._programmaticRange) { state._programmaticRange = false; return; }
+            if (!state._userTouched) return;  // 非用户手势（init/刷新/切板等程序化渲染）不补历史
             if (range && range.from <= 2) {
                 loadMoreHistory();
             }
@@ -251,6 +280,9 @@ import { attachDrawingInteraction } from './draw_interact.js';
         });
 
         const candleData = buildCandleData();
+        // 首渲染的 range 事件属程序化行为：置防误载标志，
+        // 修复新客户端 init/刷新时 setData 触发的 range 事件被误判为用户左滚而静默补一次历史
+        state._programmaticRange = true;
         candleSeries.setData(candleData);
         state.series.candle = candleSeries;
 
@@ -301,8 +333,7 @@ import { attachDrawingInteraction } from './draw_interact.js';
         state._prevTotal = state.ohlcv.length;
 
         // 更新数据信息
-        document.getElementById('data-info').textContent =
-            `${state.ohlcv.length} bars | ${Object.keys(state.indicators).length} indicators`;
+        updateDataInfo();
 
         // 挂载已画好线的交互（双击选中/拖动/端点/右键菜单）
         attachDrawingInteraction();
@@ -396,9 +427,11 @@ import { attachDrawingInteraction } from './draw_interact.js';
             }
         });
 
-        // 恢复视口
+        // 恢复视口（bug2 根治）：仅在前插(shift>0)或追加(newTotal>prevTotal)时动视口；
+        // 原地 tick 更新（total 不变）绝不碰视口——否则 wasAtRight 分支的 +2 右边距
+        // 会被计入下一次的 width，每 tick 蠕变 +2 格（"价格一变就往右缩一小格"）
         const newTotal = state.ohlcv.length;
-        if (prevRange) {
+        if (prevRange && (shift > 0 || newTotal > prevTotal)) {
             state._programmaticRange = true;  // 程序化恢复，不触发历史加载
             if (shift > 0) {
                 // 历史前插：视口右移 shift，保持看到原来的K线
@@ -406,14 +439,16 @@ import { attachDrawingInteraction } from './draw_interact.js';
             } else {
                 const wasAtRight = prevRange.to >= prevTotal - 1;
                 if (wasAtRight) {
+                    // 右缘跟随新K线：宽度严格守恒（右边距只加一次，不累积）
                     const width = prevRange.to - prevRange.from;
-                    ts.setVisibleLogicalRange({ from: newTotal - width, to: newTotal + 2 });
+                    ts.setVisibleLogicalRange({ from: newTotal + 2 - width, to: newTotal + 2 });
                 } else {
                     ts.setVisibleLogicalRange(prevRange);
                 }
             }
         }
         state._prevTotal = newTotal;
+        updateDataInfo();  // 增量路径（轮询新bar/回溯前插）也要实时刷新统计
         reportView();
         updateLegends(null);
         updateLastPriceLabel();
@@ -474,7 +509,7 @@ import { attachDrawingInteraction } from './draw_interact.js';
         historyLoading = true;
         try {
             const r = await fetch(
-                `/api/board/${state.currentBoard}/timeframe/${state.currentTimeframe}/history`,
+                `/api/board/${state.currentBoard}/timeframe/${state.currentTimeframe}/backfill`,
                 { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ limit: 200 }) }
             );
             const d = await r.json();
@@ -716,8 +751,21 @@ import { attachDrawingInteraction } from './draw_interact.js';
 
     function setupCrosshairSync() {
         Object.entries(state.charts).forEach(([key, chart]) => {
+            // bug4：价格更新后 setData 会让 LWC 对"带程序化十字准星的图"重发 crosshairMove，
+            // 同步链会把它当源反向传播，把用户悬停图的水平线 setCrosshairPosition 吸附到K线值。
+            // 用真实鼠标在哪个图上（mousemove/mouseleave）判定唯一同步源，程序化重发一律忽略。
+            const el = key === 'main' ? document.getElementById('main-chart') : state.subplotDivs[key];
+            if (el && !el._akHoverBound) {
+                el._akHoverBound = true;
+                el.addEventListener('mousemove', () => { state._hoverChartKey = key; }, { passive: true });
+                el.addEventListener('mouseleave', () => {
+                    if (state._hoverChartKey === key) state._hoverChartKey = null;
+                }, { passive: true });
+            }
             chart.subscribeCrosshairMove(param => {
                 if (state._crosshairSyncing) return;
+                const isUserHover = state._hoverChartKey === key;
+                if (!isUserHover && param.point) return;  // 程序化重发：不传播（离开清除仍放行）
                 state._crosshairSyncing = true;
                 updateLegends(param.time === undefined ? null : param.time);
                 try {
@@ -1037,4 +1085,39 @@ function setVisibleTimeRange(fromSec, toSec) {
     }
 }
 
-export { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnapshot, setVisibleTimeRange };
+
+    // ============================================================
+    // 铭牌（Symbol Corner 只读+🔒）/ 板身份证卡 / 弹层绑定（P1 摩擦面）
+    // ============================================================
+    function openIdCard(boardId = null) {
+        const bid = boardId || state.currentBoard;
+        const lock = (state.locks || {})[bid] || {};
+        const b = state.boards.find(x => x.id === bid) || {};
+        const body = document.getElementById('id-card-body');
+        if (!body) return;
+        const stem = String(lock.script || '').split('/').pop();
+        const sym = (lock.identity || {}).symbol;
+        body.innerHTML = `<h3>${sym ? `${stem}: ${sym}` : (stem || bid)} · 🔒 已锁定</h3>
+<pre>${JSON.stringify({ identity: lock.identity || {}, script: lock.script,
+    board: bid, intervals: b.intervals || [] }, null, 2)}</pre>
+<p class="hint">一标的一板：换标的/换源请「进入新现场」；分析层锚定本坐标系，不归档不克隆</p>`;
+        document.getElementById('id-card').style.display = 'flex';
+    }
+
+    function bindOverlays() {
+        const ic = document.getElementById('idcard-close');
+        if (ic) ic.onclick = () => { document.getElementById('id-card').style.display = 'none'; };
+        const ns = document.getElementById('idcard-new-scene');
+        if (ns) ns.onclick = () => { document.getElementById('id-card').style.display = 'none'; openSearch(); };
+        const ba = document.getElementById('board-add');
+        if (ba) ba.onclick = () => openSearch();
+        const gs = document.getElementById('guide-search-btn');
+        if (gs) gs.onclick = () => openSearch();
+        const es = document.getElementById('empty-search-btn');
+        if (es) es.onclick = () => openSearch();
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape') document.getElementById('id-card').style.display = 'none';
+        });
+    }
+
+export { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnapshot, setVisibleTimeRange, openIdCard, bindOverlays };

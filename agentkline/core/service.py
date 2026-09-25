@@ -27,19 +27,105 @@ def _to_ms(v):
 class AgentKlineService:
     """AgentKline 业务核心"""
 
-    def __init__(self, scripts_dir: str):
+    def __init__(self, scripts_dir: str, limits: dict = None):
+        limits = limits or {}
         self.state = StateManager()
         self.script_engine = ScriptEngine(scripts_dir)
-        self.datasource = DataSourceManager(self.state, self.script_engine)
+        self.datasource = DataSourceManager(self.state, self.script_engine, self)
+        # R8 性能三件套限额（config limits 可覆盖）
+        self.max_window = int(limits.get("max_window", 5000))
+        self.max_bars_per_slot = int(limits.get("max_bars_per_slot", 50000))
+        self.state.MAX_BARS_PER_SLOT = self.max_bars_per_slot
+        self.init_window = int(limits.get("init_window", 2000))
+        self._symbol_index: dict = {}  # script_id -> {"ts": epoch, "symbols": [...]}
+        self.SYMBOL_INDEX_TTL = 86400  # 索引 TTL 日级；手动 refresh 可强刷
+        self.DEFAULT_ONLINE_TFS = ["15m", "1h", "4h", "1d", "1w"]  # 实时源建板默认周期
         self.notify: Callable[[dict], None] = lambda msg: None  # 由传输层注入
         self.current_view: dict = {}  # 用户当前视图（前端上报）
 
     # ============ 画板 ============
-    def create_board(self, board_id, name=None, intervals=None):
+    def create_board(self, board_id, name=None, intervals=None, symbol=None,
+                     source=None, params=None, poll_s=None):
+        """建板。给 symbol/source = 建板即锁（用户侧搜索流）；皆无 = 空板（仅 AI 可建）。"""
+        if (symbol or source) and not name:
+            # 默认名 = 显示链统一格式：源名: 标的名（去 kind/ 前缀）
+            stem = str(source).split("/")[-1] if source else ""
+            name = f"{stem}: {symbol}" if (stem and symbol) else (symbol or stem or None)
+        if (symbol or source) and not intervals:
+            # 实时源建板默认五周期 = [15m,1h,4h,1d,1w] ∩ 脚本 INTERVALS；离线源(未声明)保持单槽自由
+            meta = self.script_engine.metadata(source) if source else {}
+            supported = (meta or {}).get("intervals") if isinstance(meta, dict) else None
+            if supported:
+                intervals = [d for d in self.DEFAULT_ONLINE_TFS if d in supported] or list(supported)
         result = self.state.create_board(board_id, name, intervals)
-        if not result.get("error"):
-            self._bc({"type": "board_create", "board": result})
+        if result.get("error"):
+            return result
+        if symbol or source:
+            if not source:
+                self.state.delete_board(board_id)
+                return {"error": "LOCK_REQUIRES_SOURCE: 建板即锁需同时给 source（脚本 id）"}
+            full_params = {**(params or {})}
+            if symbol:
+                full_params.setdefault("symbol", symbol)
+            lock_err = self._lock_board(board_id, source, full_params)
+            if lock_err:
+                self.state.delete_board(board_id)
+                return lock_err
+            board = self.state.get_board(board_id)
+            try:
+                r = self.set_kline_source(board_id, board.current_timeframe, source,
+                                          full_params, poll_s)
+            except Exception as e:
+                r = {"error": f"SOURCE_FETCH_ERROR: {e}"}
+            if r.get("error"):
+                self.datasource.stop_sync(board_id, board.current_timeframe)
+                self.state.delete_board(board_id)
+                return r
+            # 其余初始周期槽同样自动注入配置（默认五周期都有K线，不留空槽）
+            slot_errors = {}
+            for tf in board.intervals:
+                if tf == board.current_timeframe:
+                    continue
+                try:
+                    rr = self._configure_slot(board_id, tf, poll_s)
+                    if rr.get("error"):
+                        slot_errors[tf] = rr["error"]
+                except Exception as e:
+                    slot_errors[tf] = str(e)
+            if slot_errors:
+                logger.warning("create_board 部分槽配置失败: %s", slot_errors)
+                result = {**result, "slot_errors": slot_errors}
+            result = {**result, "source_lock": board.source_lock}
+        self._bc({"type": "board_create", "board": result})
         return result
+
+    def _lock_board(self, board_id, script, params) -> Optional[dict]:
+        """首配锁：identity 快照 = IDENTITY 键 → params 值；缺键报错"""
+        if self.script_engine.resolve(script) is None:
+            return {"error": f"SCRIPT_NOT_FOUND: {script}"}
+        meta = self.script_engine.metadata(script)
+        id_keys = meta.get("identity") or []
+        missing = [k for k in id_keys if k not in params]
+        if missing:
+            return {"error": f"LOCK_INCOMPLETE: 脚本 IDENTITY 键 {missing} 未在 params 提供（如 symbol）"}
+        board = self.state.get_board(board_id)
+        board.source_lock = {"script": script, "identity": {k: params[k] for k in id_keys}}
+        self._bc({"type": "board_locked", "board_id": board_id,
+                  "source_lock": board.source_lock})
+        return None
+
+    def _locked_err(self, board, script, params) -> dict:
+        """SOURCE_LOCKED：错误文案即教育 + 结构化 suggestion（一键改道建板）"""
+        lock = board.source_lock
+        ident = lock.get("identity") or {}
+        return {
+            "error": (f"SOURCE_LOCKED: 该画板已锁定 "
+                      f"{ident.get('symbol', '')}@{lock['script']}，请求的 "
+                      f"{params.get('symbol') or script} 未配置；换标的/换源请新建画板"),
+            "code": "SOURCE_LOCKED",
+            "suggestion": {"action": "create_board", "symbol": params.get("symbol"),
+                           "script": script, "params": params},
+        }
 
     def list_boards(self):
         return {"boards": self.state.list_boards()}
@@ -49,29 +135,59 @@ class AgentKlineService:
         if not result.get("error"):
             tf = self.state.get_default_timeframe(board_id)
             self._bc({"type": "board_switch", "board_id": board_id, "timeframe": tf,
-                      "state": self.state.get_timeframe_state(board_id, tf)})
+                      "state": self.get_state_windowed(board_id, tf)})
         return result
 
     def update_board(self, board_id, data):
         return self.state.update_board(board_id, data)
 
     def delete_board(self, board_id):
+        # 先停该板所有槽轮询+清配置（防孤儿轮询继续打脚本/广播）
+        board = self.state.get_board(board_id)
+        if board:
+            for tf in list(board.timeframes.keys()):
+                self.datasource.stop_sync(board_id, tf)
         result = self.state.delete_board(board_id)
         if not result.get("error"):
             self._bc({"type": "board_remove", "board_id": board_id,
                       "current_board": self.state.current_board_id})
-            # 删除最后一个画板 → 自动补一个空白画板，保证界面永远有画板
-            if not self.state.boards:
-                created = self.create_board("board_1", "画板")
-                self.switch_board(created["id"])
+            # v0.4：删光最后一个板 = 全白户 → 前端落引导页（搜索流建现场），不再自动补空板
         return result
 
     # ============ 时间周期 ============
     def create_timeframe(self, board_id, interval):
+        board = self.state.get_board(board_id)
+        if board and board.source_lock:
+            meta = self.script_engine.metadata(board.source_lock["script"])
+            supported = (meta or {}).get("intervals")
+            if supported and interval not in supported:
+                return {"error": f"INTERVAL_UNSUPPORTED: {board.source_lock['script']} 不支持 "
+                                 f"{interval}（支持: {supported}）"}
         result = self.state.create_timeframe(board_id, interval)
-        if not result.get("error"):
-            self._bc({"type": "timeframe_create", "board_id": board_id, "interval": interval})
+        if result.get("error"):
+            return result
+        self._bc({"type": "timeframe_create", "board_id": board_id, "interval": interval})
+        board = self.state.get_board(board_id)
+        if board and board.source_lock:
+            # 在线板：新周期槽由系统自动注入 {script, identity + interval}，用户点"+"即可出图
+            r = self._configure_slot(board_id, interval)
+            if r.get("error"):
+                return r
         return result
+
+    def _configure_slot(self, board_id, tf, poll_s=None):
+        """在线板槽位自动注入配置 {script, identity+interval}；poll_s 缺省继承已有槽"""
+        board = self.state.get_board(board_id)
+        if not board or not board.source_lock:
+            return {"status": "ok"}
+        if poll_s is None:
+            for x in board.timeframes:
+                cfg = self.datasource.configs.get(self.datasource._key(board_id, x))
+                if cfg and cfg.get("poll_s"):
+                    poll_s = cfg["poll_s"]
+                    break
+        params = {**board.source_lock["identity"], "interval": tf}
+        return self.set_kline_source(board_id, tf, board.source_lock["script"], params, poll_s)
 
     def delete_timeframe(self, board_id, tf):
         result = self.state.delete_timeframe(board_id, tf)
@@ -91,20 +207,89 @@ class AgentKlineService:
     def switch_timeframe(self, board_id, tf):
         result = self.state.switch_timeframe(board_id, tf)
         if not result.get("error"):
+            # 懒配置：在线板切到未配置槽 → 自动注入（治愈存量空槽/任何漏配路径）
+            board = self.state.get_board(board_id)
+            cfg = self.datasource.configs.get(self.datasource._key(board_id, tf))
+            if board and board.source_lock and not cfg:
+                self._configure_slot(board_id, tf)
             self._bc({"type": "timeframe_switch", "board_id": board_id, "timeframe": tf,
-                      "state": self.state.get_timeframe_state(board_id, tf)})
+                      "state": self.get_state_windowed(board_id, tf)})
         return result
 
     # ============ K线 ============
     def set_ohlcv(self, board_id, timeframe, ohlcv, markers=None):
+        prev = self.state.get_ohlcv(board_id, timeframe)
         result = self.state.set_ohlcv(board_id, timeframe, ohlcv, markers)
         if not result.get("error"):
-            # 画板级指标自动应用到本周期
-            self.state.propagate_board_indicators(board_id, timeframe)
-            self.refresh_dynamic_indicators(board_id, timeframe)
-            self._bc({"type": "ohlcv_update", "board_id": board_id, "timeframe": timeframe,
-                      "data": ohlcv, "markers": markers or []})
+            # 指标实例按 scope 自动覆盖本周期（登记处语义，无需 propagate）
+            self.recompute_indicators(board_id, timeframe)
+            self.bc_ohlcv_delta(board_id, timeframe, prev, ohlcv, markers=markers or [])
         return result
+
+    def bc_ohlcv_delta(self, board_id, tf, prev, new, markers=None):
+        """R8 传输增量化：ohlcv_update 只推差量（前插/追加/尾部更新），前端按 ts 合并"""
+        prev = prev or []
+        pmap = {b["timestamp"]: b for b in prev}
+        first = prev[0]["timestamp"] if prev else None
+        last = prev[-1]["timestamp"] if prev else None
+        prepended, appended, updated = [], [], []
+        for b in new:
+            ts = b["timestamp"]
+            if ts not in pmap:
+                if first is not None and ts < first:
+                    prepended.append(b)
+                else:
+                    appended.append(b)
+            elif pmap[ts] != b:
+                updated.append(b)
+        payload = {"board_id": board_id, "timeframe": tf,
+                   "prepended": prepended, "appended": appended, "updated": updated}
+        if markers is not None:
+            payload["markers"] = markers
+        self._bc({"type": "ohlcv_update", **payload})
+
+    def get_state_windowed(self, board_id, timeframe, window=None):
+        """init/switch 携带窗口=最近 N 根（非全树）；左滚历史走 backfill 按需"""
+        st = self.state.get_timeframe_state(board_id, timeframe)
+        w = window or self.init_window
+        if st.get("ohlcv") and len(st["ohlcv"]) > w:
+            st = {**st, "ohlcv": st["ohlcv"][-w:], "windowed": True}
+        return st
+
+    def search_symbols(self, q: str = "", refresh: bool = False) -> dict:
+        """标的搜索（P1）：索引=CAPS.symbols 源首用全量+TTL 日级+手动 refresh；
+        搜索永不穿透交易所（首用后本地过滤）。行=完整二元组(源,裸符号)+●现场徽标"""
+        import time as _t
+        q = (q or "").strip().upper()
+        rows, errors = [], []
+        for s in self.script_engine.list_scripts():
+            if s["kind"] != "datasource" or not s["caps"].get("symbols"):
+                continue
+            sid = s["id"]
+            ent = self._symbol_index.get(sid)
+            now = _t.time()
+            if ent is None or refresh or (now - ent["ts"]) > self.SYMBOL_INDEX_TTL:
+                r = self.script_engine.list_symbols(sid, "")
+                if r.get("error"):
+                    errors.append({sid: r["error"]})
+                    continue
+                ent = {"ts": now, "symbols": r["symbols"]}
+                self._symbol_index[sid] = ent
+            for sym in ent["symbols"]:
+                symbol, display = sym.get("symbol"), sym.get("display") or sym.get("symbol")
+                if q and q not in str(symbol).upper() and q not in str(display).upper():
+                    continue
+                has_board = any(
+                    b.source_lock and b.source_lock["script"] == sid
+                    and (b.source_lock.get("identity") or {}).get("symbol") == symbol
+                    for b in self.state.boards.values())
+                rows.append({"symbol": symbol, "source": sid, "display": display,
+                             "has_board": has_board})
+                if len(rows) >= 50:
+                    break
+            if len(rows) >= 50:
+                break
+        return {"rows": rows, "errors": errors}
 
     def set_markers(self, board_id, timeframe, markers):
         markers = list(markers or [])
@@ -128,229 +313,177 @@ class AgentKlineService:
                 result["dropped"] = dropped
         return result
 
-    def load_csv(self, board_id, timeframe, path, time_col="timestamp"):
-        try:
-            ohlcv = self._parse_csv(path, time_col)
-        except Exception as e:
-            return {"error": f"CSV parse error: {e}"}
-        return self.set_ohlcv(board_id, timeframe, ohlcv)
-
     # ============ 指标 ============
-    def add_indicator(self, board_id, timeframe, name, values=None, subplot=None,
-                      style=None, type=None, markers=None, lines=None, replace=True,
-                      script=None, params=None, scope="board", display_name=None):
-        """加指标（统一入口）。
-        - 给 script：计算型 → 委托 run_script(save_as=indicator) 执行脚本得出值
-        - 给 values/lines：现成型 → 直接落值
-        - 两者皆无：返回 400 空指标错误"""
-        if script:
-            return self.run_script(board_id, timeframe, script, params, save_as="indicator",
-                                   indicator_name=name, subplot=subplot, scope=scope,
-                                   display_name=display_name)
-        if values is None and not lines:
+    def run_script(self, script: str, params: dict = None) -> dict:
+        """通用脚本执行（v0.4 窄身）：script 为 id（kind/name）；只执行并返回结果，
+        图上不留痕。指标落盘 = save_script + add_indicator(script=...)；
+        K线入图 = 数据源配方（set_kline_source），皆可溯源可重放。"""
+        return self.script_engine.run_script(script, params or {})
+
+    # ============ 指标实例（v0.4：登记处 + 物化缓存，inst_id 把手） ============
+    def add_indicator(self, board_id, timeframe, inst_id=None, values=None, subplot=None,
+                      style=None, type=None, markers=None, lines=None,
+                      script=None, params=None, scope=None, display_name=None):
+        """加指标（统一入口，inst_id 把手版）。
+        - 计算型 recipe：给 script（id）+params，随K线自动重算
+        - 冻结 blob：给 values/lines/markers，钉死本周期（传 scope 直接报 BLOB_SCOPE）
+        - inst_id 撞名报 INST_EXISTS；不传自动 macd_2 式生成"""
+        if script and (values is not None or lines):
+            return {"error": "INDICATOR_BOTH: script(计算型) 与 values/lines(现成型) 互斥"}
+        if not script and values is None and not lines and not markers:
             return {"error": "EMPTY_INDICATOR: 需要 script（计算型）或 values/lines（现成型）"}
-        existing = self.state.get_indicator(board_id, timeframe, name)
-        if existing and not replace:
-            return {"error": "INDICATOR_EXISTS"}
-        result = self.state.set_indicator(board_id, timeframe, name, values=values,
-                                          subplot=subplot, style=style, type=type,
-                                          markers=markers, lines=lines)
-        if not result.get("error"):
-            self._bc({"type": "indicator_update" if existing else "indicator_add",
-                      "board_id": board_id, "timeframe": timeframe, "name": name,
-                      "values": values, "subplot": subplot, "style": style,
-                      "indicator_type": type, "markers": markers, "lines": lines})
-        return result
-
-    def run_script(self, board_id, timeframe, path, params=None, save_as=None,
-                   indicator_name=None, subplot=None, scope="board", display_name=None):
-        """通用脚本执行。save_as: ohlcv / indicator / None。
-        scope(仅 indicator): board=作用于所有周期(默认) / timeframe=仅本周期"""
-        params = params or {}
-        if save_as == "indicator":
-            name = indicator_name or Path(path).stem
-
-            if scope == "board":
-                # 画板级：注册定义 + 在所有周期注册并按各自K线计算
-                self.state.register_board_indicator(board_id, name, path, params, subplot)
-                for tf in self._all_timeframes(board_id):
-                    if subplot:
-                        self._ensure_subplot(board_id, tf, subplot)
-                    self.state.propagate_board_indicators(board_id, tf)
-                    self.refresh_dynamic_indicators(board_id, tf)
-                cur = self.state.get_indicator(board_id, timeframe, name)
-                if display_name:
-                    self._set_display(board_id, timeframe, name, path, params, None, override=display_name)
-                self._bc({"type": "indicator_add", "board_id": board_id, "timeframe": timeframe,
-                          "name": name, "values": (cur or {}).get("values"),
-                          "lines": (cur or {}).get("lines"), "subplot": subplot,
-                          "params": (cur or {}).get("params"),
-                          "display_name": (cur or {}).get("display_name"), "scope": "board"})
-                return {"status": "ok", "save_as": "indicator", "name": name, "scope": "board"}
-
-            # 本周期
-            ohlcv = self.state.get_ohlcv(board_id, timeframe)
-            if not ohlcv:
-                return {"error": "No OHLCV data loaded. Load data first."}
-            result = self.script_engine.run_indicator_script(path, ohlcv, params)
-            if result.get("error"):
-                return result
-            values = result.get("values", [])
-            lines = result.get("lines")
-            eff_params = (result.get("meta") or {}).get("params", params)
+        board = self.state.get_board(board_id)
+        if not board:
+            return {"error": f"Board '{board_id}' not found"}
+        kind = "recipe" if script else "blob"
+        if kind == "blob" and scope is not None:
+            return {"error": "BLOB_SCOPE: 冻结 blob 钉死单周期，不能传 scope（存在性推论）"}
+        if script and self.script_engine.resolve(script) is None:
+            from .script_engine import id_error
+            return {"error": id_error(script) if "/" not in str(script)
+                    else f"SCRIPT_NOT_FOUND: {script}"}
+        scope = scope or ("board" if kind == "recipe" else "timeframe")
+        if inst_id and self.state.get_instance(board_id, inst_id):
+            return {"error": f"INST_EXISTS: inst_id '{inst_id}' 已存在（换一个或用 update_indicator 改）",
+                    "code": "INST_EXISTS"}
+        if not inst_id:
+            base = script.split("/")[-1] if script else "blob"
+            inst_id, n = base, 2
+            while self.state.get_instance(board_id, inst_id):
+                inst_id, n = f"{base}_{n}", n + 1
+        inst = {"inst_id": inst_id, "kind": kind, "script": script,
+                "params": params or {}, "scope": scope,
+                "tf": None if scope == "board" else timeframe,
+                "target": subplot, "style": style, "lines_style": None,
+                "display_name": display_name, "custom_label": bool(display_name),
+                "auto_label": None,
+                "blob": None if kind == "recipe" else
+                        {"values": values, "lines": lines, "markers": markers}}
+        self.state.add_instance(board_id, inst)
+        targets = self._all_timeframes(board_id) if scope == "board" else [timeframe]
+        for tf in targets:
             if subplot:
-                self._ensure_subplot(board_id, timeframe, subplot)
-            self.state.set_indicator(board_id, timeframe, name,
-                                     values=values if not lines else None,
-                                     lines=lines, markers=result.get("markers"),
-                                     subplot=subplot, script_path=path, params=eff_params,
-                                     scope="timeframe")
-            self.state.register_dynamic_indicator(board_id, timeframe, name, path, eff_params)
-            self._set_display(board_id, timeframe, name, path, eff_params, result.get("meta"),
-                              override=display_name)
-            self._bc({"type": "indicator_add", "board_id": board_id, "timeframe": timeframe,
-                      "name": name, "values": values if not lines else None,
-                      "lines": lines, "markers": result.get("markers"), "subplot": subplot,
-                      "params": eff_params,
-                      "display_name": (self.state.get_indicator(board_id, timeframe, name) or {}).get("display_name"),
-                      "scope": "timeframe"})
-            return {"status": "ok", "save_as": "indicator", "name": name,
-                    "count": len(values) if not lines else len(lines), "scope": "timeframe"}
-        else:
-            result = self.script_engine.run_script(path, params)
-            if result.get("error"):
-                return result
-            data = result.get("data")
-            if not data:
-                return {"status": "ok", "output": result.get("output")}
-            if save_as == "ohlcv":
-                r = self.set_ohlcv(board_id, timeframe, data)
-                return {"status": "ok", "save_as": "ohlcv", "count": len(data), **r}
-            return {"status": "ok", "data": data}
+                self._ensure_subplot(board_id, tf, subplot)
+            if kind == "recipe":
+                self._recompute_one(board_id, tf, inst)
+            else:
+                b = inst["blob"]
+                self.state.set_cache(board_id, tf, inst_id,
+                                     b.get("values"), b.get("lines"), b.get("markers"))
+                inst["auto_label"] = inst_id
+        self._bc_indicators("indicator_add", board_id, targets, inst)
+        return {"status": "ok", "inst_id": inst_id, "scope": scope}
 
-    def delete_indicator(self, board_id, timeframe, name):
-        is_board = any(i["name"] == name for i in self.state.get_board_indicators(board_id))
-        if is_board:
-            # 画板级：从画板定义 + 所有周期移除
-            self.state.remove_board_indicator(board_id, name)
-            for tf in self._all_timeframes(board_id):
-                self.state.remove_dynamic_indicator(board_id, tf, name)
-                self.state.delete_indicator(board_id, tf, name)
-            self._bc({"type": "indicator_remove", "board_id": board_id,
-                      "timeframe": timeframe, "name": name})
-            return {"status": "ok"}
-
-        result = self.state.delete_indicator(board_id, timeframe, name)
-        if not result.get("error"):
-            self._bc({"type": "indicator_remove", "board_id": board_id,
-                      "timeframe": timeframe, "name": name})
-        return result
-
-    def refresh_indicator(self, board_id, timeframe, name):
-        indicator = self.state.get_indicator(board_id, timeframe, name)
-        if not indicator:
-            return {"error": "Indicator not found"}
-        if not indicator.get("script_path"):
-            return {"error": "Indicator has no script"}
-        ohlcv = self.state.get_ohlcv(board_id, timeframe)
-        result = self.script_engine.run_indicator_script(indicator["script_path"], ohlcv,
-                                                        indicator.get("params", {}))
+    def _recompute_one(self, board_id, tf, inst):
+        """重算单个 recipe 实例（尾窗 max_window 截尾喂脚本，warmup 由脚本自留）"""
+        ohlcv = self.state.get_ohlcv(board_id, tf)
+        if not ohlcv:
+            return
+        win = getattr(self, "max_window", 5000)
+        feed = ohlcv[-win:] if len(ohlcv) > win else ohlcv
+        result = self.script_engine.run_indicator_script(inst["script"], feed, inst.get("params"))
         if result.get("error"):
-            return result
-        self.state.set_indicator(board_id, timeframe, name, values=result["values"])
-        self._set_display(board_id, timeframe, name, indicator["script_path"],
-                          indicator.get("params", {}), result.get("meta"))
-        self._bc({"type": "indicator_refresh", "board_id": board_id, "timeframe": timeframe,
-                  "name": name, "values": result["values"], "subplot": indicator.get("subplot"),
-                  "display_name": (self.state.get_indicator(board_id, timeframe, name) or {}).get("display_name")})
-        return {"status": "ok", "name": name}
+            logger.warning("recompute %s/%s %s: %s", board_id, tf, inst["inst_id"], result["error"])
+            return
+        self.state.set_cache(board_id, tf, inst["inst_id"],
+                             result.get("values"), result.get("lines"), result.get("markers"))
+        if not inst.get("custom_label"):
+            inst["auto_label"] = self._auto_label(inst, result.get("meta"))
 
-    # ============ 指标自动命名 + 统一更新 ============
-    def _auto_display(self, path, params, meta):
-        """根名优先级：脚本 label() > 脚本 NAME > 文件名 stem；再拼参数值"""
+    def _auto_label(self, inst, meta):
         meta = meta or {}
         if meta.get("label"):
             return meta["label"]
-        root = (meta.get("name") or Path(path).stem).upper()
-        vals = [str(v) for v in (params or {}).values()]
+        root = (meta.get("name") or str(inst["script"]).split("/")[-1]).upper()
+        vals = [str(v) for v in (inst.get("params") or {}).values()]
         if len(vals) > 3:
-            vals = vals[:3] + ['…']  # 参数过多时截断，完整信息在设置弹窗
+            vals = vals[:3] + ['…']
         return f"{root}({', '.join(vals)})" if vals else root
 
-    def _set_display(self, board_id, tf, name, path, params, meta, override=None):
-        ind = self.state.get_indicator(board_id, tf, name) or {}
-        if override:
-            self.state.set_indicator(board_id, tf, name, display_name=override, custom_label=True)
-        elif not ind.get("custom_label"):
-            self.state.set_indicator(board_id, tf, name,
-                                     display_name=self._auto_display(path, params, meta))
+    def recompute_indicators(self, board_id, timeframe):
+        """本周期全部 recipe 实例重算（K线更新/回溯/换源统一入口）；blob 不动"""
+        board = self.state.get_board(board_id)
+        if not board:
+            return
+        changed = [i for i in self.state.tf_instances(board_id, timeframe)
+                   if i["kind"] == "recipe"]
+        for inst in changed:
+            self._recompute_one(board_id, timeframe, inst)
+        if changed:
+            self._bc_indicators("indicator_update", board_id, [timeframe], None, insts=changed)
 
-    def update_indicator(self, board_id, timeframe, name, params=None, style=None,
+    def _bc_indicators(self, ev_type, board_id, tfs, inst, insts=None):
+        """广播指标变化（wire：inst_id + recipe 摘要 + 物化值）"""
+        items = insts or ([inst] if inst else [])
+        for tf in tfs:
+            for it in items:
+                c = self.state.get_cache(board_id, tf, it["inst_id"]) or {}
+                self._bc({"type": ev_type, "board_id": board_id, "timeframe": tf,
+                          "inst_id": it["inst_id"], "kind": it["kind"],
+                          "display_name": it.get("display_name") or it.get("auto_label") or it["inst_id"],
+                          "subplot": it["target"], "style": it["style"],
+                          "lines_style": it["lines_style"], "params": it["params"],
+                          "scope": it["scope"], "script": it["script"],
+                          "values": c.get("values"), "lines": c.get("lines"),
+                          "markers": c.get("markers")})
+
+    def delete_indicator(self, board_id, timeframe, inst_id):
+        r = self.state.delete_instance(board_id, inst_id)
+        if r.get("error"):
+            return r
+        for tf in self._all_timeframes(board_id):
+            self._bc({"type": "indicator_remove", "board_id": board_id,
+                      "timeframe": tf, "inst_id": inst_id})
+        return {"status": "ok", "inst_id": inst_id}
+
+    def refresh_indicator(self, board_id, timeframe, inst_id):
+        inst = self.state.get_instance(board_id, inst_id)
+        if not inst:
+            return {"error": f"Indicator '{inst_id}' not found"}
+        if inst["kind"] != "recipe":
+            return {"error": "Indicator 是冻结 blob，不可重算"}
+        self._recompute_one(board_id, timeframe, inst)
+        self._bc_indicators("indicator_update", board_id, [timeframe], inst)
+        return {"status": "ok", "inst_id": inst_id}
+
+    def update_indicator(self, board_id, timeframe, inst_id, params=None, style=None,
                          lines_style=None, display_name=None, auto_label=None):
-        """统一更新：改参数→重算；改样式→不重算；可改显示名/恢复自动命名。
-        画板级指标会同步到所有周期。"""
-        indicator = self.state.get_indicator(board_id, timeframe, name)
-        if not indicator:
-            return {"error": "Indicator not found"}
-        is_board = any(i["name"] == name for i in self.state.get_board_indicators(board_id))
-        targets = self._all_timeframes(board_id) if is_board else [timeframe]
-
-        # 恢复自动命名
+        """统一更新：改参数=重声明配方并重算；改样式=不重算；显示名可覆盖/恢复自动"""
+        inst = self.state.get_instance(board_id, inst_id)
+        if not inst:
+            return {"error": f"Indicator '{inst_id}' not found"}
+        patch = {}
+        if style is not None:
+            patch["style"] = style
+        if lines_style is not None:
+            patch["lines_style"] = lines_style
+        if display_name is not None:
+            patch.update(display_name=display_name, custom_label=True)
         if auto_label:
-            for tf in targets:
-                self.state.set_indicator(board_id, tf, name, custom_label=False, display_name=None)
-
-        # 改样式（不重算）：style=单线整体；lines_style=按线名逐线覆盖
-        if style is not None or lines_style:
-            for tf in targets:
-                ind = self.state.get_indicator(board_id, tf, name) or {}
-                if lines_style and ind.get("lines"):
-                    newlines = []
-                    for ln in ind["lines"]:
-                        ls = dict(ln.get("style") or {})
-                        ls.update(lines_style.get(ln.get("name"), {}) or {})
-                        newlines.append({**ln, "style": ls})
-                    self.state.set_indicator(board_id, tf, name, lines=newlines)
-                if style is not None:
-                    self.state.set_indicator(board_id, tf, name, style=style)
-
-        # 改参数（重算）或仅改名
+            patch.update(display_name=None, custom_label=False)
+        recompute = False
         if params is not None:
-            if not indicator.get("script_path"):
-                return {"error": "Indicator has no script, cannot change params"}
+            if inst["kind"] != "recipe":
+                return {"error": "Blob 无配方，不能改 params"}
+            patch["params"] = {**(inst.get("params") or {}), **params}
+            recompute = True
+        if patch:
+            self.state.update_instance(board_id, inst_id, patch)
+        targets = self._all_timeframes(board_id) if inst["scope"] == "board" \
+            else [inst.get("tf") or timeframe]
+        if recompute:
             for tf in targets:
-                ohlcv = self.state.get_ohlcv(board_id, tf)
-                if not ohlcv:
-                    continue
-                merged = {**(indicator.get("params") or {}), **params}
-                result = self.script_engine.run_indicator_script(indicator["script_path"], ohlcv, merged)
-                if result.get("error"):
-                    return result
-                lines = result.get("lines")
-                self.state.set_indicator(board_id, tf, name,
-                                         values=result.get("values") if not lines else None,
-                                         lines=lines, markers=result.get("markers"),
-                                         params=merged)
-                self._set_display(board_id, tf, name, indicator["script_path"], merged,
-                                  result.get("meta"), override=display_name)
-                self._bc({"type": "indicator_update", "board_id": board_id, "timeframe": tf,
-                          "name": name, "values": result.get("values") if not lines else None,
-                          "lines": lines, "subplot": indicator.get("subplot"),
-                          "style": style, "params": merged, "scope": "board" if is_board else None})
-        else:
-            # 未改参数：只更新显示名
+                self._recompute_one(board_id, tf, inst)
+        if lines_style:
             for tf in targets:
-                self._set_display(board_id, tf, name, indicator.get("script_path"),
-                                  indicator.get("params"), None, override=display_name)
-
-        # 广播样式/命名刷新（前端重渲染）
-        cur = self.state.get_indicator(board_id, timeframe, name)
-        self._bc({"type": "indicator_update", "board_id": board_id, "timeframe": timeframe,
-                  "name": name, "values": cur.get("values"), "lines": cur.get("lines"),
-                  "subplot": cur.get("subplot"), "style": cur.get("style"),
-                  "params": cur.get("params"),
-                  "display_name": cur.get("display_name"), "scope": "board" if is_board else None})
-        return {"status": "ok", "name": name, "display_name": cur.get("display_name")}
+                c = self.state.get_cache(board_id, tf, inst_id)
+                for ln in (c or {}).get("lines") or []:
+                    ls = lines_style.get(ln.get("name"))
+                    if ls:
+                        ln.setdefault("style", {}).update(ls)
+        self._bc_indicators("indicator_update", board_id, targets, inst)
+        return {"status": "ok", "inst_id": inst_id,
+                "display_name": inst.get("display_name") or inst.get("auto_label") or inst_id}
 
     # ============ 划线 drawings ============
     def add_drawing(self, board_id, timeframe, drawing):
@@ -412,36 +545,31 @@ class AgentKlineService:
             "ohlcv": sliced,
         }
 
-    def get_indicators(self, board_id, timeframe, start=None, end=None, names=None):
-        """指标值区间切片，范围逻辑同 get_kline；names 指定一个/多个指标，默认全部。"""
+    def get_indicators(self, board_id, timeframe, start=None, end=None, instances=None):
+        """指标值区间切片（省 token）；instances= 按 inst_id 过滤"""
         ohlcv, i0, i1 = self._resolve_range(board_id, timeframe, start, end)
-        if not ohlcv:
-            return {"error": "No data"}
-        tf_state = self.state.get_board(board_id).get_tf(timeframe)
-        wanted = set(names) if names else None
-        indicators = {}
-        for name, ind in tf_state.indicators.items():
-            if wanted is not None and name not in wanted:
+        want = set(instances) if instances else None
+        out = {}
+        for inst in self.state.tf_instances(board_id, timeframe):
+            if want and inst["inst_id"] not in want:
                 continue
-            if ind.get("lines"):
-                indicators[name] = {"lines": [
-                    {"name": l.get("name"), "type": l.get("type"),
-                     "values": (l.get("values") or [])[i0:i1 + 1]}
-                    for l in ind["lines"]]}
-            else:
-                indicators[name] = {"values": (ind.get("values") or [])[i0:i1 + 1]}
+            c = self.state.get_cache(board_id, timeframe, inst["inst_id"]) or {}
+            entry = {"inst_id": inst["inst_id"], "kind": inst["kind"],
+                     "display_name": inst.get("display_name") or inst.get("auto_label") or inst["inst_id"],
+                     "subplot": inst["target"], "params": inst["params"],
+                     "scope": inst["scope"], "script": inst["script"]}
+            if c.get("values") is not None:
+                entry["values"] = c["values"][i0:i1 + 1]
+            if c.get("lines"):
+                entry["lines"] = [{**ln, "values": (ln.get("values") or [])[i0:i1 + 1]}
+                                  for ln in c["lines"]]
+            if c.get("markers"):
+                entry["markers"] = c["markers"]
+            out[inst["inst_id"]] = entry
         return {"board_id": board_id, "timeframe": timeframe,
-                "range": {"from": ohlcv[i0]["timestamp"] if i0 <= i1 else None,
-                          "to": ohlcv[i1]["timestamp"] if i0 <= i1 else None},
-                "indicators": indicators}
-
-    def get_markers(self, board_id, timeframe):
-        """读取主图标记。"""
-        board = self.state.get_board(board_id)
-        tf_state = board.get_tf(timeframe) if board else None
-        if not tf_state:
-            return {"error": "No such board/timeframe"}
-        return {"board_id": board_id, "timeframe": timeframe, "markers": tf_state.markers}
+                "range": {"from": ohlcv[i0]["timestamp"] if ohlcv and i0 < len(ohlcv) else None,
+                          "to": ohlcv[i1]["timestamp"] if ohlcv and i1 < len(ohlcv) else None},
+                "indicators": out}
 
     def get_overview(self, board_id, timeframe):
         """轻量结构总览：只回结构与计数，不回 K 线/指标数值数组（省 token）。"""
@@ -450,12 +578,13 @@ class AgentKlineService:
         if not tf_state:
             return {"error": "No such board/timeframe"}
         ind_meta = {}
-        for name, ind in tf_state.indicators.items():
-            ind_meta[name] = {
-                "type": ind.get("type"), "subplot": ind.get("subplot"),
-                "display_name": ind.get("display_name"), "params": ind.get("params"),
-                "kind": "lines" if ind.get("lines") else "values",
-                "dynamic": bool(ind.get("script_path")),
+        for inst in self.state.tf_instances(board_id, timeframe):
+            ind_meta[inst["inst_id"]] = {
+                "kind": inst["kind"], "script": inst["script"],
+                "scope": inst["scope"], "target": inst["target"],
+                "display_name": inst.get("display_name") or inst.get("auto_label") or inst["inst_id"],
+                "params": inst["params"],
+                "dynamic": inst["kind"] == "recipe",
             }
         view = self.current_view if (self.current_view
                                      and self.current_view.get("board_id") == board_id
@@ -465,7 +594,8 @@ class AgentKlineService:
             "symbol": tf_state.symbol, "interval": tf_state.interval,
             "last_updated": tf_state.last_updated, "bars": len(tf_state.ohlcv),
             "view": {"from_time": view.get("from_time"), "to_time": view.get("to_time")} if view else None,
-            "datasource": self.datasource.get(board_id, timeframe),
+            "source_lock": board.source_lock, "locked": board.locked,
+            "kline_source": self.datasource.get(board_id, timeframe),
             "indicators": ind_meta,
             "subplots": [s.get("name") for s in tf_state.subplots.values()],
             "markers_count": len(tf_state.markers),
@@ -516,63 +646,115 @@ class AgentKlineService:
         return {"subplots": self.state.list_subplots(board_id, timeframe)}
 
     # ============ 数据源 ============
-    def set_datasource(self, board_id, tf, path, params=None, poll_interval=None, indicators=None):
-        # 停止旧数据源
-        import asyncio
-        self.datasource.stop(board_id, tf)
+    def set_kline_source(self, board_id, tf, script, params=None, poll_s=None):
+        """声明式配置 K 线来源（幂等，PUT 语义）。script 为 id（kind/name）。
+        - 空板首配 = 锁定（source_lock 就位）；已锁板全槽全等校验，违则 SOURCE_LOCKED+suggestion
+        - IDENTITY 键之外的 params = 操作参数，自由改（改即重拉）；仅 poll_s 变 = 不碰数据
+        - 指标随附打包参已废除——指标唯一入口 add_indicator"""
+        params = params or {}
+        board = self.state.get_board(board_id)
+        if not board:
+            return {"error": f"Board '{board_id}' not found"}
+        if self.script_engine.resolve(script) is None:
+            from .script_engine import id_error
+            return {"error": f"SCRIPT_NOT_FOUND: {script}" if "/" in str(script)
+                    else id_error(script)}
+        if board.source_lock is None:
+            lock_err = self._lock_board(board_id, script, params)
+            if lock_err:
+                return lock_err
+        else:
+            lock = board.source_lock
+            if script != lock["script"]:
+                return self._locked_err(board, script, params)
+            for k, v in (lock.get("identity") or {}).items():
+                if params.get(k) != v:
+                    return self._locked_err(board, script, params)
 
-        result = self.script_engine.run_script(path, params or {})
+        # §2.2 系统注入：在线板槽位 params 恒带 interval=槽名（面板名=周期）
+        params = {**params, "interval": tf}
+        key = self.datasource._key(board_id, tf)
+        cur = self.datasource.configs.get(key)
+        # 幂等：配置完全相同 = no-op
+        if cur and cur["script"] == script and cur["params"] == params \
+                and cur.get("poll_s") == poll_s:
+            return {"status": "ok", "noop": True}
+        # 仅 poll_s 变 = 不碰数据（轮询循环动态读 poll_s）
+        if cur and cur["script"] == script and cur["params"] == params:
+            self.datasource.stop_sync(board_id, tf)
+            self.datasource.set_config(board_id, tf, script, params, poll_s)
+            if poll_s and poll_s > 0:
+                self.datasource.start(board_id, tf, script, params, poll_s)
+            self._bc({"type": "kline_source_set", "board_id": board_id, "timeframe": tf,
+                      "script": script, "params": params, "poll_s": poll_s})
+            return {"status": "ok", "poll_only": True}
+
+        # script/params 变 = 停旧源、重拉一次
+        self.datasource.stop_sync(board_id, tf)
+        result = self.script_engine.run_script(script, params)
         if result.get("error"):
             return result
-
         data = result.get("data", [])
         self.state.set_ohlcv(board_id, tf, data)
-
-        if indicators:
-            for ind in indicators:
-                self.state.register_dynamic_indicator(board_id, tf, ind["name"],
-                                                      ind["path"], ind.get("params", {}))
-        self.refresh_dynamic_indicators(board_id, tf)
-
-        self.datasource.set_config(board_id, tf, path, params, poll_interval)
-        if poll_interval and poll_interval > 0:
-            self.datasource.start(board_id, tf, path, params, poll_interval)
-
-        self._bc({"type": "datasource_start", "board_id": board_id, "timeframe": tf,
-                  "poll_interval": poll_interval})
+        self.recompute_indicators(board_id, tf)
+        self.datasource.set_config(board_id, tf, script, params, poll_s)
+        if poll_s and poll_s > 0:
+            self.datasource.start(board_id, tf, script, params, poll_s)
+        self._bc({"type": "kline_source_set", "board_id": board_id, "timeframe": tf,
+                  "script": script, "params": params, "poll_s": poll_s})
         self._bc({"type": "ohlcv_update", "board_id": board_id, "timeframe": tf,
                   "data": data, "markers": []})
         return {"status": "ok", "count": len(data)}
 
-    def get_datasource(self, board_id, tf):
-        return {"datasource": self.datasource.get(board_id, tf)}
+    def get_kline_source(self, board_id, tf):
+        return {"kline_source": self.datasource.get(board_id, tf)}
 
-    def delete_datasource(self, board_id, tf):
-        self.datasource.stop(board_id, tf)
-        self._bc({"type": "datasource_stop", "board_id": board_id, "timeframe": tf})
-        return {"status": "ok"}
+    def interval_options(self, board_id):
+        """周期"+"按钮数据：仅实时源(声明 INTERVALS)可加；离线板 online=False"""
+        board = self.state.get_board(board_id)
+        if not board:
+            return {"error": f"Board '{board_id}' not found"}
+        current = list(board.intervals)
+        lock = board.source_lock
+        if not lock:
+            return {"online": False, "supported": [], "current": current, "addable": []}
+        meta = self.script_engine.metadata(lock["script"])
+        supported = (meta or {}).get("intervals") or []
+        return {"online": bool(supported), "supported": supported, "current": current,
+                "addable": [iv for iv in supported if iv not in current]}
+
+    def save_script(self, id, code):
+        """save_script 服务包装：保存即校验 + scripts_changed 广播（刷菜单）"""
+        r = self.script_engine.save_script(id, code)
+        if r.get("ok"):
+            self._bc({"type": "scripts_changed", "id": id})
+        return r
 
     def refresh_timeframe(self, board_id, tf):
         ds = self.datasource.get(board_id, tf)
-        if ds and ds.get("path"):
-            result = self.script_engine.run_script(ds["path"], ds.get("params", {}))
+        if ds and ds.get("script"):
+            result = self.script_engine.run_script(ds["script"], ds.get("params", {}))
             if not result.get("error"):
                 self.state.set_ohlcv(board_id, tf, result.get("data", []))
-        self.refresh_dynamic_indicators(board_id, tf)
+        self.recompute_indicators(board_id, tf)
         return {"status": "ok"}
 
-    def load_history(self, board_id, tf, limit=200):
+    def backfill(self, board_id, tf, limit=200):
+        """向左补更早历史（原 load_history）：读槽配置重放配方 + until=当前最早；
+        CAPS.backfill 门控，无徽章返回 0 并注明 NO_BACKFILL"""
         ds = self.datasource.get(board_id, tf)
-        if not ds or not ds.get("path"):
+        if not ds or not ds.get("script"):
             return {"prepended": 0, "error": "No datasource configured"}
+        if not self.script_engine.caps(ds["script"]).get("backfill"):
+            return {"prepended": 0, "error": f"NO_BACKFILL: {ds['script']} 未声明 CAPS.backfill"}
         ohlcv = self.state.get_ohlcv(board_id, tf)
         if not ohlcv:
             return {"prepended": 0}
         earliest = ohlcv[0]["timestamp"]
         params = dict(ds.get("params", {}))
-        params["until"] = earliest
+        params.pop("until", None)  # until 是调用参数，走签名不走 params
         params["limit"] = limit
-        result = self.script_engine.run_script(ds["path"], params)
+        result = self.script_engine.run_script(ds["script"], params, until=earliest)
         if result.get("error"):
             return {"prepended": 0, "error": result["error"]}
         older = [b for b in result.get("data", []) if b["timestamp"] < earliest]
@@ -582,9 +764,9 @@ class AgentKlineService:
         new_ohlcv = older + ohlcv
         markers = self.state.get_timeframe_state(board_id, tf).get("markers", [])
         self.state.set_ohlcv(board_id, tf, new_ohlcv, markers)
-        self._bc({"type": "ohlcv_update", "board_id": board_id, "timeframe": tf,
-                  "data": new_ohlcv, "markers": markers, "prepended": len(older)})
-        self.refresh_dynamic_indicators(board_id, tf)
+        self.state.shift_blob_caches(board_id, tf, len(older))  # blob 头部补 None 保索引对齐
+        self.bc_ohlcv_delta(board_id, tf, ohlcv, new_ohlcv, markers=markers)
+        self.recompute_indicators(board_id, tf)
         return {"prepended": len(older), "total": len(new_ohlcv)}
 
     # ============ 状态 ============
@@ -612,58 +794,3 @@ class AgentKlineService:
             self.notify(message)
         except Exception as e:
             logger.debug(f"notify error: {e}")
-
-    def refresh_dynamic_indicators(self, board_id, timeframe):
-        ohlcv = self.state.get_ohlcv(board_id, timeframe)
-        if not ohlcv:
-            return
-        for ind in self.state.get_dynamic_indicators(board_id, timeframe):
-            result = self.script_engine.run_indicator_script(ind["path"], ohlcv, ind.get("params", {}))
-            if not result.get("error"):
-                lines = result.get("lines")
-                values = result.get("values")
-                if lines or values:
-                    is_board = any(b["name"] == ind["name"]
-                                   for b in self.state.get_board_indicators(board_id))
-                    eff = (result.get("meta") or {}).get("params", ind.get("params", {}))
-                    self.state.set_indicator(board_id, timeframe, ind["name"],
-                                             values=values if not lines else None,
-                                             lines=lines, markers=result.get("markers"),
-                                             subplot=ind.get("subplot"), params=eff,
-                                             scope="board" if is_board else None)
-                    self._set_display(board_id, timeframe, ind["name"], ind["path"],
-                                      eff, result.get("meta"))
-                    self._bc({"type": "indicator_refresh", "board_id": board_id,
-                              "timeframe": timeframe, "name": ind["name"],
-                              "values": values if not lines else None,
-                              "lines": lines, "subplot": ind.get("subplot"),
-                              "display_name": (self.state.get_indicator(board_id, timeframe, ind["name"]) or {}).get("display_name")})
-
-    @staticmethod
-    def _parse_csv(path, time_col="timestamp"):
-        ohlcv = []
-        with open(path, "r", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                time_val = row.get(time_col, row.get("timestamp", row.get("time", "")))
-                if isinstance(time_val, str):
-                    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y%m%d"]:
-                        try:
-                            dt = datetime.strptime(time_val, fmt)
-                            time_val = int(dt.timestamp() * 1000)
-                            break
-                        except ValueError:
-                            continue
-                    else:
-                        time_val = int(time_val)
-                else:
-                    time_val = int(time_val)
-                ohlcv.append({
-                    "timestamp": time_val,
-                    "open": float(row.get("open", row.get("Open", 0))),
-                    "high": float(row.get("high", row.get("High", 0))),
-                    "low": float(row.get("low", row.get("Low", 0))),
-                    "close": float(row.get("close", row.get("Close", 0))),
-                    "volume": float(row.get("volume", row.get("Volume", 0)))
-                })
-        return ohlcv

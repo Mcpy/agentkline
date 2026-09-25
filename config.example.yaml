@@ -16,6 +16,12 @@ scripts:
   # L1 沙箱：直接 exec（内部调试用）
   sandbox_level: 1
 
+# v0.4 性能三件套（R8）限额
+limits:
+  max_window: 5000          # 指标重算尾窗（根数）；脚本长记忆参数勿超窗
+  max_bars_per_slot: 50000  # 每槽上限：越界截最旧 + dropped 回报（防 AI 手滑大内嵌）
+  init_window: 2000         # init/switch 携带窗口=最近 N 根；左滚历史走 backfill 按需
+
 # 鉴权（可选但强烈建议）。agent 端口全部接口需 Bearer 此 token；
 # 不设置则 agent 端口仅本机可用。环境变量 AGENTKLINE_TOKEN 优先级更高。
 auth:

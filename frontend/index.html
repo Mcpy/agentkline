@@ -10,6 +10,7 @@
     <!-- 顶部工具栏：画板 -->
     <div class="toolbar">
         <h1>📊 AgentKline</h1>
+        <span id="board-add" class="board-add" title="增加画板：搜索标的，一步建板即锁">＋</span>
         <span class="bar-label">画板:</span>
         <div class="board-tabs" id="board-tabs"></div>
         <div class="status-bar">
@@ -44,10 +45,40 @@
             </div>
             <div class="empty-state" id="empty-state">
                 <h2>暂无数据</h2>
-                <p>使用 API 推送 K 线数据，或配置数据源脚本</p>
+                <p>此现场尚未配置 K 线来源（AI 可通过 set_kline_source 配置）</p>
+                <button id="empty-search-btn" class="btn-primary">🔍 搜索标的，进入新现场</button>
+            </div>
+            <div class="empty-state" id="guide" style="display:none;">
+                <h2>📊 AgentKline</h2>
+                <p>AI 操作图表，人看和决策。第一步：选一个标的，建立你的分析现场。</p>
+                <button id="guide-search-btn" class="btn-primary">🔍 搜索标的，建立现场</button>
+                <p class="hint">搜索后点行 = 一步建板即锁；AI 随后即可在该现场上叠加分析</p>
             </div>
         </div>
     </div>
+
+    <!-- 标的搜索弹层（铭牌/引导页/空态共用） -->
+    <div class="overlay" id="search-overlay" style="display:none;">
+        <div class="overlay-card search-card">
+            <input id="search-input" placeholder="搜索标的（如 BTC）…  高级：@源名 裸符号" autocomplete="off" />
+            <div id="search-results" class="search-results"></div>
+            <div class="overlay-foot"><button id="search-close" class="btn-ghost">关闭 (Esc)</button></div>
+        </div>
+    </div>
+
+    <!-- 板身份证卡 -->
+    <div class="overlay" id="id-card" style="display:none;">
+        <div class="overlay-card">
+            <div id="id-card-body"></div>
+            <div class="overlay-foot">
+                <button id="idcard-new-scene" class="btn-primary">🔍 进入新现场…</button>
+                <button id="idcard-close" class="btn-ghost">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast（撞锁改道等） -->
+    <div id="toast-wrap" class="toast-wrap"></div>
 
     <!-- 日志面板（默认折叠） -->
     <div class="log-panel collapsed" id="log-panel">

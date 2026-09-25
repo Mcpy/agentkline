@@ -3,18 +3,14 @@
 返回 lines 结构，画在主图
 """
 
-
+NAME = "BOLL"
+DESC = "布林带：上轨/中轨/下轨"
 PARAMS = {"period": 20, "std": 2}
 
+
 def main(params: dict, ohlcv: list) -> dict:
-    """
-    params:
-        period: 周期 (默认 20)
-        std: 标准差倍数 (默认 2)
-    返回: {"lines": [upper, mid, lower]}
-    """
-    period = params.get("period", 20)
-    std_mult = params.get("std", 2)
+    period = int(params.get("period", 20))
+    std_mult = float(params.get("std", 2))
 
     if not ohlcv:
         return {"lines": []}

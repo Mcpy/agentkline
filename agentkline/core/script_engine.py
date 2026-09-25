@@ -1,160 +1,253 @@
 """
-AgentKline - 脚本执行引擎
-L1 沙箱：直接 exec（内部调试用）
+AgentKline - 脚本执行引擎（v0.4 R1）
+
+- 双根存储：builtin = <package>/resources/scripts/{datasource,indicator,strategy}（随包发布，只读）
+             custom = <scripts_dir>/{...}（可写；save_script 只落这里）
+- id = kind/stem 是唯一技术标识；引用格式 kind/name（如 indicator/macd），裸文件名硬切报错
+- 元数据 NAME/DESC/PARAMS/CAPS/IDENTITY 为模块顶层**字面常量**，ast 静态抽取（列目录永不 exec）+ mtime 缓存
+- CAPS 一致性：声明 ⇒ 必须实现（backfill⇒main 含 until 参；symbols⇒def list_symbols；ticker⇒def ticker），否则 CAPS_MISMATCH；
+  不声明 = 无能力（custom 旧脚本缺 CAPS 仅 warning）
+- 运行模式 poll/once 是槽位配置属性，不是脚本类别（见 service/datasource）
+- L1 沙箱：直接 exec 隔离命名空间（内部调试用），脚本需自律
 """
+import ast
 import sys
 import io
-import json
+import re
 import logging
+import inspect
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("agentkline.script")
 
+KINDS = ("datasource", "indicator", "strategy")
+CAPS_KEYS = ("backfill", "symbols", "ticker")
+STEM_RE = re.compile(r"^[a-z0-9_]+$")
+META_NAMES = ("NAME", "DESC", "PARAMS", "CAPS", "IDENTITY", "INTERVALS")
+SAVE_WARN_BYTES = 100_000  # save_script 大小告警阈值（R8 护栏族）
+
+
+def parse_id(ref) -> Optional[tuple]:
+    """解析 id=kind/stem；非法返回 None"""
+    if not isinstance(ref, str):
+        return None
+    parts = ref.split("/")
+    if len(parts) != 2:
+        return None
+    kind, stem = parts
+    if kind not in KINDS or not STEM_RE.match(stem):
+        return None
+    return kind, stem
+
+
+def id_error(ref) -> str:
+    if isinstance(ref, str) and "/" not in ref:
+        return (f"SCRIPT_BAD_ID: '{ref}' 裸文件名已废弃（v0.4 硬切），"
+                f"请用 kind/name 格式（如 indicator/macd），kind∈{list(KINDS)}")
+    return f"SCRIPT_BAD_ID: '{ref}' 非合法 id（kind/name，stem 需匹配 [a-z0-9_]+）"
+
 
 class ScriptEngine:
-    """Python 脚本执行引擎"""
+    """Python 脚本执行引擎（双根 + ast 元数据 + 保存即校验）"""
 
-    def __init__(self, scripts_dir: str):
-        self.scripts_dir = Path(scripts_dir)
-        self.scripts_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, custom_dir: str):
+        self.custom_root = Path(custom_dir)
+        self.builtin_root = Path(__file__).resolve().parent.parent / "resources" / "scripts"
+        for root in (self.custom_root, self.builtin_root):
+            for k in KINDS:
+                (root / k).mkdir(parents=True, exist_ok=True)
+        self._cache: dict = {}  # path -> (mtime, meta)
 
-    def resolve_path(self, path: str) -> Optional[Path]:
-        """解析脚本路径（支持相对路径）"""
-        p = Path(path)
-        if p.is_absolute():
-            if p.exists():
-                return p
+    # ---------- 解析 ----------
+    def roots(self):
+        return (("custom", self.custom_root), ("builtin", self.builtin_root))
+
+    def resolve(self, ref: str) -> Optional[dict]:
+        """id → {id,kind,stem,path,source}；custom 优先（shadow）"""
+        parsed = parse_id(ref)
+        if not parsed:
             return None
-        # 相对路径：相对于 scripts 目录
-        full = self.scripts_dir / path
-        if full.exists():
-            return full
-        # 也尝试相对于项目根目录
-        full2 = self.scripts_dir.parent / path
-        if full2.exists():
-            return full2
+        kind, stem = parsed
+        for source, root in self.roots():
+            p = root / kind / f"{stem}.py"
+            if p.exists():
+                return {"id": f"{kind}/{stem}", "kind": kind, "stem": stem,
+                        "path": p, "source": source}
         return None
 
-    def run_script(self, path: str, params: dict = None) -> dict:
-        """
-        执行脚本，返回 {"data": [...]} 或 {"error": "..."}
-        脚本必须定义 main(params) 函数
-        """
-        resolved = self.resolve_path(path)
-        if not resolved:
-            return {"error": f"SCRIPT_NOT_FOUND: {path}"}
+    # ---------- ast 元数据 ----------
+    @staticmethod
+    def _meta_from_tree(tree) -> dict:
+        meta = {"name": None, "desc": ast.get_docstring(tree), "params": {},
+                "caps": {k: False for k in CAPS_KEYS}, "caps_declared": False,
+                "identity": [], "defs": set(), "main_until": False, "has_main": False}
+        literals = {}
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name) and t.id in META_NAMES:
+                        try:
+                            literals[t.id] = ast.literal_eval(node.value)
+                        except Exception:
+                            literals[t.id] = None  # 非字面 = 未声明（契约要求字面）
+        if isinstance(literals.get("NAME"), str):
+            meta["name"] = literals["NAME"]
+        if isinstance(literals.get("DESC"), str):
+            meta["desc"] = literals["DESC"]
+        if isinstance(literals.get("PARAMS"), dict):
+            meta["params"] = literals["PARAMS"]
+        caps_raw = literals.get("CAPS")
+        if isinstance(caps_raw, dict):
+            meta["caps"] = {k: bool(caps_raw.get(k, False)) for k in CAPS_KEYS}
+            meta["caps_declared"] = True
+        ident = literals.get("IDENTITY")
+        if isinstance(ident, list):
+            meta["identity"] = [str(x) for x in ident]
+        intervals = literals.get("INTERVALS")
+        # 支持周期表（字面 list，如 ["15m","1h","4h","1d","1w"]）；不声明=离线源/自由槽
+        meta["intervals"] = [str(x) for x in intervals] if isinstance(intervals, list) else None
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                meta["defs"].add(node.name)
+                if node.name == "main":
+                    meta["has_main"] = True
+                    meta["main_until"] = "until" in [a.arg for a in node.args.args]
+        return meta
 
+    def _ast_info(self, path: Path) -> dict:
+        mtime = path.stat().st_mtime
+        hit = self._cache.get(str(path))
+        if hit and hit[0] == mtime:
+            return hit[1]
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        meta = self._meta_from_tree(tree)
+        self._cache[str(path)] = (mtime, meta)
+        return meta
+
+    def metadata(self, ref: str) -> dict:
+        r = self.resolve(ref)
+        if not r:
+            return {"error": id_error(ref) if parse_id(ref) is None
+                    else f"SCRIPT_NOT_FOUND: {ref}"}
+        return self._ast_info(r["path"])
+
+    @staticmethod
+    def check_caps(meta: dict) -> Optional[str]:
+        caps, probs = meta["caps"], []
+        if caps["backfill"] and not meta["main_until"]:
+            probs.append("CAPS.backfill=True 但 main 签名缺 until 参数")
+        if caps["symbols"] and "list_symbols" not in meta["defs"]:
+            probs.append("CAPS.symbols=True 但未定义 list_symbols")
+        if caps["ticker"] and "ticker" not in meta["defs"]:
+            probs.append("CAPS.ticker=True 但未定义 ticker")
+        return ("CAPS_MISMATCH: " + "; ".join(probs)) if probs else None
+
+    def caps(self, ref: str) -> dict:
+        r = self.resolve(ref)
+        if not r:
+            return {k: False for k in CAPS_KEYS}
+        return self._ast_info(r["path"])["caps"]
+
+    # ---------- 列表 ----------
+    def list_scripts(self) -> list:
+        seen, out = set(), []
+        for source, root in self.roots():
+            for kind in KINDS:
+                for p in sorted((root / kind).glob("*.py")):
+                    sid = f"{kind}/{p.stem}"
+                    if sid in seen:
+                        continue  # custom shadow builtin
+                    seen.add(sid)
+                    meta = self._ast_info(p)
+                    if not meta["caps_declared"] and source == "custom":
+                        logger.warning("脚本 %s 未声明 CAPS（v0.4 硬切后视为无能力）", sid)
+                    out.append({
+                        "id": sid, "kind": kind, "source": source,
+                        "display": meta["name"] or p.stem,
+                        "desc": meta["desc"] or "",
+                        "params": meta["params"], "caps": meta["caps"],
+                        "identity": meta["identity"], "intervals": meta["intervals"],
+                    })
+        return out
+
+    # ---------- 执行 ----------
+    def run_script(self, ref: str, params: dict = None, until=None) -> dict:
+        """数据源/通用脚本：main(params[, until]) → {"data": [...]}"""
+        r = self.resolve(ref)
+        if not r:
+            return {"error": id_error(ref) if parse_id(ref) is None
+                    else f"SCRIPT_NOT_FOUND: {ref}"}
+        meta = self._ast_info(r["path"])
+        caps_err = self.check_caps(meta)
+        if caps_err:
+            return {"error": caps_err}
         try:
-            code = resolved.read_text(encoding="utf-8")
+            code = r["path"].read_text(encoding="utf-8")
         except Exception as e:
             return {"error": f"SCRIPT_READ_ERROR: {e}"}
-
-        # 执行脚本
         try:
-            result = self._exec_script(code, params or {}, str(resolved))
-            return result
+            return self._exec_script(code, params or {}, str(r["path"]), meta, until)
         except Exception as e:
-            logger.error(f"Script execution error: {path}: {e}")
-            return {"error": f"SCRIPT_EXEC_ERROR: {str(e)}"}
+            logger.error("Script execution error: %s: %s", ref, e)
+            return {"error": f"SCRIPT_EXEC_ERROR: {e}"}
 
-    def run_indicator_script(self, path: str, ohlcv: list[dict], params: dict = None) -> dict:
-        """
-        执行指标脚本
-        脚本必须定义 main(params, ohlcv) 函数
-        返回 {"values": [...]} 或 {"error": "..."}
-        """
-        resolved = self.resolve_path(path)
-        if not resolved:
-            return {"error": f"SCRIPT_NOT_FOUND: {path}"}
-
+    def run_indicator_script(self, ref: str, ohlcv: list, params: dict = None) -> dict:
+        """指标脚本：main(params, ohlcv) → {"values"/"lines"/"markers", "meta"}"""
+        r = self.resolve(ref)
+        if not r:
+            return {"error": id_error(ref) if parse_id(ref) is None
+                    else f"SCRIPT_NOT_FOUND: {ref}"}
         try:
-            code = resolved.read_text(encoding="utf-8")
+            code = r["path"].read_text(encoding="utf-8")
         except Exception as e:
             return {"error": f"SCRIPT_READ_ERROR: {e}"}
-
         try:
-            result = self._exec_indicator_script(code, params or {}, ohlcv, str(resolved))
-            return result
+            return self._exec_indicator_script(code, params or {}, ohlcv, str(r["path"]))
         except Exception as e:
-            logger.error(f"Indicator script error: {path}: {e}")
-            return {"error": f"SCRIPT_EXEC_ERROR: {str(e)}"}
+            logger.error("Indicator script error: %s: %s", ref, e)
+            return {"error": f"SCRIPT_EXEC_ERROR: {e}"}
 
-    def _exec_script(self, code: str, params: dict, filepath: str) -> dict:
-        """在隔离命名空间中执行脚本"""
-        # 准备执行环境
-        namespace = {
-            "__name__": "__main__",
-            "__file__": filepath,
-            "params": params,
-        }
-
-        # 捕获 stdout
-        old_stdout = sys.stdout
-        captured = io.StringIO()
+    def _exec_script(self, code: str, params: dict, filepath: str, meta: dict, until=None) -> dict:
+        namespace = {"__name__": "__main__", "__file__": filepath, "params": params}
+        old_stdout, captured = sys.stdout, io.StringIO()
         sys.stdout = captured
-
         try:
             exec(code, namespace)
-
-            # 查找 main 函数
             main_func = namespace.get("main")
             if main_func is None:
                 return {"error": "SCRIPT_NO_MAIN: 脚本必须定义 main(params) 函数"}
-
-            # 调用 main
-            result = main_func(params)
-
+            kwargs = {}
+            if meta["main_until"] and until is not None:
+                kwargs["until"] = until
+            result = main_func(params, **kwargs)
             if result is None:
                 return {"error": "SCRIPT_RETURN_NONE: main() 返回了 None"}
-
-            # 处理返回值
             if isinstance(result, list):
                 return {"data": result}
-            elif isinstance(result, dict):
+            if isinstance(result, dict):
                 return {"data": result.get("data", result)}
-            else:
-                return {"data": result}
-
+            return {"data": result}
         finally:
             sys.stdout = old_stdout
-
-        output = captured.getvalue()
-        if output:
-            logger.info(f"Script output: {output[:500]}")
+            output = captured.getvalue()
+            if output:
+                logger.info("Script output: %s", output[:500])
 
     def _exec_indicator_script(self, code: str, params: dict, ohlcv: list, filepath: str) -> dict:
-        """执行指标脚本"""
-        namespace = {
-            "__name__": "__main__",
-            "__file__": filepath,
-            "params": params,
-            "ohlcv": ohlcv,
-        }
-
-        old_stdout = sys.stdout
-        captured = io.StringIO()
+        namespace = {"__name__": "__main__", "__file__": filepath,
+                     "params": params, "ohlcv": ohlcv}
+        old_stdout, captured = sys.stdout, io.StringIO()
         sys.stdout = captured
-
         try:
             exec(code, namespace)
-
             main_func = namespace.get("main")
             if main_func is None:
                 return {"error": "SCRIPT_NO_MAIN: 指标脚本必须定义 main(params, ohlcv) 函数"}
-
-            # 尝试两种签名
-            import inspect
             sig = inspect.signature(main_func)
-            if len(sig.parameters) >= 2:
-                result = main_func(params, ohlcv)
-            else:
-                result = main_func(params)
-
+            result = main_func(params, ohlcv) if len(sig.parameters) >= 2 else main_func(params)
             if result is None:
                 return {"error": "SCRIPT_RETURN_NONE"}
-
-            # 读取脚本元数据（用于自动命名）：NAME（根名）/ label(params)（自定义格式）/ PARAMS（默认值）
             meta = {}
             if namespace.get("NAME"):
                 meta["name"] = namespace["NAME"]
@@ -166,8 +259,6 @@ class ScriptEngine:
                     pass
             if isinstance(namespace.get("PARAMS"), dict):
                 meta["params"] = {**namespace["PARAMS"], **(params or {})}
-
-            # 处理返回值
             if isinstance(result, list):
                 out = {"values": result}
             elif isinstance(result, dict):
@@ -180,13 +271,56 @@ class ScriptEngine:
                 out = {"values": [result]}
             out["meta"] = meta
             return out
-
         finally:
             sys.stdout = old_stdout
 
-    def list_scripts(self) -> list[str]:
-        """列出可用的脚本"""
-        scripts = []
-        for f in self.scripts_dir.rglob("*.py"):
-            scripts.append(str(f.relative_to(self.scripts_dir)))
-        return sorted(scripts)
+    # ---------- 标的搜索（CAPS.symbols 门控） ----------
+    def list_symbols(self, ref: str, query: str = "") -> dict:
+        """调用数据源脚本的 list_symbols(query)；无徽章报 NO_SYMBOLS_CAP"""
+        r = self.resolve(ref)
+        if not r:
+            return {"error": id_error(ref) if parse_id(ref) is None
+                    else f"SCRIPT_NOT_FOUND: {ref}"}
+        meta = self._ast_info(r["path"])
+        if not meta["caps"]["symbols"]:
+            return {"error": f"NO_SYMBOLS_CAP: {ref} 未声明 CAPS.symbols，搜不到（可裸输入 @源名 裸符号 直配）"}
+        code = r["path"].read_text(encoding="utf-8")
+        namespace = {"__name__": "__main__", "__file__": str(r["path"])}
+        exec(code, namespace)
+        fn = namespace.get("list_symbols")
+        if not callable(fn):
+            return {"error": f"CAPS_MISMATCH: {ref} 声明 symbols 但无 list_symbols"}
+        return {"symbols": fn(query) or []}
+
+    # ---------- 保存（只写 custom，保存即校验） ----------
+    def save_script(self, ref: str, code: str) -> dict:
+        parsed = parse_id(ref)
+        if not parsed:
+            return {"error": id_error(ref)}
+        kind, stem = parsed
+        if not isinstance(code, str) or not code.strip():
+            return {"error": "SAVE_EMPTY: code 不能为空"}
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as e:
+            return {"error": f"SAVE_SYNTAX: {e}"}
+        meta = self._meta_from_tree(tree)
+        if not meta["has_main"]:
+            return {"error": f"SAVE_NO_MAIN: {kind} 脚本必须定义 main 函数"
+                             f"（datasource: main(params[, until])；indicator: main(params, ohlcv)）"}
+        caps_err = self.check_caps(meta)
+        if caps_err:
+            return {"error": caps_err}
+        path = self.custom_root / kind / f"{stem}.py"
+        warning = None
+        size = len(code.encode("utf-8"))
+        if size > SAVE_WARN_BYTES:
+            warning = (f"脚本较大（{size} bytes）：内嵌数据请留意 max_bars_per_slot 护栏，"
+                       f"优先脚本自拉数据（新鲜+可重放）")
+        path.write_text(code, encoding="utf-8")
+        self._cache.pop(str(path), None)
+        logger.info("save_script: %s → %s", ref, path)
+        out = {"ok": True, "id": f"{kind}/{stem}", "source": "custom", "path": str(path)}
+        if warning:
+            out["warning"] = warning
+        return out

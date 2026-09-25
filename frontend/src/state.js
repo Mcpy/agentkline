@@ -3,6 +3,8 @@
     // ============================================================
 export const state = {
         boards: [],
+        locks: {},   // board_id -> source_lock（v0.4 一标的一板）
+        intervalOptions: null,  // 当前板周期选项（优化点2）
         currentBoard: null,
         currentTimeframe: null,
         ohlcv: [],
@@ -19,4 +21,5 @@ export const state = {
         drawings: {},  // id -> drawing (划线)
         timeIndex: null,  // Map(timeSec -> ohlcv index)
         _crosshairSyncing: false,
+        _hoverChartKey: null,  // 真实鼠标悬停的图（bug4 同步源判定）
     };

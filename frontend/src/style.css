@@ -438,3 +438,84 @@ body {
 }
 .empty-state h2 { font-size: 16px; font-weight: 600; margin-bottom: 8px; color: var(--text); }
 .empty-state p { font-size: 12px; }
+
+/* ============ v0.4 P1：铭牌 / 搜索弹层 / 身份证卡 / Toast ============ */
+.symbol-plate {
+    margin: 0 10px; padding: 2px 10px; border-radius: 4px; cursor: pointer;
+    background: #1e222d; color: #9aa0aa; font-size: 12px; border: 1px solid #2a2e39;
+    white-space: nowrap;
+}
+.symbol-plate.locked { color: #d1d4dc; border-color: #3d4351; }
+.symbol-plate.locked:hover { background: #262b38; }
+.overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 900;
+    display: flex; align-items: flex-start; justify-content: center; padding-top: 10vh;
+}
+.overlay-card {
+    background: #131722; border: 1px solid #2a2e39; border-radius: 8px;
+    padding: 16px; width: 560px; max-width: 92vw; box-shadow: 0 8px 32px rgba(0,0,0,.5);
+}
+.overlay-card h3 { margin: 0 0 10px; font-size: 14px; color: #d1d4dc; }
+.overlay-card pre {
+    background: #0d1017; border: 1px solid #22262f; border-radius: 4px;
+    padding: 10px; font-size: 11px; color: #9aa0aa; overflow: auto; max-height: 40vh;
+}
+.overlay-foot { margin-top: 12px; display: flex; gap: 8px; justify-content: flex-end; }
+.search-card input {
+    width: 100%; box-sizing: border-box; background: #0d1017; color: #d1d4dc;
+    border: 1px solid #2a2e39; border-radius: 4px; padding: 10px 12px; font-size: 14px;
+    outline: none;
+}
+.search-card input:focus { border-color: #2962ff; }
+.search-results { margin-top: 8px; max-height: 46vh; overflow: auto; }
+.search-row {
+    display: flex; gap: 10px; align-items: center; padding: 8px 10px;
+    border-radius: 4px; cursor: pointer; font-size: 13px; color: #d1d4dc;
+}
+.search-row:hover { background: #1e222d; }
+.search-row.hint { color: #555; cursor: default; }
+.sr-symbol { flex: 1; }
+.sr-source { color: #6a7280; font-size: 11px; }
+.sr-badge { color: #26a69a; font-size: 11px; }
+.toast-wrap {
+    position: fixed; right: 16px; bottom: 16px; z-index: 950;
+    display: flex; flex-direction: column; gap: 8px; max-width: 420px;
+}
+.toast {
+    background: #1e222d; border: 1px solid #3d4351; border-left: 3px solid #ef5350;
+    border-radius: 6px; padding: 10px 12px; font-size: 12px; color: #d1d4dc;
+    display: flex; gap: 10px; align-items: center; box-shadow: 0 4px 16px rgba(0,0,0,.4);
+}
+.toast button { margin-left: auto; }
+.btn-primary {
+    background: #2962ff; color: #fff; border: none; border-radius: 4px;
+    padding: 7px 14px; font-size: 12px; cursor: pointer;
+}
+.btn-primary:hover { background: #1e53e4; }
+.btn-ghost {
+    background: transparent; color: #9aa0aa; border: 1px solid #2a2e39;
+    border-radius: 4px; padding: 7px 14px; font-size: 12px; cursor: pointer;
+}
+.hint { color: #555; font-size: 11px; }
+
+/* ============ 优化点2：周期"+"按钮与下拉 ============ */
+.tf-add { color: #2962ff; font-weight: 700; cursor: pointer; }
+.tf-add:hover { background: #1e222d; }
+.tf-menu {
+    position: fixed; z-index: 960; background: #1e222d; border: 1px solid #3d4351;
+    border-radius: 6px; padding: 4px; min-width: 72px; box-shadow: 0 6px 20px rgba(0,0,0,.45);
+    display: flex; flex-direction: column; gap: 2px;
+}
+.tf-menu-item {
+    padding: 6px 12px; font-size: 12px; color: #d1d4dc; border-radius: 4px; cursor: pointer;
+    text-align: center;
+}
+.tf-menu-item:hover { background: #2962ff; color: #fff; }
+
+/* 优化：固定"+"建板按钮（原铭牌位） */
+.board-add {
+    margin: 0 10px 0 0; padding: 2px 10px; border-radius: 4px; cursor: pointer;
+    background: #1e222d; color: #2962ff; font-size: 14px; font-weight: 700;
+    border: 1px solid #2a2e39; user-select: none;
+}
+.board-add:hover { background: #262b38; border-color: #2962ff; }

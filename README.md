@@ -21,6 +21,10 @@ AgentKline is not a click-around charting tool for humans — it is designed so 
 In short: a **high-freedom canvas for AI quant** — "operating the chart" is delegated to AI,
 while "understanding & deciding" stays with the human.
 
+Since v0.4 the chart is a **scene per symbol** (one symbol, one locked board): the human picks
+*what* to watch via the search flow (board created & locked in one click), AI still owns
+*how* to analyze — overlays, markers, walkthroughs all anchor to that scene's coordinate system.
+
 ## ✨ Features
 
 - 📈 **Multi-board / multi-timeframe** — switch 1d / 4h / 1h within a board, isolated viewports & indicators
@@ -29,6 +33,9 @@ while "understanding & deciding" stays with the human.
 - ✏️ **Drawings & markers** — hline / trendline, buy-sell markers, synced to all clients over WebSocket
 - 📸 **Snapshot** — server-composed screenshots (incl. DOM overlays: last-price label / OHLC / legends) that agents can read directly
 - 🎯 **AI-guided walkthrough** — `switch_board` / `switch_timeframe` / `set_view_range` let the AI bring the user's screen to any board, timeframe and time window (e.g. a backtest drawdown), with its markers & drawings already on it — no manual hunting
+- 🔐 **One symbol, one scene** — boards lock to `(source, symbol)` at creation; switching symbol/source means a new scene; collisions return `SOURCE_LOCKED` with a one-click "create board with this config" suggestion
+- 🔍 **User self-service search flow** — search symbols across CAPS-enabled datasources, click a row = board created & locked & charted in one step; a fixed "＋" button in the toolbar starts it; right-click a board tab for its ID card
+- ⏱ **Realtime multi-timeframe** — locked boards default to 15m/1h/4h/1d/1w (∩ source `INTERVALS`), all slots auto-configured; the "+" on the timeframe row adds any supported interval, tabs keep short→long order
 - 📚 **Bundled skills** — on-demand domain knowledge shipped in `skills/` (`script-authoring`, `ai-walkthrough`), loaded via `list_skills` / `load_skill` so any agent can author legal scripts without trial-and-error
 - 🤖 **Agent-native** — dual-port architecture + standard MCP (Streamable HTTP): AI can read, write and execute
 

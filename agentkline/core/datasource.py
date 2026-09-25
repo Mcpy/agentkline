@@ -5,7 +5,7 @@ AgentKline - 数据源管理
 import asyncio
 import logging
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 logger = logging.getLogger("agentkline.datasource")
 
@@ -13,11 +13,13 @@ logger = logging.getLogger("agentkline.datasource")
 class DataSourceManager:
     """数据源管理器（轮询）"""
 
-    def __init__(self, state, script_engine):
+    def __init__(self, state, script_engine, service=None):
         self.state = state
         self.script_engine = script_engine
+        self.service = service  # 指标重算委托（v0.4 实例模型）
         self.tasks: dict[str, asyncio.Task] = {}  # key -> task
-        self.configs: dict[str, dict] = {}        # key -> config
+        self.configs: dict[str, dict] = {}        # key -> 纯配置 {script,params,mode,poll_s}
+        self.status: dict[str, dict] = {}         # key -> 运行态 {last_error,last_fetch,next_due,started_at}
         self.error_counts: dict[str, int] = {}    # key -> 连续错误次数
         self._ws_manager = None  # 延迟注入
 
@@ -32,23 +34,26 @@ class DataSourceManager:
     def _key(self, board_id: str, timeframe: str) -> str:
         return f"{board_id}:{timeframe}"
 
-    def set_config(self, board_id: str, timeframe: str, path: str, params: dict, interval: int = None):
-        """记录数据源配置（一次性或轮询都记录，供历史回溯使用）"""
+    def set_config(self, board_id: str, timeframe: str, script: str, params: dict, poll_s: int = None):
+        """记录槽配置（纯配置，永远 JSON 可序列化）；script 为 id（kind/name）。
+        配置={script,params,mode,poll_s}；运行态(last_error/last_fetch/next_due)挂 status，分家。"""
         key = self._key(board_id, timeframe)
         self.configs[key] = {
             "board_id": board_id,
             "timeframe": timeframe,
-            "path": path,
+            "script": script,
             "params": params,
-            "poll_interval": interval,
+            "mode": "poll" if (poll_s and poll_s > 0) else "once",
+            "poll_s": poll_s if (poll_s and poll_s > 0) else None,
         }
+        self.status.setdefault(key, {})
 
     def start_polling(self):
         """启动轮询调度（在 lifespan 中调用）"""
         logger.info("DataSource polling scheduler started")
 
-    def start(self, board_id: str, timeframe: str, path: str, params: dict, interval: int):
-        """启动一个轮询数据源"""
+    def start(self, board_id: str, timeframe: str, script: str, params: dict, poll_s: int):
+        """启动一个轮询数据源；script 为 id（kind/name）；配置与运行态分家"""
         key = self._key(board_id, timeframe)
 
         # 先停止旧的
@@ -58,17 +63,27 @@ class DataSourceManager:
         self.configs[key] = {
             "board_id": board_id,
             "timeframe": timeframe,
-            "path": path,
+            "script": script,
             "params": params,
-            "poll_interval": interval,
-            "started_at": datetime.now().isoformat()
+            "mode": "poll",
+            "poll_s": poll_s,
         }
+        self.status[key] = {"started_at": datetime.now().isoformat(),
+                            "last_error": None, "last_fetch": None, "next_due": None}
         self.error_counts[key] = 0
 
         # 创建异步任务
         task = asyncio.create_task(self._poll_loop(key))
         self.tasks[key] = task
-        logger.info(f"DataSource started: {key} (interval={interval}s)")
+        logger.info(f"DataSource started: {key} (poll_s={poll_s}s)")
+
+    def stop_sync(self, board_id: str, timeframe: str):
+        """同步停槽（set_kline_source 等同步路径用）：取消任务+清配置"""
+        key = self._key(board_id, timeframe)
+        task = self.tasks.pop(key, None)
+        if task:
+            task.cancel()
+        self.configs.pop(key, None)
 
     async def stop(self, board_id: str, timeframe: str):
         """停止一个轮询数据源"""
@@ -91,9 +106,12 @@ class DataSourceManager:
         logger.info("All datasources stopped")
 
     def get(self, board_id: str, timeframe: str) -> Optional[dict]:
-        """获取数据源配置"""
+        """获取槽配置 + 运行态（配置/状态分家后的合并视图，仅供读取展示）"""
         key = self._key(board_id, timeframe)
-        return self.configs.get(key)
+        config = self.configs.get(key)
+        if not config:
+            return None
+        return {**config, "status": self.status.get(key, {})}
 
     @staticmethod
     def _merge_ohlcv(existing: list, new: list) -> list:
@@ -106,18 +124,21 @@ class DataSourceManager:
         return older + new_sorted
 
     async def _poll_loop(self, key: str):
-        """轮询循环"""
+        """轮询循环；每轮动态读配置（poll_s 改即时生效，不碰数据不重启）"""
         config = self.configs.get(key)
         if not config:
             return
 
-        interval = config["poll_interval"]
         board_id = config["board_id"]
         timeframe = config["timeframe"]
-        path = config["path"]
-        params = config["params"]
 
         while True:
+            config = self.configs.get(key)
+            if not config or config.get("mode") != "poll":
+                break
+            interval = config.get("poll_s") or 5
+            script = config["script"]
+            params = config["params"]
             try:
                 await asyncio.sleep(interval)
 
@@ -127,12 +148,15 @@ class DataSourceManager:
 
                 # 执行脚本
                 result = await asyncio.get_event_loop().run_in_executor(
-                    None, self.script_engine.run_script, path, params
+                    None, self.script_engine.run_script, script, params
                 )
 
                 if result.get("error"):
                     self.error_counts[key] = self.error_counts.get(key, 0) + 1
                     logger.warning(f"DataSource error ({self.error_counts[key]}): {key}: {result['error']}")
+                    st = self.status.setdefault(key, {})
+                    st["last_error"] = result["error"]
+                    st["last_fetch"] = datetime.now().isoformat()
 
                     # 3次失败后通知
                     if self.error_counts[key] >= 3 and self.ws_manager:
@@ -145,8 +169,12 @@ class DataSourceManager:
                         })
                     continue
 
-                # 成功，重置错误计数
+                # 成功，重置错误计数 + 运行态
                 self.error_counts[key] = 0
+                st = self.status.setdefault(key, {})
+                st["last_error"] = None
+                st["last_fetch"] = datetime.now().isoformat()
+                st["next_due"] = (datetime.now() + timedelta(seconds=interval)).isoformat()
 
                 # 更新K线（合并：保留更早历史 + 更新近期窗口）
                 data = result.get("data", [])
@@ -158,15 +186,9 @@ class DataSourceManager:
                     # 重算动态指标
                     await self._refresh_indicators(board_id, timeframe)
 
-                    # 推送更新
-                    if self.ws_manager:
-                        await self.ws_manager.broadcast({
-                            "type": "ohlcv_update",
-                            "board_id": board_id,
-                            "timeframe": timeframe,
-                            "data": merged,
-                            "markers": []
-                        })
+                    # 推送更新（R8 差量化：只推前插/追加/尾部更新）
+                    if self.service:
+                        self.service.bc_ohlcv_delta(board_id, timeframe, existing, merged)
 
             except asyncio.CancelledError:
                 break
@@ -175,25 +197,6 @@ class DataSourceManager:
                 await asyncio.sleep(1)
 
     async def _refresh_indicators(self, board_id: str, timeframe: str):
-        """重算动态指标"""
-        ohlcv = self.state.get_ohlcv(board_id, timeframe)
-        if not ohlcv:
-            return
-
-        dynamic_indicators = self.state.get_dynamic_indicators(board_id, timeframe)
-        for ind in dynamic_indicators:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None, self.script_engine.run_indicator_script,
-                ind["path"], ohlcv, ind.get("params", {})
-            )
-            if not result.get("error") and result.get("values"):
-                self.state.set_indicator(board_id, timeframe, ind["name"], values=result["values"])
-                if self.ws_manager:
-                    await self.ws_manager.broadcast({
-                        "type": "indicator_refresh",
-                        "board_id": board_id,
-                        "timeframe": timeframe,
-                        "name": ind["name"],
-                        "values": result["values"],
-                        "subplot": ind.get("subplot")
-                    })
+        """重算 recipe 指标实例：委托 service.recompute_indicators（含尾窗+广播 wire）"""
+        if self.service:
+            self.service.recompute_indicators(board_id, timeframe)

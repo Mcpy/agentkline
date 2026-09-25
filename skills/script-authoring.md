@@ -1,79 +1,62 @@
 ---
 name: script-authoring
-description: 如何编写能在 AgentKline 合法运行的指标脚本与数据源脚本——main 签名、返回结构、元数据、warmup/NaN 约束、until 回溯与沙箱边界。写新脚本前必读。
+description: 如何编写能在 AgentKline v0.4 合法运行的指标/数据源脚本——id=kind/name、main 签名、字面元数据族(NAME/DESC/PARAMS/CAPS/IDENTITY)、CAPS 一致性、until 回溯可重放、数据家族范式、板锁语义与沙箱边界。写新脚本前必读。
 ---
 
-# AgentKline 脚本编写指南（skill）
+# AgentKline 脚本编写（v0.4 skill）
 
-AgentKline 的两类脚本都由 `script_engine` 在隔离命名空间中 `exec` 执行，
-通过**约定函数 `main`** 与外部交互。写错签名只会撞 `SCRIPT_NO_MAIN` 这类错，
-请先读完本 skill 再动手。参考示例：`scripts/sma.py`（指标）、`scripts/mock_btc_data.py` /
-`scripts/ccxt_binance_btc.py`（数据源）。
+脚本由 `script_engine` 在隔离命名空间 exec（L1 沙箱：不限 import，自律）。
+人类版同文见 `docs/脚本编写指南.md`；冲突以本 skill 为准。
 
-## 一、指标脚本（indicator）
+## 存放与 id
+- 双根：builtin（包内 resources/scripts，只读）/ custom（scripts_dir，可写）。**你写脚本只落 custom**：
+  `save_script(id, code)`（保存即校验）或 REST `POST /api/scripts`。
+- **id = kind/name**（kind∈datasource|indicator|strategy；name 限 [a-z0-9_]+）。裸文件名 = `SCRIPT_BAD_ID`。
+- 契约由目录推断；同名 shadow custom 优先（list_scripts 的 source 字段标明）。
 
-### 签名
-必须定义 `main(params, ohlcv)`（也兼容 `main(params)`，引擎按参数个数自适应）。
-执行时全局注入：
-- `params: dict` —— 调用方传入的参数；
-- `ohlcv: list[dict]` —— K 线，每条 `{timestamp, open, high, low, close, volume}`，
-  `timestamp` 为**毫秒**。
-
-### 返回值
-- 返回 `list` → 视为单线 `values`；
-- 或返回 `dict`：`{"values": [...], "lines": [...], "markers": [...]}`（后两者可选）。
-- `values` 必须与 `ohlcv` **等长、逐 bar 对齐**。
-
-### warmup 与 NaN（重要）
-- 预热期（如 SMA 前 period-1 根）**用 `None` 占位**，不要返回 `float('nan')`。
-- 虽然 v0.3.1 起服务端会把 NaN/Inf 清洗为 `None`（防非法 JSON），但你应主动用 `None`，
-  因为 NaN 参与运算会污染后续结果。
-
-### 可选元数据（用于自动命名/设置弹窗）
-- `NAME = "SMA"` —— 根名；
-- `PARAMS = {"period": 20}` —— 参数默认值；
-- `def label(params): return f"SMA({params.get('period',20)})"` —— 自定义显示名。
-
-### 模板
+## 字面元数据族（ast 静态抽取，必须字面）
 ```python
-PARAMS = {"period": 20}
-
-def main(params: dict, ohlcv: list) -> list:
-    period = params.get("period", 20)
-    closes = [b["close"] for b in ohlcv]
-    out = [None] * len(closes)          # warmup 用 None
-    for i in range(period - 1, len(closes)):
-        out[i] = round(sum(closes[i-period+1:i+1]) / period, 2)
-    return out
+NAME = "显示名"
+DESC = "描述（选脚本依据）"
+PARAMS = {"k": v}                       # 默认参数
+CAPS = {"backfill": bool, "symbols": bool, "ticker": bool}
+IDENTITY = ["symbol"]                  # 板锁身份键；路径可换源用 []
 ```
+- **CAPS 声明⇒必须实现**，否则 `CAPS_MISMATCH`：backfill⇒main 签名含 `until`；symbols⇒def list_symbols(query)；ticker⇒def ticker(params)。不声明=无能力。
+- CAPS 门控产品功能：backfill=左滚补历史；symbols=标的搜索索引；ticker=自选表报价(0.4.1)。
 
-### 注册方式
-- `add_indicator(board, tf, name, script="xxx.py", params={...})`（推荐，统一入口）；
-- 或 `run_script(board, tf, path, save_as="indicator")`（兼容路径）。
+## indicator 契约
+`main(params, ohlcv) → values | {values, lines, markers}`；与 K 线等长；warmup=None；禁 NaN/Inf。
+lines 项 `{name, type: line|histogram, values, style?}`。可选 `label(params)` 定制显示名。
+重算只喂最近 max_window=5000 根——长记忆参数勿超窗。
+落盘：`add_indicator(script=id, params=...)`=recipe（自动重算）；给 values/lines=blob（钉死单周期，传 scope 报错）。
+实例把手 inst_id：撞名 INST_EXISTS；不传自动 `macd_2` 式。
 
-## 二、数据源脚本（datasource）
+## datasource 契约
+`main(params, until=None) → [{timestamp(ms), o,h,l,c,v}, ...]`；timestamp 毫秒。
+- poll/once 是槽配置（poll_s），非脚本属性。
+- until 回溯：返回早于 until 的 bars；有界就在边界返回空。**跨窗连续+可重放**（同(身份,日期)同值；
+  范式=创世点+逐日确定性种子，见内置 datasource/mock_btc）。
+- list_symbols(query) → [{symbol, display}]；索引首用全量+TTL 日级，搜索不穿透交易所。
+- ticker(params) → {last, change, change_pct}。
+- 单槽上限 max_bars_per_slot=50000（截旧+dropped）；**别内嵌巨量数据**，优先自拉；save >100KB 告警。
 
-### 签名
-定义 `main(params)`，返回 `list`（或 `{"data": [...]}`），元素为 K 线 bar：
-`{timestamp(毫秒), open, high, low, close, volume}`，**按时间升序**。
+## 数据家族范式
+多数据集/多周期 = 单脚本 + 非身份 params 键分片（dataset/interval）。**禁止拆多脚本**（板锁全等校验会拒）。
 
-### until 回溯（决定能否 load_history）
-- 若支持 `params["until"]`（毫秒），只返回该时间之前的 K 线，则 `load_history`
-  可向左补更早历史（前端左滑自动触发）。
-- `ccxt_binance_btc.py` 支持；`mock_btc_data.py` 不支持（回溯时 prepended=0）。
+## 板锁语义（上下文）
+画板=现场：source_lock={script, identity快照}；建板即锁/空板首配即锁；换标的/换源=新建画板
+（撞锁 SOURCE_LOCKED+suggestion）；IDENTITY 外 params 自由改（改即重拉）。
+在线板加周期系统注入 {identity+interval}——脚本读 params["interval"] 支持多周期。
 
-### 注册方式
-`set_datasource(board, tf, path="xxx.py", params={...}, poll_interval=0)`；
-`poll_interval>0` 则轮询实时刷新。
+## 自检
+id 格式？元数据全字面？CAPS 与实现一致？指标等长/warmup/无 NaN？数据源毫秒/until 语义/可重放？
+未内嵌超量？多面板单脚本？
 
-## 三、沙箱边界（自律，别指望兜底）
-- 当前为 **L1：直接 exec** 于隔离命名空间，**不限制 import**（内部调试用）。
-- 路线图 L2 才上 subprocess 隔离。因此脚本必须自律：无死循环、无恶意 IO、
-  控制运行时长（轮询数据源尤其注意）。
-
-## 四、自检清单
-- [ ] 定义了 `main`，签名正确；
-- [ ] 指标 values 与 K 线等长，warmup 用 `None`、无 NaN；
-- [ ] 数据源 bar 含全字段、毫秒、升序；
-- [ ] 需要回溯则实现 `until`；
-- [ ] 无死循环/长阻塞。
+## 周期语义（v0.4 优化点 2）
+- 字面常量 `INTERVALS = [...]`（ast 族）：声明=实时源；不声明=离线源（自由槽面板语义）。
+- 系统：建板即锁默认 `[15m,1h,4h,1d,1w] ∩ INTERVALS`（初始当前=1d 在列则用），全部初始槽自动注入配置；
+  空板首配锁不扩槽（尊重 AI）。每槽配置恒注入 `interval=槽名`——脚本读 `params["interval"]` 出粒度，
+  IDENTITY 不含 interval。"+"按钮下拉=INTERVALS−已有；加入按短→长排序；不支持→INTERVAL_UNSUPPORTED；
+  切到未配置槽=懒配置自愈。
+- 作者义务：INTERVALS 每档真能出对应粒度；单粒度源声明单档。
