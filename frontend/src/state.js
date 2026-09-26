@@ -23,3 +23,13 @@ export const state = {
         _crosshairSyncing: false,
         _hoverChartKey: null,  // 真实鼠标悬停的图（bug4 同步源判定）
     };
+
+// v0.4.1: 状态重置原语（自 ws.js 下沉到叶子模块，断 ws↔ui 环）
+export function applyState(data) {
+    state.ohlcv = data.ohlcv || [];
+    state.indicators = data.indicators || {};
+    state.markers = data.markers || [];
+    state.drawings = data.drawings || [];
+    state.subplots = data.subplots || [];
+    return state;
+}

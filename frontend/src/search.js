@@ -38,6 +38,7 @@ import { log } from './log.js';
     }
 
     async function runQuery(q) {
+        lastQuery = q;
         const box = _el('search-results');
         q = (q || '').trim();
         box.innerHTML = '<div class="search-row hint">搜索中…</div>';
@@ -68,15 +69,83 @@ import { log } from './log.js';
         rows.forEach(row => {
             const div = document.createElement('div');
             div.className = 'search-row';
+            div.dataset.key = `${row.source}|${row.symbol}`;
             div.innerHTML = `<span class="sr-symbol">${row.display || row.symbol}</span>
                 <span class="sr-source">${row.source}</span>
-                <span class="sr-badge">${row.has_board ? '● 已有现场' : ''}</span>`;
+                <span class="sr-badge">${row.has_board ? '● 已有现场' : ''}</span>
+                <span class="sr-watch ${row.watched ? 'on' : ''}" title="${row.watched ? '已在雷达：点击取消盯盘' : '加入雷达盯盘'}">${row.watched ? '盯盘中' : '＋盯'}</span>`;
+            div.querySelector('.sr-watch').addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const isOn = !!row.watched;
+                const url = isOn
+                    ? `/api/watchlist/rows?source=${encodeURIComponent(row.source)}&symbol=${encodeURIComponent(row.symbol)}`
+                    : '/api/watchlist/rows';
+                const r = await fetch(url, {
+                    method: isOn ? 'DELETE' : 'POST',   // 约定：DELETE 走 query，POST 走 body
+                    headers: { 'Content-Type': 'application/json' },
+                    body: isOn ? undefined : JSON.stringify({ source: row.source, symbol: row.symbol }) });
+                if (!r.ok) { const d = await r.json().catch(() => ({})); toast(d.detail || '操作失败'); }
+                else refreshSearch();   // 行内盯盘态即时翻转
+            });
             div.addEventListener('click', () => pickRow(row));
             box.appendChild(div);
         });
     }
 
+    let lastBoardId = null;
+    let lastQuery = '';  // 最近一次搜索词（refreshSearch 用）
+    const inflight = new Set();
+
+    export function refreshSearch() {
+        if (_el('search-overlay').style.display !== 'none') runQuery(lastQuery);
+    }
+
+    function setRowLoading(row, on) {
+        const div = document.querySelector(`.search-row[data-key="${row.source}|${row.symbol}"]`);
+        if (!div) return;
+        const badge = div.querySelector('.sr-badge');
+        if (on) {
+            div.classList.add('creating');
+            badge.innerHTML = '<span class="sr-spin"></span> 正在创建现场…';
+        } else {
+            div.classList.remove('creating');
+            badge.innerHTML = row.has_board ? '● 已有现场' : '';
+        }
+    }
+
+    export async function createBoardFor(symbol, source) {
+        const id = 'b_' + String(symbol).replace(/[^a-zA-Z0-9]+/g, '_').toLowerCase()
+            + '_' + Date.now().toString(36);
+        const res = await fetch('/api/board', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, symbol, source, params: { symbol }, poll_s: 5 }),
+        });
+        if (res.status === 409) { toastLocked(await res.json()); return null; }
+        if (!res.ok) {
+            const d = await res.json().catch(() => ({}));
+            toast(`建板失败: ${d.detail || res.status}`);
+            return null;
+        }
+        const d = await res.json().catch(() => ({}));
+        lastBoardId = d.id || id;
+        return { id: lastBoardId, existing: !!d.existing };
+    }
+
     async function pickRow(row) {
+        const key = `${row.source}|${row.symbol}`;
+        if (inflight.has(key)) return;            // in-flight 锁：连点不产重复请求
+        inflight.add(key);
+        setRowLoading(row, true);
+        try {
+            await _pickRowInner(row);
+        } finally {
+            inflight.delete(key);
+            setRowLoading(row, false);
+        }
+    }
+
+    async function _pickRowInner(row) {
         // ● 已有现场 → 直跳（三态分发的单板态；多板态=雷达 0.4.1）
         if (row.has_board) {
             const b = state.boards.find(b => {
@@ -90,26 +159,12 @@ import { log } from './log.js';
                 return;
             }
         }
-        const id = 'b_' + String(row.symbol).replace(/[^a-zA-Z0-9]+/g, '_').toLowerCase()
-            + '_' + Date.now().toString(36);
-        const res = await fetch('/api/board', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id, symbol: row.symbol, source: row.source,
-                                   params: { symbol: row.symbol }, poll_s: 5 }),
-        });
-        if (res.status === 409) {
-            toastLocked(await res.json());
-            return;
+        const r2 = await createBoardFor(row.symbol, row.source);
+        if (r2) {
+            refreshSearch();   // 行徽标动态变"● 已有现场"（弹层保持开，用户亲眼看到加载→完成）
+            await fetch(`/api/board/${r2.id}`);  // 背后进入新现场；弹层不抢关，Esc/关闭或再点行离开
+            log('info', `搜索建板即锁: ${r2.id} ← ${row.symbol}@${row.source}`);
         }
-        if (!res.ok) {
-            const d = await res.json().catch(() => ({}));
-            toast(`建板失败: ${d.detail || res.status}`);
-            return;
-        }
-        await fetch(`/api/board/${id}`);  // 进入新现场
-        closeSearch();
-        log('info', `搜索建板即锁: ${id} ← ${row.symbol}@${row.source}`);
     }
 
     // ============ 撞锁 Toast + 一键改道（摩擦面 B） ============

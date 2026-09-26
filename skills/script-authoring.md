@@ -60,3 +60,13 @@ id 格式？元数据全字面？CAPS 与实现一致？指标等长/warmup/无 
   IDENTITY 不含 interval。"+"按钮下拉=INTERVALS−已有；加入按短→长排序；不支持→INTERVAL_UNSUPPORTED；
   切到未配置槽=懒配置自愈。
 - 作者义务：INTERVALS 每档真能出对应粒度；单粒度源声明单档。
+
+
+## 报价契约 CAPS.ticker（v0.4.1）
+- `CAPS.ticker=True` ⇒ 实现 `ticker(params)→{price(必需数值), ts, change_pct?, extra?}`（键白名单）；
+  保存即校验 CAPS_MISMATCH；运行时形状违 TICKER_BAD_SHAPE；雷达只盯有徽章源（无=TICKER_UNSUPPORTED）。
+- 实时源建议同给 ticker（visible 板心跳价）；离线源声明 False。参考 builtin ccxt_binance/mock_btc。
+
+
+## 批量报价 tickers()（v0.4.1 性能②，可选）
+- `tickers(params_list)->[quote]` 同序返回；雷达按源单请求批量；不实现回退逐行；形状违 TICKERS_BAD_SHAPE。

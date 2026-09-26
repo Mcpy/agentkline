@@ -7,11 +7,10 @@ import { log } from './log.js';
 const LINE_STYLES = [[0, '实线'], [1, '点线'], [2, '虚线']];
 
 function post(name, payload) {
-    const url = `/api/indicator/${encodeURIComponent(name)}?board_id=${encodeURIComponent(state.currentBoard)}&timeframe=${encodeURIComponent(state.currentTimeframe)}`;  // v0.4: inst_id + PUT 声明式
-    return fetch(url, {
+    return fetch(`/api/indicator/${encodeURIComponent(name)}`, {   // v0.4.1: flat body 约定
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ ...payload, board_id: state.currentBoard, timeframe: state.currentTimeframe }),
     }).then(r => r.json());
 }
 

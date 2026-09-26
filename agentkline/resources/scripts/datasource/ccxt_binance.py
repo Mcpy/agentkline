@@ -120,8 +120,33 @@ def ticker(params: dict) -> dict:
                      params={'symbol': _base(symbol)}, timeout=10)
     r.raise_for_status()
     d = r.json()
+    import time as _t
     return {
-        "last": float(d["lastPrice"]),
-        "change": float(d["priceChange"]),
+        "price": float(d["lastPrice"]),
+        "ts": int(_t.time() * 1000),
         "change_pct": float(d["priceChangePercent"]),
+        "extra": {"change": float(d["priceChange"]), "high": float(d["highPrice"]),
+                  "low": float(d["lowPrice"]), "quote_volume": float(d["quoteVolume"])},
     }
+
+
+def tickers(params_list: list) -> list:
+    """批量报价（性能②）：一次 fapi 24hr 请求拿全部盯盘符号（symbols 数组，权重远低于逐行）"""
+    import requests, time as _t, json as _json
+    bases = [_base(p.get("symbol", "BTC/USDT:USDT")) for p in params_list]
+    r = requests.get('https://fapi.binance.com/fapi/v1/ticker/24hr',
+                     params={'symbols': _json.dumps(bases)}, timeout=10)
+    r.raise_for_status()
+    by_sym = {d["symbol"]: d for d in r.json()}
+    ts = int(_t.time() * 1000)
+    out = []
+    for b in bases:
+        d = by_sym.get(b)
+        if not d:
+            out.append({"price": 0.0, "ts": ts})
+            continue
+        out.append({"price": float(d["lastPrice"]), "ts": ts,
+                    "change_pct": float(d["priceChangePercent"]),
+                    "extra": {"change": float(d["priceChange"]), "high": float(d["highPrice"]),
+                              "low": float(d["lowPrice"]), "quote_volume": float(d["quoteVolume"])}})
+    return out

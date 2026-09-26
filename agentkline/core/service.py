@@ -27,11 +27,15 @@ def _to_ms(v):
 class AgentKlineService:
     """AgentKline 业务核心"""
 
+    VERSION = "0.4.1"
+
     def __init__(self, scripts_dir: str, limits: dict = None):
         limits = limits or {}
         self.state = StateManager()
         self.script_engine = ScriptEngine(scripts_dir)
         self.datasource = DataSourceManager(self.state, self.script_engine, self)
+        from .watchlist import WatchlistManager
+        self.watchlist = WatchlistManager(self, poll_s=limits.get("quotes_poll_s", 5))
         # R8 性能三件套限额（config limits 可覆盖）
         self.max_window = int(limits.get("max_window", 5000))
         self.max_bars_per_slot = int(limits.get("max_bars_per_slot", 50000))
@@ -57,13 +61,26 @@ class AgentKlineService:
             supported = (meta or {}).get("intervals") if isinstance(meta, dict) else None
             if supported:
                 intervals = [d for d in self.DEFAULT_ONLINE_TFS if d in supported] or list(supported)
+        if symbol or source:
+            # 同锁幂等 get-or-create：同(源,identity)现场已存在 → 直接返回该板（连点/重复搜索不产重复板）
+            if not source:
+                return {"error": "LOCK_REQUIRES_SOURCE: 建板即锁需同时给 source（脚本 id）"}
+            full_params = {**(params or {})}
+            if symbol:
+                full_params.setdefault("symbol", symbol)
+            id_keys = (self.script_engine.metadata(source) or {}).get("identity") or []
+            missing = [k for k in id_keys if k not in full_params]
+            if not missing:
+                want = {k: full_params[k] for k in id_keys}
+                for b in self.state.list_boards():
+                    lk = b.get("source_lock") or {}
+                    if lk.get("script") == source and lk.get("identity") == want:
+                        return {"id": b["id"], "name": b.get("name"), "existing": True,
+                                "intervals": b.get("intervals"), "source_lock": lk}
         result = self.state.create_board(board_id, name, intervals)
         if result.get("error"):
             return result
         if symbol or source:
-            if not source:
-                self.state.delete_board(board_id)
-                return {"error": "LOCK_REQUIRES_SOURCE: 建板即锁需同时给 source（脚本 id）"}
             full_params = {**(params or {})}
             if symbol:
                 full_params.setdefault("symbol", symbol)
@@ -134,6 +151,7 @@ class AgentKlineService:
         result = self.state.switch_board(board_id)
         if not result.get("error"):
             tf = self.state.get_default_timeframe(board_id)
+            self._poke_if_stale(board_id, tf)
             self._bc({"type": "board_switch", "board_id": board_id, "timeframe": tf,
                       "state": self.get_state_windowed(board_id, tf)})
         return result
@@ -204,6 +222,25 @@ class AgentKlineService:
     def list_timeframes(self, board_id):
         return self.state.list_timeframes(board_id)
 
+    def _poke_if_stale(self, board_id, tf):
+        """性能①配套：切到的槽若老于降频窗 → 立即补拉（用户无感）"""
+        from datetime import datetime as _dt
+        key = self.datasource._key(board_id, tf)
+        cfg = self.datasource.configs.get(key)
+        if not cfg or cfg.get("mode") != "poll":
+            return
+        st = self.datasource.status.get(key) or {}
+        lf = st.get("last_fetch")
+        stale = True
+        if lf:
+            try:
+                age = (_dt.now() - _dt.fromisoformat(lf)).total_seconds()
+                stale = age > self.datasource._decay_s(tf)
+            except ValueError:
+                stale = True
+        if stale:
+            self.datasource.poke(board_id, tf)
+
     def switch_timeframe(self, board_id, tf):
         result = self.state.switch_timeframe(board_id, tf)
         if not result.get("error"):
@@ -212,6 +249,7 @@ class AgentKlineService:
             cfg = self.datasource.configs.get(self.datasource._key(board_id, tf))
             if board and board.source_lock and not cfg:
                 self._configure_slot(board_id, tf)
+            self._poke_if_stale(board_id, tf)
             self._bc({"type": "timeframe_switch", "board_id": board_id, "timeframe": tf,
                       "state": self.get_state_windowed(board_id, tf)})
         return result
@@ -284,7 +322,8 @@ class AgentKlineService:
                     and (b.source_lock.get("identity") or {}).get("symbol") == symbol
                     for b in self.state.boards.values())
                 rows.append({"symbol": symbol, "source": sid, "display": display,
-                             "has_board": has_board})
+                             "has_board": has_board,
+                             "watched": self.watchlist.has_row(sid, symbol)})
                 if len(rows) >= 50:
                     break
             if len(rows) >= 50:
@@ -700,6 +739,10 @@ class AgentKlineService:
         self.datasource.set_config(board_id, tf, script, params, poll_s)
         if poll_s and poll_s > 0:
             self.datasource.start(board_id, tf, script, params, poll_s)
+        # 首拉也是拉：status.last_fetch 语义=最近一次真实取数（去重/新鲜度判定依赖）
+        st = self.datasource.status.setdefault(self.datasource._key(board_id, tf), {})
+        st["last_fetch"] = datetime.now().isoformat()
+        st["last_error"] = None
         self._bc({"type": "kline_source_set", "board_id": board_id, "timeframe": tf,
                   "script": script, "params": params, "poll_s": poll_s})
         self._bc({"type": "ohlcv_update", "board_id": board_id, "timeframe": tf,
@@ -707,7 +750,12 @@ class AgentKlineService:
         return {"status": "ok", "count": len(data)}
 
     def get_kline_source(self, board_id, tf):
-        return {"kline_source": self.datasource.get(board_id, tf)}
+        r = self.datasource.get(board_id, tf)
+        cfg = self.datasource.configs.get(self.datasource._key(board_id, tf))
+        if isinstance(r, dict) and cfg:
+            # 性能①可读面：当前生效轮询间隔（可见=poll_s；非可见=降频档）
+            r = {**r, "eff_poll_s": self.datasource.effective_poll_s(cfg)}
+        return {"kline_source": r}
 
     def interval_options(self, board_id):
         """周期"+"按钮数据：仅实时源(声明 INTERVALS)可加；离线板 online=False"""
@@ -788,6 +836,34 @@ class AgentKlineService:
         tf_state = board.get_tf(tf) if board else None
         if tf_state and subplot not in tf_state.subplots:
             self.state.create_subplot(board_id, tf, subplot, 150, subplot)
+
+    # ============ 快照（v0.4.1 收编自 mcp_server；NO_BROWSER 门） ============
+    async def take_snapshot(self, board_id=None, timeframe=None, wait=1.5):
+        """触发前端截图并返回图片+路径；无浏览器在线报 NO_BROWSER（不回退磁盘旧图）"""
+        import asyncio
+        if not self._ws_active():
+            return {"error": "NO_BROWSER: 无浏览器连接 /ws，快照需在线前端；"
+                             "请先打开 Web UI（或确认目标标签页存活）再截图"}
+        self.notify({"type": "snapshot_request", "board_id": board_id, "timeframe": timeframe})
+        await asyncio.sleep(wait)
+        return self.get_snapshot(board_id, timeframe)
+
+    def get_snapshot(self, board_id=None, timeframe=None):
+        """读取最新快照（图片 base64+路径）"""
+        import base64 as _b64
+        d = self.snapshot_dir
+        board = board_id or self.state.current_board_id or "board"
+        path = d / f"{board}_{timeframe or 'latest'}.png"
+        if not path.exists():
+            files = sorted(d.glob("*.png"))
+            if not files:
+                return {"error": "NO_SNAPSHOT: 尚无快照文件"}
+            path = files[-1]
+        return {"path": str(path), "size": path.stat().st_size,
+                "image_b64": _b64.b64encode(path.read_bytes()).decode()}
+
+    def _ws_active(self):
+        return False
 
     def _bc(self, message):
         try:

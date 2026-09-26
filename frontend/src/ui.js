@@ -1,7 +1,8 @@
-import { state } from './state.js';
+import { state, applyState } from './state.js';
 import { log } from './log.js';
 import { showContextMenu } from './menu.js';
 import { openIdCard } from './render.js';
+
 
     // ============================================================
     // UI 渲染
@@ -21,6 +22,15 @@ import { openIdCard } from './render.js';
                 if ((state.locks || {})[board.id]) {
                     items.push({ label: '板身份证卡', onClick: () => openIdCard(board.id) });
                 }
+                const lk = (state.locks || {})[board.id] || {};
+                if (lk.script && (lk.identity || {}).symbol) {
+                    items.push({ label: '加入雷达', onClick: () => {
+                        fetch('/api/watchlist/rows', { method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ source: lk.script, symbol: lk.identity.symbol }) })
+                            .then(r => r.json()).then(d => { if (d.error) log('error', d.error); });
+                    } });
+                }
                 items.push({ label: '删除画板', danger: true, onClick: () => deleteBoard(board.id) });
                 showContextMenu(e.clientX, e.clientY, items);
             };
@@ -31,7 +41,26 @@ import { openIdCard } from './render.js';
     function deleteBoard(boardId) {
         fetch(`/api/board/${boardId}`, { method: 'DELETE' })
             .then(r => r.json())
-            .then(d => { if (d.error) log('error', `删除画板失败: ${d.error}`); });
+            .then(d => {
+                if (d.error) { log('error', `删除画板失败: ${d.error}`); return; }
+                // 乐观更新：本客户端标签立即消失，不等 WS（WS 断连/漏推也自洽；
+                // 其他客户端靠 board_remove 广播，重连靠 init 全量同步）
+                state.boards = state.boards.filter(b => b.id !== boardId);
+                delete state.locks[boardId];
+                renderBoardTabs();
+                if (state.currentBoard === boardId) {
+                    const nxt = state.boards[0];
+                    if (nxt) {
+                        fetch(`/api/board/${nxt.id}`);  // 服务端广播 board_switch 带状态
+                    } else {
+                        state.currentBoard = null;
+                        state.currentTimeframe = null;
+                        applyState({});
+                        renderTimeframeTabs();
+                        renderChart();   // 删光落引导页
+                    }
+                }
+            });
     }
 
     function renderTimeframeTabs() {

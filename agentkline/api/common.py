@@ -68,14 +68,24 @@ async def _notify(message: dict):
     await ws_manager.broadcast(message)
 
 
+MAIN_LOOP = None
+
+
+def set_main_loop(loop):
+    global MAIN_LOOP
+    MAIN_LOOP = loop
+
+
 def _sync_notify(message: dict):
     import asyncio
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop.create_task(_notify(message))
+        loop = asyncio.get_running_loop()
+        loop.create_task(_notify(message))
     except RuntimeError:
-        pass
+        # 非事件循环线程（watchlist Timer/线程池）→ 跨线程投递到主循环；
+        # 旧实现 get_event_loop 在他线程抛 RuntimeError 被 pass 吞掉 = 广播静默丢失
+        if MAIN_LOOP is not None:
+            asyncio.run_coroutine_threadsafe(_notify(message), MAIN_LOOP)
 
 
 # ============ 配置 / 鉴权 token ============
@@ -94,6 +104,8 @@ def load_config() -> dict:
 CONFIG = load_config()
 service = AgentKlineService(str(SCRIPTS_DIR), (CONFIG.get("limits") or {}))
 service.notify = _sync_notify
+service._ws_active = lambda: bool(ws_manager.active)
+service.snapshot_dir = SNAPSHOT_DIR
 AUTH_TOKEN = (os.environ.get("AGENTKLINE_TOKEN")
               or (CONFIG.get("auth") or {}).get("token")
               or "").strip() or None

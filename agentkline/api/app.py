@@ -9,7 +9,7 @@ import os
 import asyncio
 import logging
 
-from .common import CONFIG, service, logger
+from .common import CONFIG, service, logger, set_main_loop
 from .web_app import create_web_app
 from .agent_app import create_agent_app
 
@@ -38,6 +38,7 @@ async def _serve():
     logger.info("web   listen %s:%s", cfg["web_host"], cfg["web_port"])
     logger.info("agent listen %s:%s", cfg["agent_host"], cfg["agent_port"])
 
+    set_main_loop(asyncio.get_running_loop())
     service.datasource.start_polling()
     s_web = uvicorn.Server(uvicorn.Config(web_app, host=cfg["web_host"], port=cfg["web_port"],
                                           log_level="warning"))
@@ -47,6 +48,7 @@ async def _serve():
         await asyncio.gather(s_web.serve(), s_agent.serve())
     finally:
         service.datasource.stop_all()
+        service.watchlist.stop()
         logger.info("AgentKline stopped.")
 
 

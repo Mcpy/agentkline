@@ -135,3 +135,54 @@ docstring 为单一真相；REST 为薄镜像；`test_e2e.py` 含两表面对齐
 
 web :8765 无鉴权（登录体系在规划池；**web 写端点=未来登录挂载面**）；agent :8766 全量 Bearer。
 token：config `auth.token` 或 env `AGENTKLINE_TOKEN`。端口/host 可 config + env 覆盖。
+
+
+## 12. 雷达（v0.4.1）
+
+### 12.1 模型
+- `groups[] → rows[]`（0.4.1 仅默认组；0.4.2 分组 UI 零重构接入）；行 = `{source, symbol}` 二元组。
+- 行须源声明 `CAPS.ticker`（声明⇒实现 `ticker(params)→{price, ts, change_pct?, extra?}`，键白名单）；
+  违则 `TICKER_UNSUPPORTED`(400)。
+- **三态分发**（每 tick 判定）：`visible`=行即当前锁定板（发 `quote` 心跳事件，前端即时刷最新价）；
+  `hidden`=有板非当前（缓存+未读心跳计数，切板清零）；`watch`=无板（仅面板）。
+- quotes 轮询默认 5s（config `limits.quotes_poll_s`）；行级失败不炸整轮，连续 10 次失败标 `stale`。
+
+### 12.2 接口
+| REST | MCP | 说明 |
+|---|---|---|
+| GET /api/watchlist | watchlist_list | 组+行+quotes+state+●现场徽标+board_id |
+| POST /api/watchlist/rows | watchlist_add | {source, symbol} 幂等 |
+| DELETE /api/watchlist/rows | watchlist_remove | query: source, symbol |
+| GET /api/quotes | get_quotes | 全行快照（AI 读盘） |
+
+WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,change_pct,ts}`（visible 心跳）/
+`watchlist_changed{groups[]}`（增删广播）。
+
+### 12.3 REST 绑定约定（v0.4.1 生成器形态）
+- **POST/PUT：除 path 参数外全部参数来自 JSON body 扁平对象**（board_id/timeframe 也在 body）；
+- GET/DELETE：path 参数 + query 标量；
+- 单一注册源 `api/tools.py` 的 `@api_tool`：REST 双端口路由与 MCP 工具同函数生成（防漂移①已偿还）；
+  豁免清单：页面/WS/快照二进制（GET FileResponse、POST base64）与 take/get_snapshot（MCP-only 图块）。
+- 表面不对称明示：REST `POST /api/board` 无 symbol+source 报 `LOCK_REQUIRES_SOURCE`（UX 门），
+  MCP create_board 允许裸板（=agent REST /api/board/empty 同义）。
+
+
+## 13. 性能模型（v0.4.1 四优化）
+
+浏览器→server **零轮询**（全 WS 推送）；server→交易所请求预算如下：
+
+### 13.1 可见性分级轮询（K线）
+- `current_view`（前端 `POST /api/view` 上报）命中的 (板,周期) 槽 = 配置 `poll_s`；
+- 非可见槽降频：`<=1h→60s`、`<=4h→120s`、`>=1d→300s`（`effective_poll_s`）；
+- 切周期时槽数据老于降频窗 = **切即补拉**（`poke` 跳过本轮 sleep），用户无感；
+- 读面：`GET /api/board/{id}/timeframe/{tf}/kline_source` 返回 `eff_poll_s`（当前生效间隔）；
+- AI/REST 场景不上报 view 时全槽按降频跑（更省），切即补拉兜底。
+
+### 13.2 雷达批量与去重
+- 脚本可选 `tickers(params_list)->[quote]`（同序）；雷达每 tick **按源一次批量请求**
+  （ccxt=fapi 24hr symbols 数组）；无实现回退逐行 `ticker()`；
+- 雷达行=当前板且其槽 `last_fetch` 新鲜 → 用最新 bar close **合成 quote**（省独立请求）；
+- 轮询 sleep 对齐 5s 网格（同刻请求合并连接复用）。
+
+### 13.3 量级
+3 板+5 行：240 req/分 → ≈46（↓81%）；10 板+20 行：840 → ≈170（↓80%）。

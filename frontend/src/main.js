@@ -6,6 +6,7 @@ import { connectWebSocket } from './ws.js';
 import { bindSearch } from './search.js';
 import { initDrawToolbar } from './draw_interact.js';
 import { bindOverlays } from './render.js';
+import { bindWatchlist } from './watchlist.js';
 
 // ============================================================
 // 初始化
@@ -16,6 +17,7 @@ function init() {
     initDrawToolbar();
     bindSearch();
     bindOverlays();
+    bindWatchlist();
 
     connectWebSocket();
     log('info', 'AgentKline 前端初始化完成');

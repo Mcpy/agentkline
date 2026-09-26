@@ -48,6 +48,10 @@ TOOL_REST_MAP = {
     "list_subplots": ("get", "/api/subplots"),
     "get_kline": ("get", "/api/kline"),
     "get_snapshot": ("get", "/api/snapshot"),
+    "watchlist_list": ("get", "/api/watchlist"),
+    "watchlist_add": ("post", "/api/watchlist/rows"),
+    "watchlist_remove": ("delete", "/api/watchlist/rows"),
+    "get_quotes": ("get", "/api/quotes"),
     "list_skills": ("get", "/api/skills"),
     "load_skill": ("get", "/api/skills/"),
 }
@@ -160,21 +164,22 @@ def test(port: int, token: str = None):
 
     # === 4. 指标实例 ===
     print("📈 指标实例")
-    r = s.post(f"{base}/api/indicator?board_id=bare&timeframe=1d",
-               json={"script": "indicator/macd", "subplot": "MACD"})
+    r = s.post(f"{base}/api/indicator",
+               json={"script": "indicator/macd", "subplot": "MACD", "board_id": "bare", "timeframe": "1d"})
     check("recipe 自动 inst_id=macd", r.json().get("inst_id") == "macd", r.text)
-    r = s.post(f"{base}/api/indicator?board_id=bare&timeframe=1d",
-               json={"inst_id": "macd", "script": "indicator/rsi"})
+    r = s.post(f"{base}/api/indicator",
+               json={"inst_id": "macd", "script": "indicator/rsi", "board_id": "bare", "timeframe": "1d"})
     check("撞名 INST_EXISTS", r.status_code == 400 and "INST_EXISTS" in r.text, r.text)
-    r = s.post(f"{base}/api/indicator?board_id=bare&timeframe=1d",
-               json={"values": [1, 2, 3], "scope": "board"})
+    r = s.post(f"{base}/api/indicator",
+               json={"values": [1, 2, 3], "scope": "board", "board_id": "bare", "timeframe": "1d"})
     check("blob 传 scope 报 BLOB_SCOPE", "BLOB_SCOPE" in r.text, r.text)
-    r = s.post(f"{base}/api/indicator?board_id=bare&timeframe=1d",
+    r = s.post(f"{base}/api/indicator",
                json={"inst_id": "myblob", "lines": [{"name": "L", "type": "line",
-                                                     "values": [1.0] * 55}]})
+                                                     "values": [1.0] * 55}],
+                     "board_id": "bare", "timeframe": "1d"})
     check("blob 钉死本周期", r.json().get("scope") == "timeframe", r.text)
-    r = s.put(f"{base}/api/indicator/macd?board_id=bare&timeframe=1d",
-              json={"params": {"fast": 6, "slow": 13, "signal": 4}})
+    r = s.put(f"{base}/api/indicator/macd",
+              json={"params": {"fast": 6, "slow": 13, "signal": 4}, "board_id": "bare", "timeframe": "1d"})
     check("update params 重算+自动名", "MACD(6, 13, 4)" in r.text, r.text)
     r = s.get(f"{base}/api/indicators?board_id=bare&timeframe=1d&instances=myblob")
     check("get_indicators instances 过滤", list(r.json().get("indicators", {}).keys()) == ["myblob"], r.text)
@@ -198,8 +203,8 @@ def test(port: int, token: str = None):
               '    return [None]*len(ohlcv) if n<2 else [float(i) for i in range(len(ohlcv))]\n')
     r = s.post(f"{base}/api/scripts", json={"id": "indicator/tenp", "code": code10})
     check("10 参数脚本保存(替代 many.py 夹具)", r.status_code == 200, r.text)
-    r = s.post(f"{base}/api/indicator?board_id=bare&timeframe=1d",
-               json={"script": "indicator/tenp", "params": {"p1": 3}})
+    r = s.post(f"{base}/api/indicator",
+               json={"script": "indicator/tenp", "params": {"p1": 3}, "board_id": "bare", "timeframe": "1d"})
     check("10 参数指标上图", r.json().get("inst_id") == "tenp", r.text)
 
     # === 6. 搜索 ===
@@ -244,14 +249,15 @@ def test(port: int, token: str = None):
     kl = s.get(f"{base}/api/kline?board_id=bare&timeframe=1d&start=1&end=9999999999999").json()
     bars = kl.get("ohlcv") or kl.get("bars") or []
     ts0 = bars[10]["timestamp"] if len(bars) > 10 else 0
-    r = s.post(f"{base}/api/markers?board_id=bare&timeframe=1d",
-               json={"markers": [{"time": ts0, "position": "aboveBar", "color": "#f00",
+    r = s.post(f"{base}/api/markers",
+               json={"board_id": "bare", "timeframe": "1d",
+                     "markers": [{"time": ts0, "position": "aboveBar", "color": "#f00",
                                   "shape": "circle", "text": "t"},
                                  {"time": 1, "position": "aboveBar", "color": "#f00",
                                   "shape": "circle", "text": "bad"}]})
     check("markers 越界丢弃+dropped 回报", len(r.json().get("dropped", [])) == 1
           and r.json().get("count") == 1, r.text)
-    r = s.post(f"{base}/api/subplot?board_id=bare&timeframe=1d", json={"name": "p1", "height": 120})
+    r = s.post(f"{base}/api/subplot", json={"name": "p1", "height": 120, "board_id": "bare", "timeframe": "1d"})
     check("subplot 创建", r.status_code == 200, r.text)
     r = s.delete(f"{base}/api/subplot/p1?board_id=bare&timeframe=1d")
     check("subplot 删除", r.status_code == 200, r.text)
@@ -280,7 +286,7 @@ def test(port: int, token: str = None):
     print("🔗 两表面对齐")
     try:
         tools = mcp_tools(base, s)
-        check("MCP 工具数=35", len(tools) == 35, f"got {len(tools)}")
+        check("MCP 工具数=39", len(tools) == 39, f"got {len(tools)}")
         missing = [t for t in tools if t not in TOOL_REST_MAP and t not in MCP_ONLY]
         check("无未映射工具", not missing, str(missing))
         spec = s.get(f"{base}/openapi.json").json()
@@ -296,9 +302,89 @@ def test(port: int, token: str = None):
     except Exception as e:
         check("MCP 对齐断言可执行", False, str(e))
 
+    # === 11.5 雷达（v0.4.1） ===
+    print("📡 雷达")
+    r = s.post(f"{base}/api/watchlist/rows", json={"source": "datasource/mock_btc", "symbol": "RAD/USDT"})
+    check("加盯 ok", r.status_code == 200 and r.json().get("status") == "ok", r.text)
+    r = s.post(f"{base}/api/watchlist/rows", json={"source": "datasource/csv", "symbol": "X"})
+    check("无 ticker 源 TICKER_UNSUPPORTED", r.status_code == 400 and "TICKER_UNSUPPORTED" in r.text, r.text)
+    r = s.post(f"{base}/api/watchlist/rows", json={"source": "datasource/mock_btc", "symbol": "RAD/USDT"})
+    check("加盯幂等 noop", r.json().get("noop") is True, r.text)
+    import time as _t
+    _t.sleep(6.5)  # 等一轮 quotes poll（默认 5s）
+    r = s.get(f"{base}/api/quotes")
+    q = [x for x in r.json().get("quotes", []) if x["symbol"] == "RAD/USDT"]
+    check("quotes 心跳有价", bool(q) and q[0]["price"] is not None, r.text[:200])
+    check("无板行=watch 态", bool(q) and q[0]["state"] == "watch", r.text[:200])
+    r = s.post(f"{base}/api/board", json={"id": "radb", "symbol": "RAD/USDT",
+                                          "source": "datasource/mock_btc", "params": {"symbol": "RAD/USDT"}})
+    check("雷达行建板即锁", r.status_code == 200, r.text)
+    _t.sleep(6.5)
+    r = s.get(f"{base}/api/quotes")
+    q = [x for x in r.json().get("quotes", []) if x["symbol"] == "RAD/USDT"]
+    check("非当前板=hidden 态", bool(q) and q[0]["state"] == "hidden", r.text[:200])
+    s.get(f"{base}/api/board/radb")
+    _t.sleep(6.5)
+    r = s.get(f"{base}/api/quotes")
+    q = [x for x in r.json().get("quotes", []) if x["symbol"] == "RAD/USDT"]
+    check("当前板=visible 态", bool(q) and q[0]["state"] == "visible", r.text[:200])
+    r = s.delete(f"{base}/api/watchlist/rows?source=datasource/mock_btc&symbol=RAD/USDT")
+    check("移盯 ok", r.status_code == 200, r.text)
+    r = s.delete(f"{base}/api/watchlist/rows?source=datasource/mock_btc&symbol=RAD/USDT")
+    check("移盯不存在 404", r.status_code == 404, r.text)
+
+    # === 11.6 性能（v0.4.1 四优化） ===
+    print("⚡ 性能")
+    r = s.post(f"{base}/api/board", json={"id": "pf1", "symbol": "PF/USDT",
+                                          "source": "datasource/mock_btc", "params": {"symbol": "PF/USDT"},
+                                          "poll_s": 5})
+    check("性能板建锁", r.status_code == 200, r.text)
+    s.post(f"{base}/api/view", json={"board_id": "pf1", "timeframe": "1d"})
+    r = s.get(f"{base}/api/board/pf1/timeframe/1d/kline_source")
+    check("可见槽 eff=poll_s(5)", (r.json().get("kline_source") or {}).get("eff_poll_s") == 5, r.text[:150])
+    r = s.post(f"{base}/api/scripts", json={"id": "datasource/pfsrc", "code":
+           'NAME="性能源"\nDESC="日内+日两档(e2e)"\nPARAMS={"symbol":"X"}\n'
+           'CAPS={"backfill": False, "symbols": False, "ticker": True}\nIDENTITY=["symbol"]\n'
+           'INTERVALS=["15m","1d"]\nimport time as _t\n'
+           'def main(params, until=None):\n    return []\n'
+           'def ticker(params):\n    return {"price": 1.0, "ts": int(_t.time()*1000)}\n'
+           'def tickers(pl):\n    return [ticker(p) for p in pl]\n'})
+    check("性能源保存", r.status_code == 200, r.text)
+    r = s.post(f"{base}/api/board", json={"id": "pf3", "symbol": "P3/USDT",
+                                          "source": "datasource/pfsrc", "params": {"symbol": "P3/USDT"},
+                                          "poll_s": 5})
+    check("性能源板建锁(双槽)", r.status_code == 200, r.text)
+    s.post(f"{base}/api/view", json={"board_id": "pf3", "timeframe": "1d"})
+    r = s.get(f"{base}/api/board/pf3/timeframe/15m/kline_source")
+    check("非可见日内槽 eff=60 降频", (r.json().get("kline_source") or {}).get("eff_poll_s") == 60, r.text[:150])
+    r = s.get(f"{base}/api/board/pf1/timeframe/1w/kline_source")
+    check("非可见周槽 eff=300 降频", (r.json().get("kline_source") or {}).get("eff_poll_s") == 300, r.text[:150])
+    s.post(f"{base}/api/watchlist/rows", json={"source": "datasource/mock_btc", "symbol": "B1/USDT"})
+    s.post(f"{base}/api/watchlist/rows", json={"source": "datasource/mock_btc", "symbol": "B2/USDT"})
+    _t.sleep(6.5)
+    r = s.get(f"{base}/api/quotes")
+    qs = {q["symbol"]: q for q in r.json().get("quotes", [])}
+    check("批量 tick 双行都有价", qs.get("B1/USDT", {}).get("price") is not None
+          and qs.get("B2/USDT", {}).get("price") is not None, r.text[:200])
+    r = s.post(f"{base}/api/board", json={"id": "pf2", "symbol": "B1/USDT",
+                                          "source": "datasource/mock_btc", "params": {"symbol": "B1/USDT"},
+                                          "poll_s": 5})
+    check("去重板建锁", r.status_code == 200, r.text)
+    s.get(f"{base}/api/board/pf2")
+    s.post(f"{base}/api/view", json={"board_id": "pf2", "timeframe": "1d"})  # 可见性上报→槽回快频→去重生效
+    _t.sleep(6.5)
+    kl = s.get(f"{base}/api/kline?board_id=pf2&timeframe=1d").json()
+    bars = kl.get("ohlcv") or kl.get("bars") or []
+    r = s.get(f"{base}/api/quotes")
+    q = [x for x in r.json().get("quotes", []) if x["symbol"] == "B1/USDT"]
+    check("可见行 quote=bar close 合成", bool(q) and bool(bars)
+          and abs(q[0]["price"] - bars[-1]["close"]) < 1e-6, f"q={q and q[0]['price']} bar={bars and bars[-1]['close']}")
+    s.delete(f"{base}/api/watchlist/rows?source=datasource/mock_btc&symbol=B1/USDT")
+    s.delete(f"{base}/api/watchlist/rows?source=datasource/mock_btc&symbol=B2/USDT")
+
     # === 12. 清理 ===
     print("🧹 清理")
-    for bid in ["lk", "bare", "nobfboard", "bigb", "symboard", "ivb"]:
+    for bid in ["lk", "bare", "nobfboard", "bigb", "symboard", "ivb", "radb", "pf1", "pf2", "pf3"]:
         r = s.delete(f"{base}/api/board/{bid}")
         check(f"delete {bid}", r.status_code == 200, r.text)
 

@@ -123,6 +123,31 @@ class DataSourceManager:
         older = [b for b in existing if b["timestamp"] < new_earliest]
         return older + new_sorted
 
+    # ---- v0.4.1 性能①：可见性分级轮询 ----
+    @staticmethod
+    def _decay_s(timeframe: str) -> int:
+        """非可见槽降频：<=1h→60s；<=4h→120s；>=1d→300s"""
+        tf = (timeframe or "").lower()
+        try:
+            v = int(tf[:-1]); u = tf[-1]
+        except (ValueError, IndexError):
+            return 60
+        mins = v * {"m": 1, "h": 60, "d": 1440, "w": 10080}.get(u, 60)
+        return 60 if mins <= 60 else (120 if mins <= 240 else 300)
+
+    def effective_poll_s(self, config: dict) -> int:
+        base = config.get("poll_s") or 5
+        view = getattr(self.service, "current_view", None) or {}
+        if view.get("board_id") == config.get("board_id") and \
+                view.get("timeframe") == config.get("timeframe"):
+            return base
+        return self._decay_s(config.get("timeframe"))
+
+    def poke(self, board_id: str, timeframe: str):
+        """切即补拉：标记 force，轮询循环下轮跳过 sleep 立即拉"""
+        st = self.status.setdefault(self._key(board_id, timeframe), {})
+        st["force"] = True
+
     async def _poll_loop(self, key: str):
         """轮询循环；每轮动态读配置（poll_s 改即时生效，不碰数据不重启）"""
         config = self.configs.get(key)
@@ -136,11 +161,18 @@ class DataSourceManager:
             config = self.configs.get(key)
             if not config or config.get("mode") != "poll":
                 break
-            interval = config.get("poll_s") or 5
+            interval = self.effective_poll_s(config)
             script = config["script"]
             params = config["params"]
             try:
-                await asyncio.sleep(interval)
+                st0 = self.status.setdefault(key, {})
+                if st0.pop("force", False):
+                    pass  # 切即补拉：跳过本轮 sleep
+                else:
+                    # ④ 调度对齐：落到 5s 网格，同刻请求合并连接复用
+                    import time as _tm
+                    interval -= _tm.time() % 5
+                    await asyncio.sleep(max(0.2, interval))
 
                 # 检查是否还在
                 if key not in self.configs:
@@ -173,6 +205,7 @@ class DataSourceManager:
                 self.error_counts[key] = 0
                 st = self.status.setdefault(key, {})
                 st["last_error"] = None
+                st["eff_poll_s"] = interval
                 st["last_fetch"] = datetime.now().isoformat()
                 st["next_due"] = (datetime.now() + timedelta(seconds=interval)).isoformat()
 

@@ -7,6 +7,31 @@ import { openSettings } from './settings.js';
 import { showContextMenu } from './menu.js';
 import { attachDrawingInteraction } from './draw_interact.js';
 
+// ============ v0.4.1 优化：K 线随雷达抽屉开闭自适应 ============
+const _charts = [];   // [{chart, el}] 所有活体图表；renderChart 重建时重置
+
+function _registerChart(chart, el) {
+    _charts.push({ chart, el });
+    return chart;
+}
+
+export function resizeAllCharts() {
+    _charts.forEach(({ chart, el }) => {
+        const w = el && (el.clientWidth || el.offsetWidth);
+        if (!w) return;
+        try { chart.applyOptions({ width: w }); } catch (e) { /* 已销毁的图表忽略 */ }
+    });
+}
+
+let _ro = null;
+function _ensureResizeObserver() {
+    if (_ro || typeof ResizeObserver === 'undefined') return;
+    const host = document.querySelector('.chart-container');
+    if (!host) return;
+    _ro = new ResizeObserver(() => resizeAllCharts());
+    _ro.observe(host);
+}
+
     // 显示名优先（自动/自定义），回退内部 key
     function displayName(ind) { return (ind && ind.display_name) || (ind && ind.name) || ''; }
 
@@ -213,7 +238,8 @@ import { attachDrawingInteraction } from './draw_interact.js';
         const intraday = isIntraday(state.currentTimeframe);
 
         // 创建主图
-        const chart = LightweightCharts.createChart(container, {
+        _charts.length = 0;   // 主图重建 = 旧图销毁，注册表重置
+        const chart = _registerChart(LightweightCharts.createChart(container, {
             width: width,
             height: height,
             layout: {
@@ -245,7 +271,7 @@ import { attachDrawingInteraction } from './draw_interact.js';
                 secondsVisible: false,
                 tickMarkFormatter: (time) => formatTimeCN(time, intraday),
             },
-        });
+        }), container);
         state.charts.main = chart;
 
         // 历史回溯只由真实用户手势触发：程序化渲染重置，手势置位（一次性绑定防叠加）
@@ -684,6 +710,12 @@ import { attachDrawingInteraction } from './draw_interact.js';
         if (a >= 1e8) return (v / 1e8).toFixed(2) + '亿'; if (a >= 1e4) return (v / 1e4).toFixed(2) + '万';
         return Number(v).toLocaleString('en-US', { maximumFractionDigits: 2 }); }
 
+    // v0.4 优化点1 补漏：图例符号位用统一显示名（源名: 标的名），不露裸板 id
+    function boardLabel() {
+        const bd = (state.boards || []).find(b => b.id === state.currentBoard);
+        return (bd && (bd.name || bd.identity_display)) || state.currentBoard || '';
+    }
+
     function legendIndex(timeSec) {
         if (timeSec != null && state.timeIndex) { const i = state.timeIndex.get(timeSec); if (i !== undefined) return i; }
         return state.ohlcv.length - 1;
@@ -731,7 +763,7 @@ import { attachDrawingInteraction } from './draw_interact.js';
             const prev = state.ohlcv[i - 1] || b;
             const chg = prev.close ? (b.close - prev.close) / prev.close * 100 : 0;
             const cls = b.close >= b.open ? 'up' : 'down';
-            mainRows.push(`<span class="sym">${state.currentBoard || ''} · ${state.currentTimeframe || ''}</span>`
+            mainRows.push(`<span class="sym">${boardLabel()} · ${state.currentTimeframe || ''}</span>`
                 + `<span>O <b>${fmtP(b.open)}</b></span><span>H <b>${fmtP(b.high)}</b></span>`
                 + `<span>L <b>${fmtP(b.low)}</b></span><span>C <b class="${cls}">${fmtP(b.close)}</b></span>`
                 + `<span class="${chg >= 0 ? 'up' : 'down'}">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</span>`);
@@ -888,7 +920,7 @@ import { attachDrawingInteraction } from './draw_interact.js';
         container.appendChild(volDiv);
         state.volDiv = volDiv;
         const intradayV = isIntraday(state.currentTimeframe);
-        const volChart = LightweightCharts.createChart(volDiv, {
+        const volChart = _registerChart(LightweightCharts.createChart(volDiv, {
             width: volDiv.clientWidth, height: 90,
             layout: { background: { type: 'solid', color: '#131722' }, textColor: '#d1d4dc', attributionLogo: false },
             grid: { vertLines: { color: '#1e222d' }, horzLines: { color: '#1e222d' } },
@@ -900,7 +932,7 @@ import { attachDrawingInteraction } from './draw_interact.js';
             rightPriceScale: { minimumWidth: 80 },
             leftPriceScale: { visible: false, minimumWidth: 60 },
             timeScale: { visible: false },
-        });
+        }), volDiv);
         state.charts['volume'] = volChart;
         state.volumeSeries = volChart.addSeries(LightweightCharts.HistogramSeries, {
             priceScaleId: 'right',
@@ -927,7 +959,7 @@ import { attachDrawingInteraction } from './draw_interact.js';
 
             // 创建副图图表
             const intraday = isIntraday(state.currentTimeframe);
-            const chart = LightweightCharts.createChart(div, {
+            const chart = _registerChart(LightweightCharts.createChart(div, {
                 width: div.clientWidth,
                 height: (sp.height || 150) - 20,
                 layout: {
@@ -951,7 +983,7 @@ import { attachDrawingInteraction } from './draw_interact.js';
                 // 预留与主图相同的左轴宽度（不显示），保证横向对齐
                 leftPriceScale: { visible: false, minimumWidth: 60 },
                 timeScale: { visible: false },
-            });
+            }), div);
             state.charts[`subplot_${name}`] = chart;
             // 副图跟随容器宽度变化，保证与主图 barSpacing 一致（防错位）
             new ResizeObserver(() => {
@@ -1109,6 +1141,7 @@ function setVisibleTimeRange(fromSec, toSec) {
         if (ic) ic.onclick = () => { document.getElementById('id-card').style.display = 'none'; };
         const ns = document.getElementById('idcard-new-scene');
         if (ns) ns.onclick = () => { document.getElementById('id-card').style.display = 'none'; openSearch(); };
+        _ensureResizeObserver();
         const ba = document.getElementById('board-add');
         if (ba) ba.onclick = () => openSearch();
         const gs = document.getElementById('guide-search-btn');
@@ -1120,4 +1153,14 @@ function setVisibleTimeRange(fromSec, toSec) {
         });
     }
 
-export { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnapshot, setVisibleTimeRange, openIdCard, bindOverlays };
+    function applyQuoteTick(q) {
+        // visible 行心跳：K线轮询间隙的即时最新价（标签文本+涨跌色）
+        const lab = state.lastPriceEl;
+        if (lab && q.price != null) {
+            const prev = parseFloat(String(lab.textContent).replace(/,/g, '')) || q.price;
+            lab.textContent = q.price.toLocaleString(undefined, { minimumFractionDigits: 2 });
+            lab.style.background = q.price >= prev ? '#26a69a' : '#ef5350';
+        }
+    }
+
+export { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnapshot, setVisibleTimeRange, openIdCard, bindOverlays, applyQuoteTick };

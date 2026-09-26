@@ -1,7 +1,7 @@
-import { state } from './state.js';
+import { state, applyState } from './state.js';
 import { log } from './log.js';
 import { renderBoardTabs, renderTimeframeTabs, switchBoard, switchTimeframe, refreshIntervalOptions } from './ui.js';
-import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnapshot, setVisibleTimeRange } from './render.js';
+import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnapshot, setVisibleTimeRange , applyQuoteTick } from './render.js';
 
     // ============================================================
     // WebSocket（v0.4 标准信封 {v,type,seq,ts,payload} 硬切）
@@ -113,12 +113,14 @@ import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnap
                 log('ws', `drawing_remove: ${msg.id}`);
                 break;
             case 'board_create':
+                refreshSearch();
                 state.boards.push(msg.board);
                 _syncLocks([msg.board]);
                 renderBoardTabs();
                 log('ws', `board_create: ${msg.board.id}`);
                 break;
             case 'board_remove':
+                refreshSearch();
                 state.boards = state.boards.filter(b => b.id !== msg.board_id);
                 delete state.locks[msg.board_id];
                 if (!msg.current_board) {
@@ -139,6 +141,14 @@ import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnap
                 log('ws', `board_remove: ${msg.board_id} → current=${msg.current_board}`);
                 break;
             case 'board_switch':
+                // 竞态保险：切换目标不在本地 boards（WS 乱序/漏推）→ 拉全量自愈
+                if (!state.boards.some(b => b.id === msg.board_id)) {
+                    fetch('/api/boards').then(r => r.json()).then(d => {
+                        state.boards = d.boards || d || [];
+                        _syncLocks(state.boards);
+                        renderBoardTabs();
+                    });
+                }
                 state.currentBoard = msg.board_id;
                 if (msg.timeframe) state.currentTimeframe = msg.timeframe;
                 if (msg.state) {
@@ -220,6 +230,17 @@ import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnap
                 captureSnapshot();
                 log('ws', 'snapshot_request: 截图并上传');
                 break;
+            case 'quotes_update':
+                // 信封已解：msg 即 payload。经钩子转发，避免 ws→watchlist 循环依赖坏绑定
+                if (state.watchHooks && state.watchHooks.quotes) state.watchHooks.quotes(msg.rows);
+                break;
+            case 'watchlist_changed':
+                if (state.watchHooks && state.watchHooks.changed)
+                    state.watchHooks.changed((msg.groups && msg.groups[0] ? msg.groups[0].rows : []) || []);
+                break;
+            case 'quote':
+                if (msg.board_id === state.currentBoard) applyQuoteTick(msg);
+                break;
             case 'pong':
                 break;
             default:
@@ -242,16 +263,5 @@ import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnap
         log('info', `初始化完成: ${state.currentBoard}/${state.currentTimeframe}`);
     }
 
-    function applyState(data) {
-        state.ohlcv = data.ohlcv || [];
-        state.markers = data.markers || [];
-        state.indicators = data.indicators || {};  // v0.4: inst_id 键
-        state.drawings = {};
-        (data.drawings || []).forEach(d => { state.drawings[d.id] = d; });
-        state.subplots = {};
-        (data.subplots || []).forEach(sp => {
-            state.subplots[sp.name] = sp;
-        });
-    }
 
-export { connectWebSocket, handleWsMessage, handleInit, applyState };
+export {connectWebSocket, handleWsMessage, handleInit};

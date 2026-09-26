@@ -38,3 +38,9 @@ description: AI 引导呈现流程（v0.4）——把分析结论（标记/划�
 ## 4. 验证
 - `take_snapshot()` 返回 image 块，多模态模型可直接读图确认呈现效果。
 - 截图反映响应 snapshot_request 的浏览器当前视图；无浏览器在线时不会回退旧图（报 NO_BROWSER 姿态）。
+
+
+## 雷达与性能意识（v0.4.1）
+- 盯盘用 watchlist_add/list + get_quotes；行三态 visible/hidden/watch 解读用户注意力；
+- 读 `eff_poll_s` 判断槽当前轮询档；非可见槽数据允许分钟级旧——讲解时切即补拉已兜底；
+- 大批量盯盘同源只占一次批量请求，放心加行。

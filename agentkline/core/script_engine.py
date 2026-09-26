@@ -292,6 +292,76 @@ class ScriptEngine:
             return {"error": f"CAPS_MISMATCH: {ref} 声明 symbols 但无 list_symbols"}
         return {"symbols": fn(query) or []}
 
+    def ticker(self, ref: str, params: dict = None) -> dict:
+        """调用数据源脚本的 ticker(params)→quote；无徽章报 NO_TICKER_CAP；键白名单 price/ts/change_pct/extra"""
+        r = self.resolve(ref)
+        if not r:
+            return {"error": id_error(ref) if parse_id(ref) is None
+                    else f"SCRIPT_NOT_FOUND: {ref}"}
+        meta = self._ast_info(r["path"])
+        if not meta["caps"]["ticker"]:
+            return {"error": f"NO_TICKER_CAP: {ref} 未声明 CAPS.ticker，无报价能力"}
+        code = r["path"].read_text(encoding="utf-8")
+        namespace = {"__name__": "__main__", "__file__": str(r["path"])}
+        exec(code, namespace)
+        fn = namespace.get("ticker")
+        if not callable(fn):
+            return {"error": f"CAPS_MISMATCH: {ref} 声明 ticker 但无 ticker 函数"}
+        q = fn(params or {})
+        if not isinstance(q, dict) or not isinstance(q.get("price"), (int, float)):
+            return {"error": f"TICKER_BAD_SHAPE: {ref} ticker 返回需含数值 price"}
+        out = {"price": float(q["price"]), "ts": int(q.get("ts") or 0)}
+        if isinstance(q.get("change_pct"), (int, float)):
+            out["change_pct"] = float(q["change_pct"])
+        if isinstance(q.get("extra"), dict):
+            out["extra"] = q["extra"]
+        return {"quote": out}
+
+    def has_batch_ticker(self, ref: str) -> bool:
+        r = self.resolve(ref)
+        if not r:
+            return False
+        return "tickers" in (self._ast_info(r["path"]).get("defs") or [])
+
+    def tickers(self, ref: str, params_list: list) -> dict:
+        """批量报价（性能②）：脚本可选 tickers(params_list)->[quote]（同序）；
+        无实现则回退逐行 ticker。返回 {quotes: [...]} 或 {error}"""
+        r = self.resolve(ref)
+        if not r:
+            return {"error": f"SCRIPT_NOT_FOUND: {ref}"}
+        meta = self._ast_info(r["path"])
+        if not meta["caps"]["ticker"]:
+            return {"error": f"NO_TICKER_CAP: {ref}"}
+        code = r["path"].read_text(encoding="utf-8")
+        namespace = {"__name__": "__main__", "__file__": str(r["path"])}
+        exec(code, namespace)
+        fn = namespace.get("tickers")
+        if callable(fn):
+            raw = fn(params_list)
+            if not isinstance(raw, list) or len(raw) != len(params_list):
+                return {"error": f"TICKERS_BAD_SHAPE: {ref} tickers 需返回与入参同序列表"}
+            quotes = []
+            for q in raw:
+                if not isinstance(q, dict) or not isinstance(q.get("price"), (int, float)):
+                    quotes.append(None)
+                    continue
+                out = {"price": float(q["price"]), "ts": int(q.get("ts") or 0)}
+                if isinstance(q.get("change_pct"), (int, float)):
+                    out["change_pct"] = float(q["change_pct"])
+                if isinstance(q.get("extra"), dict):
+                    out["extra"] = q["extra"]
+                quotes.append(out)
+            return {"quotes": quotes}
+        one = namespace.get("ticker")
+        if not callable(one):
+            return {"error": f"CAPS_MISMATCH: {ref} 声明 ticker 但无 ticker/tickers"}
+        quotes = []
+        for pl in params_list:
+            q = one(pl)
+            quotes.append({"price": float(q["price"]), "ts": int(q.get("ts") or 0),
+                           **({"change_pct": float(q["change_pct"])} if isinstance(q.get("change_pct"), (int, float)) else {})})
+        return {"quotes": quotes}
+
     # ---------- 保存（只写 custom，保存即校验） ----------
     def save_script(self, ref: str, code: str) -> dict:
         parsed = parse_id(ref)

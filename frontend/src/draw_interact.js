@@ -117,8 +117,9 @@ function clearSelection() {
 
 // ---------- 持久化 ----------
 function persist(d) {
-    const url = `/api/drawing/${encodeURIComponent(d.id)}?board_id=${encodeURIComponent(state.currentBoard)}&timeframe=${encodeURIComponent(state.currentTimeframe)}`;
-    fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) })
+    const url = `/api/drawing/${encodeURIComponent(d.id)}`;
+    fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...d, board_id: state.currentBoard, timeframe: state.currentTimeframe }) })
         .then(r => r.json()).then(r => { if (r.error) log('error', `更新划线失败: ${r.error}`); });
 }
 
@@ -319,8 +320,8 @@ function updatePreview(x, y) {
 }
 
 function addDrawingRemote(drawing) {
-    const url = `/api/drawing?board_id=${encodeURIComponent(state.currentBoard)}&timeframe=${encodeURIComponent(state.currentTimeframe)}`;
-    fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(drawing) })
+    fetch('/api/drawing', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...drawing, board_id: state.currentBoard, timeframe: state.currentTimeframe }) })
         .then(r => r.json()).then(r => { if (r.error) log('error', `添加划线失败: ${r.error}`); });
 }
 

@@ -10,7 +10,7 @@ from datetime import datetime
 NAME = "模拟行情 (mock)"
 DESC = "确定性随机游走合成K线：可重放/跨窗连续/历史止于2020-01-01创世点"
 PARAMS = {"symbol": "BTC/USDT", "days": 365, "start_price": 30000}
-CAPS = {"backfill": True, "symbols": False, "ticker": False}
+CAPS = {"backfill": True, "symbols": False, "ticker": True}
 IDENTITY = ["symbol"]
 INTERVALS = ["1d", "1w"]  # 合成日线/周线两档（周线=日线聚合语义简化：同序列换标签）
 
@@ -65,3 +65,20 @@ def main(params: dict, until=None) -> list:
             })
         price = close_p
     return bars
+
+
+def ticker(params: dict) -> dict:
+    """合成报价：按 symbol 种子 + 小时正弦波心跳（e2e/演示/雷达面板用）"""
+    import time, math, hashlib
+    sym = params.get("symbol", "BTC/USDT")
+    seed = int(hashlib.md5(sym.encode()).hexdigest()[:8], 16)
+    base = float(params.get("start_price", 30000)) + (seed % 10000)
+    ts = int(time.time() * 1000)
+    phase = ts / 3_600_000 + seed % 100
+    return {"price": round(base * (1 + 0.05 * math.sin(phase)), 2), "ts": ts,
+            "change_pct": round(5 * math.cos(phase), 2)}
+
+
+def tickers(params_list: list) -> list:
+    """批量合成报价（性能② e2e/演示用）"""
+    return [ticker(p) for p in params_list]

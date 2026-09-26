@@ -204,6 +204,7 @@ body {
 
 .chart-container {
     flex: 1;
+    min-width: 0;   /* flex 收缩必需：抽屉开时 K 线让宽而不溢出 */
     display: flex;
     flex-direction: column;
     overflow-y: auto;
@@ -519,3 +520,58 @@ body {
     border: 1px solid #2a2e39; user-select: none;
 }
 .board-add:hover { background: #262b38; border-color: #2962ff; }
+
+/* v0.4.1 雷达抽屉 */
+/* v0.4.1 优化：雷达=右侧竖 tab 拉手 + flex 抽屉（不覆盖 K 线，宽度随开闭让位） */
+.radar-wrap { display: flex; flex: none; min-height: 0; }
+.radar-tab {
+    /* 圆润梯形小标签：外缘短+圆角，贴抽屉左缘顶部（非整高矩形） */
+    width: 30px; height: 118px; flex: none; padding: 0;
+    align-self: flex-start; margin-top: 64px;
+    display: flex; align-items: center; justify-content: center;
+    background: #232a36; color: #b2b5be; border: none; cursor: pointer;
+    clip-path: path('M 30 0 L 30 118 L 13 114 Q 0 111 0 100 L 0 18 Q 0 7 13 4 Z');
+    font-size: 12px; letter-spacing: 3px; user-select: none;
+}
+.radar-tab span { writing-mode: vertical-rl; }
+.radar-tab:hover { background: #2b3442; color: #2962ff; }
+.radar-wrap.open .radar-tab { color: #2962ff; }
+.watch-drawer {
+    width: 0; overflow: hidden; flex: none;
+    display: flex; flex-direction: column;
+    background: #171b26; border-left: 1px solid transparent;
+    transition: width 200ms ease;
+}
+.radar-wrap.open .watch-drawer { width: 300px; border-left-color: #2a2e39; }
+.watch-drawer > * { width: 300px; box-sizing: border-box; }
+.watch-head { display: flex; justify-content: space-between; padding: 8px 12px;
+    border-bottom: 1px solid #2a2e39; color: #d1d4dc; font-size: 13px; }
+.watch-close { cursor: pointer; color: #787b86; }
+.watch-rows { overflow-y: auto; flex: 1; }
+.watch-empty { padding: 16px 12px; color: #555; font-size: 12px; }
+.watch-row { display: flex; align-items: center; gap: 6px; padding: 7px 12px; cursor: pointer;
+    border-bottom: 1px solid #1e222d; font-size: 12px; color: #d1d4dc; }
+.watch-row:hover { background: #1e222d; }
+.watch-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.watch-sym { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.watch-price { font-variant-numeric: tabular-nums; }
+.watch-pct { width: 52px; text-align: right; font-variant-numeric: tabular-nums; }
+.watch-board { color: #26a69a; }
+.watch-stale { color: #ef5350; font-size: 10px; }
+.sr-watch { margin-left: 8px; color: #2962ff; cursor: pointer; font-size: 11px; padding: 1px 6px;
+    border: 1px solid #2a2e39; border-radius: 4px; }
+.sr-watch:hover { border-color: #2962ff; }
+.sr-watch.on { color: #26a69a; border-color: #26a69a; }
+.sr-watch.on:hover { color: #ef5350; border-color: #ef5350; }
+.watch-search { cursor: pointer; color: #b2b5be; font-size: 13px; padding: 0 2px; }
+.watch-search:hover { color: #2962ff; }
+
+/* 搜索行创建中：转圈+禁点 */
+.search-row.creating { pointer-events: none; opacity: .75; }
+.sr-spin { display: inline-block; width: 10px; height: 10px; border: 2px solid #2a2e39;
+    border-top-color: #2962ff; border-radius: 50%; animation: srspin .7s linear infinite;
+    vertical-align: -1px; margin-right: 4px; }
+@keyframes srspin { to { transform: rotate(360deg); } }
+
+.watch-x { color: #4a4e59; cursor: pointer; padding: 0 2px; font-size: 11px; }
+.watch-x:hover { color: #ef5350; }
