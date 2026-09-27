@@ -14,7 +14,8 @@ from ..core.service import AgentKlineService
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 WEB_DIST = BASE_DIR / "web_dist"
-SCRIPTS_DIR = BASE_DIR / "scripts"
+# v0.4.3：custom 根可 env 固定（pip/venv 重建免疫）；缺省=BASE_DIR/scripts（源码运行=仓库根，包外安全）
+SCRIPTS_DIR = Path(os.environ.get("AGENTKLINE_SCRIPTS_DIR") or (BASE_DIR / "scripts"))
 SNAPSHOT_DIR = BASE_DIR / "snapshots"
 SNAPSHOT_DIR.mkdir(exist_ok=True)
 

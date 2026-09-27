@@ -2,6 +2,7 @@
 
 NAME = "RSI"
 DESC = "相对强弱指标（Wilder 平滑）"
+SUBPLOT = True  # v0.4.3：副图族声明（add_indicator 未显式传 subplot 时自动建/删副图）
 PARAMS = {"period": 14}
 
 

@@ -2,6 +2,7 @@
 
 NAME = "KDJ"
 DESC = "随机指标 K/D/J 三线"
+SUBPLOT = True  # v0.4.3：副图族声明（add_indicator 未显式传 subplot 时自动建/删副图）
 PARAMS = {"n": 9}
 
 

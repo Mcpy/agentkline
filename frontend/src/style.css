@@ -221,6 +221,8 @@ body {
 .draw-preview.trend { height: 0; border-top: 1px dashed var(--accent); transform-origin: 0 0; }
 .draw-preview.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
 #main-chart {
+    /* 产品语义（用户裁决 2026-09-27）：主图固定高不随副图增减；
+       副图堆叠其下，超出页面由 .chart-container 上下滚动（回退 0.4.3 让高方案） */
     height: 450px;
     flex: none;
     width: 100%;
@@ -272,6 +274,12 @@ body {
 .legend .up { color: var(--up); }
 .legend .down { color: var(--down); }
 .legend .lg { display: inline-flex; align-items: center; gap: 4px; }
+/* v0.4.3 bug7：图例/读数数字等宽表格数字——比例字体下值变动引起行内 reflow 抖动（红框闪）；
+   tnum 让同位数数字宽度恒定，tick 更新不再微调间距 */
+.legend, .legend b, #data-info, .watch-price, .watch-pct {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+}
 .legend .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
 /* 副图/成交量图例放在标题下方一行 */
 .legend.sub { top: 22px; }
@@ -594,7 +602,8 @@ body {
 .wg-menu:hover { color: #2962ff; }
 .wg-input { flex: 1; background: #131722; border: 1px solid #2962ff; color: #d1d4dc;
     font-size: 11px; padding: 1px 4px; outline: none; }
-.watch-group-rows.drop-on { outline: 1px dashed #2962ff; outline-offset: -1px; background: #1a1e2e; }
+.watch-group-rows { min-height: 26px; }   /* v0.4.3 bug9：空组也有可视落带 */
+.watch-group.drop-on { outline: 1px dashed #2962ff; outline-offset: -1px; background: #1a1e2e; }
 .watch-row.dragging { opacity: .4; }
 .watch-row { position: relative; }
 .watch-extra { display: none; position: absolute; right: calc(100% - 8px); top: 0; z-index: 20;
@@ -602,3 +611,8 @@ body {
     font-size: 11px; color: #d1d4dc; white-space: nowrap;
     box-shadow: 0 4px 12px rgba(0,0,0,.5); pointer-events: none; }
 .watch-row:hover .watch-extra { display: block; }
+
+/* v0.4.3 ＋指标 开关按钮 */
+.ind-add { cursor: pointer; color: #2962ff; font-size: 11px; padding: 1px 8px;
+    border: 1px solid #2a2e39; border-radius: 4px; margin-left: 6px; user-select: none; }
+.ind-add:hover { border-color: #2962ff; }

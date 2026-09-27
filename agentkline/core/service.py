@@ -27,7 +27,7 @@ def _to_ms(v):
 class AgentKlineService:
     """AgentKline 业务核心"""
 
-    VERSION = "0.4.2"
+    VERSION = "0.4.3"
 
     def __init__(self, scripts_dir: str, limits: dict = None):
         limits = limits or {}
@@ -381,6 +381,11 @@ class AgentKlineService:
             from .script_engine import id_error
             return {"error": id_error(script) if "/" not in str(script)
                     else f"SCRIPT_NOT_FOUND: {script}"}
+        # v0.4.3 bug1 修：副图族脚本声明 SUBPLOT → 未显式传 subplot 时自动归属（单一真相=脚本元数据）
+        if script and subplot is None:
+            meta = self.script_engine.metadata(script) or {}
+            if meta.get("subplot"):
+                subplot = str(script).split("/")[-1]
         scope = scope or ("board" if kind == "recipe" else "timeframe")
         if inst_id and self.state.get_instance(board_id, inst_id):
             return {"error": f"INST_EXISTS: inst_id '{inst_id}' 已存在（换一个或用 update_indicator 改）",
@@ -390,6 +395,10 @@ class AgentKlineService:
             inst_id, n = base, 2
             while self.state.get_instance(board_id, inst_id):
                 inst_id, n = f"{base}_{n}", n + 1
+        # v0.4.3：recipe 空 params 填脚本 PARAMS 默认（实例参数永远完整，设置面板有得渲染）
+        if kind == "recipe" and not params:
+            meta = self.script_engine.metadata(script) or {}
+            params = dict(meta.get("params") or {})
         inst = {"inst_id": inst_id, "kind": kind, "script": script,
                 "params": params or {}, "scope": scope,
                 "tf": None if scope == "board" else timeframe,
@@ -467,12 +476,24 @@ class AgentKlineService:
                           "markers": c.get("markers")})
 
     def delete_indicator(self, board_id, timeframe, inst_id):
+        inst = self.state.get_instance(board_id, inst_id)
         r = self.state.delete_instance(board_id, inst_id)
         if r.get("error"):
             return r
         for tf in self._all_timeframes(board_id):
             self._bc({"type": "indicator_remove", "board_id": board_id,
                       "timeframe": tf, "inst_id": inst_id})
+        # v0.4.3 bug1 配套：自动副图无人用即回收（命名约定=script stem；手工同名副图极低概率误收）
+        target = (inst or {}).get("target")
+        script = (inst or {}).get("script") or ""
+        if target and target == str(script).split("/")[-1]:
+            still = any(i.get("target") == target
+                        for i in self.state.list_instances(board_id))
+            if not still:
+                for tf in self._all_timeframes(board_id):
+                    self.state.delete_subplot(board_id, tf, target)
+                    self._bc({"type": "subplot_remove", "board_id": board_id,
+                              "timeframe": tf, "name": target})
         return {"status": "ok", "inst_id": inst_id}
 
     def refresh_indicator(self, board_id, timeframe, inst_id):
@@ -835,7 +856,9 @@ class AgentKlineService:
         board = self.state.get_board(board_id)
         tf_state = board.get_tf(tf) if board else None
         if tf_state and subplot not in tf_state.subplots:
-            self.state.create_subplot(board_id, tf, subplot, 150, subplot)
+            # v0.4.3 bug1 二连修：走 service 面（带 subplot_create 广播），
+            # 原直调 state 致前端不知新副图→容器不渲染（指标线无处可去）
+            self.create_subplot(board_id, tf, subplot, 150, subplot)
 
     # ============ 快照（v0.4.1 收编自 mcp_server；NO_BROWSER 门） ============
     async def take_snapshot(self, board_id=None, timeframe=None, wait=1.5, allow_stale=False):

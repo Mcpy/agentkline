@@ -54,3 +54,8 @@ description: AI 引导呈现流程（v0.4）——把分析结论（标记/划�
 ## 快照回退意识（v0.4.2）
 - take_snapshot 无浏览器在线报 NO_BROWSER；确需旧图时显式 allow_stale=true，
   读返回的 stale/stale_since 判断时效，讲解时注明"磁盘旧快照于 <时间>"。
+
+
+## 指标意识（v0.4.3）
+- 用户可用指标栏"＋指标"自助开关内置 8 枚；AI 加指标走同一 add_indicator（subplot 族自动归属副图）；
+- 讲解时读 overview.indicators 知用户当前开了什么；改参走 update_indicator params（如 MA 周期档）。

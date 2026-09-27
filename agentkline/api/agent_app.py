@@ -30,7 +30,7 @@ async def _lifespan(app: FastAPI):
 
 
 def create_agent_app() -> FastAPI:
-    app = FastAPI(title="AgentKline Agent", version="0.4.2", lifespan=_lifespan)
+    app = FastAPI(title="AgentKline Agent", version="0.4.3", lifespan=_lifespan)
 
     @app.middleware("http")
     async def require_token(request, call_next):

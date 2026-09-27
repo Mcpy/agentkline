@@ -223,10 +223,17 @@ def backfill(board_id: str, timeframe: str, limit: int = 200):
 @api_tool(group="user_write", method="POST", path="/api/view", mcp=False)
 def report_view(board_id: Optional[str] = None, timeframe: Optional[str] = None,
                 from_time: Optional[int] = None, to_time: Optional[int] = None):
-    """前端上报当前视图（画板/周期/可见窗口）；AI 读盘用 get_current_view"""
+    """前端上报当前视图（画板/周期/可见窗口）；AI 读盘用 get_current_view。
+    v0.4.3 bug5：board_id 空 = 清空视图（tab 隐藏/无前景观众），防僵尸后台 tab 覆盖全局 current_view"""
+    if not board_id:
+        service.current_view = {}
+        return {"status": "ok"}
     service.current_view = {"board_id": board_id, "timeframe": timeframe,
                             "from": from_time, "to": to_time,
                             "updated_at": datetime.now().isoformat()}
+    # v0.4.3 bug5 根治：视图命中即唤醒该槽长睡 loop（否则新板/重连后首睡 300s 档，价格冻至多 5 分钟）
+    if board_id and timeframe:
+        service.datasource.poke(board_id, timeframe)
     return {"status": "ok"}
 
 
@@ -322,7 +329,7 @@ def run_script(script: str, params: Optional[dict] = None):
     return service.run_script(script, params)
 
 
-@api_tool(group="exec", method="POST", path="/api/indicator", err_status=400)
+@api_tool(group="user_write", method="POST", path="/api/indicator", err_status=400)  # v0.4.3：用户面开关入口（传统面板式），exec→user_write 同 create_timeframe 先例
 def add_indicator(board_id: Optional[str] = None, timeframe: Optional[str] = None,
                   inst_id: Optional[str] = None, values: Optional[list] = None,
                   subplot: Optional[str] = None, style: Optional[dict] = None,

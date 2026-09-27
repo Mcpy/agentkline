@@ -194,12 +194,13 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
 - 组管理四工具（MCP 39→43）：
   - `watchlist_group_add(name)` → 重名 `GROUP_EXISTS`(400)
   - `watchlist_group_rename(group_id, name)` / `watchlist_group_remove(group_id)`
-    → 默认组 `GROUP_PROTECTED`；**删组=行回落默认组，不级联删行**
+    → 默认组 `GROUP_PROTECTED`；**删组=级联删组内盯盘行**（v0.4.3 用户裁决变更，原回落语义废弃）
   - `watchlist_move(source, symbol, group_id, index=None)` → 移组+定位（拖拽落定调用）
 - `watchlist_add` 扩 `group_id` 可选参（不传=default，向后兼容）；
 - WS `watchlist_changed` 自 0.4.2 起携带**全组结构**（前端不再压平丢组信息）；
 - 前端：组头（名称+行数+折叠，折叠态 localStorage）/ ⋮ 菜单（重命名/删除）/
-  行右键"移到组→"/ HTML5 拖拽排序+跨组 / 面板过滤框 / hover 卡（24h 高/低/量，quote.extra）。
+  行右键"移到组→"/ HTML5 拖拽排序+跨组（drop zone=组 section，空组有 26px 落带）/ 面板过滤框 / hover 卡（24h 高/低/量）；
+  组删除直删无确认弹窗、重命名=组头 inline 编辑框（Enter/失焦保存、Esc 取消）。
 
 
 ## 15. 快照 allow_stale（v0.4.2 B）
@@ -207,3 +208,11 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
 - `take_snapshot` 默认 fail-loud：无浏览器在线报 `NO_BROWSER`（不回退磁盘旧图，防僵尸快照误导）；
 - `allow_stale=true`：显式接受最近磁盘快照，返回体带 `stale: true` + `stale_since`（文件时间戳），
   调用方自行判断可用性；MCP 返回的 TextContent 同样透传两字段。
+
+
+## 16. 内置指标集与开关（v0.4.3）
+
+- 内置 8 枚：`indicator/sma`(MA 三线)/`ema`(三线)/`bb`/`sar`（主图族）+ `macd`/`kdj`/`rsi`/`obv`（副图族）；
+- 前端指标栏"＋指标"菜单 = 传统面板式开关：点未加项=add_indicator（默认参数 recipe），
+  点 ✓ 项=删该 script 全部实例；MCP 面无新工具（add/delete/list 现成）；
+- MA/EMA 三线制：一个实例一组线（periods=[5,10,20] 可改参）。

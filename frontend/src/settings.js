@@ -21,7 +21,7 @@ function row(html) {
     return d;
 }
 
-export function openSettings(name) {
+export async function openSettings(name) {
     const ind = state.indicators[name];
     if (!ind) return;
 
@@ -56,8 +56,16 @@ export function openSettings(name) {
     nameRow.appendChild(autoBtn);
     panel.appendChild(nameRow);
 
-    // ---- 参数 ----
-    const params = ind.params || {};
+    // ---- 参数（v0.4.3：脚本 PARAMS meta 兜底合并，旧空参实例也有得改；list 参=逗号文本） ----
+    let metaParams = {};
+    try {
+        const sr = await fetch('/api/scripts');
+        const sd = await sr.json();
+        const list = sd.scripts || sd || [];
+        const me = list.find(x => x.id === ind.script);
+        metaParams = (me && me.params) || {};
+    } catch (e) { /* meta 拿不到就用实例参数 */ }
+    const params = { ...metaParams, ...(ind.params || {}) };
     const paramInputs = {};
     if (Object.keys(params).length) {
         panel.appendChild(row(`<label>参数</label>`));
@@ -69,9 +77,16 @@ export function openSettings(name) {
             lab.className = 'set-key';
             lab.textContent = k;
             const inp = document.createElement('input');
-            inp.type = 'number';
-            inp.step = 'any';
-            inp.value = v;
+            if (Array.isArray(v)) {
+                inp.type = 'text';
+                inp.value = v.join(',');
+                inp.title = '逗号分隔列表';
+                inp.dataset.list = '1';
+            } else {
+                inp.type = 'number';
+                inp.step = 'any';
+                inp.value = v;
+            }
             paramInputs[k] = inp;
             r.appendChild(lab); r.appendChild(inp);
             grid.appendChild(r);
@@ -148,9 +163,14 @@ export function openSettings(name) {
             const newParams = {};
             let paramsChanged = false;
             Object.entries(paramInputs).forEach(([k, inp]) => {
-                const nv = parseFloat(inp.value);
-                newParams[k] = isNaN(nv) ? inp.value : nv;
-                if (String(newParams[k]) !== String(params[k])) paramsChanged = true;
+                if (inp.dataset.list) {
+                    newParams[k] = inp.value.split(',').map(x => x.trim()).filter(x => x !== '')
+                        .map(x => (isNaN(parseFloat(x)) ? x : parseFloat(x)));
+                } else {
+                    const nv = parseFloat(inp.value);
+                    newParams[k] = isNaN(nv) ? inp.value : nv;
+                }
+                if (JSON.stringify(newParams[k]) !== JSON.stringify(params[k])) paramsChanged = true;
             });
             if (paramsChanged) p1.params = newParams;
             if (wantAuto) p1.auto_label = true;

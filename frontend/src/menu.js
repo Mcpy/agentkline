@@ -32,6 +32,7 @@ function showContextMenu(x, y, items) {
 document.addEventListener('click', hideContextMenu);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideContextMenu(); });
 window.addEventListener('blur', hideContextMenu);
-window.addEventListener('wheel', hideContextMenu, { passive: true });
+// v0.4.3 bug2：wheel 关闭退役——下拉菜单项超出视口时滚轮查看会误关菜单
+// （SDK scrollIntoView 与真人滚轮同中招）；Esc/点别处/失焦关闭保留
 
 export { showContextMenu, hideContextMenu };

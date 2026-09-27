@@ -3,6 +3,7 @@
 
 NAME = "MACD"
 DESC = "指数平滑异同移动平均：DIF/DEA 线 + 红绿柱"
+SUBPLOT = True  # v0.4.3：副图族声明（add_indicator 未显式传 subplot 时自动建/删副图）
 PARAMS = {"fast": 12, "slow": 26, "signal": 9}
 
 

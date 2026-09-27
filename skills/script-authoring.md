@@ -70,3 +70,13 @@ id 格式？元数据全字面？CAPS 与实现一致？指标等长/warmup/无 
 
 ## 批量报价 tickers()（v0.4.1 性能②，可选）
 - `tickers(params_list)->[quote]` 同序返回；雷达按源单请求批量；不实现回退逐行；形状违 TICKERS_BAD_SHAPE。
+
+
+## 主图多线（v0.4.3）
+- `{"lines":[...]}` 多线：主图族（MA/EMA/BOLL/SAR）叠主图、副图族进 subplot；MA/EMA 三线制 periods=[5,10,20]；单线也返回 lines 列表。
+
+
+## SUBPLOT 声明（v0.4.3）
+- 字面常量 `SUBPLOT = True`：副图族指标声明（macd/kdj/rsi/obv）；add_indicator 未显式传 subplot 时
+  按此自动归属并建/删副图（命名=script stem）；不声明=主图叠加族（sma/ema/bb/sar）。
+- 主图多线：返回 `{"lines":[...]}` 一组线（MA/EMA 三线制 periods=[5,10,20]）。

@@ -89,6 +89,13 @@ function _ensureResizeObserver() {
     function renderIndicatorBar() {
         const bar = document.getElementById('indicator-bar');
         bar.innerHTML = '<span class="label">指标:</span>';
+        // v0.4.3：传统面板式开关入口——点＋指标出菜单，✓ 态再点即删
+        const addBtn = document.createElement('span');
+        addBtn.className = 'ind-add';
+        addBtn.textContent = '＋指标';
+        addBtn.title = '内置指标开关：点一下出现，再点一下消失';
+        addBtn.onclick = (e) => { e.stopPropagation(); openIndicatorMenu(e); };
+        bar.appendChild(addBtn);
 
         const names = Object.keys(state.indicators);
         if (names.length === 0) {
@@ -166,6 +173,52 @@ function _ensureResizeObserver() {
         fetch(url, { method: 'DELETE' })
             .then(r => r.json())
             .then(d => { if (d.error) log('error', `删除指标失败: ${d.error}`); });
+    }
+
+    // v0.4.3 内置指标开关菜单（传统面板手感：一族一开关）
+    const BUILTIN_INDICATORS = [
+        { ref: 'indicator/sma',  label: 'MA 均线组',   group: '主图' },
+        { ref: 'indicator/ema',  label: 'EMA 指数均线', group: '主图' },
+        { ref: 'indicator/bb',   label: 'BOLL 布林带',  group: '主图' },
+        { ref: 'indicator/sar',  label: 'SAR 抛物转向', group: '主图' },
+        { ref: 'indicator/macd', label: 'MACD',       group: '副图' },
+        { ref: 'indicator/kdj',  label: 'KDJ',        group: '副图' },
+        { ref: 'indicator/rsi',  label: 'RSI',        group: '副图' },
+        { ref: 'indicator/obv',  label: 'OBV 能量潮',  group: '副图' },
+    ];
+
+    function _instsOf(ref) {
+        return Object.entries(state.indicators || {})
+            .filter(([, i]) => (i.script || '') === ref)
+            .map(([id]) => id);
+    }
+
+    function openIndicatorMenu(e) {
+        if (!state.currentBoard) { log('info', '先建现场再加指标'); return; }
+        const items = BUILTIN_INDICATORS.map(b => {
+            const on = _instsOf(b.ref).length > 0;
+            return {
+                label: `${on ? '✓ ' : '　'}[${b.group}] ${b.label}`,
+                onClick: () => toggleBuiltin(b.ref),
+            };
+        });
+        showContextMenu(e.clientX, e.clientY, items);
+    }
+
+    async function toggleBuiltin(ref) {
+        const insts = _instsOf(ref);
+        if (insts.length) {   // 已加 → 删该族全部实例（toggle 关）
+            for (const id of insts) {
+                const r = await fetch(`/api/indicator/${encodeURIComponent(id)}?board_id=${encodeURIComponent(state.currentBoard)}&timeframe=${encodeURIComponent(state.currentTimeframe)}`,
+                                      { method: 'DELETE' });
+                if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || '删指标失败'); }
+            }
+            return;
+        }
+        const r = await fetch('/api/indicator', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ board_id: state.currentBoard, timeframe: state.currentTimeframe, script: ref }) });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || '加指标失败'); }
     }
 
     // ============================================================
@@ -418,6 +471,24 @@ function _ensureResizeObserver() {
     // 实时数据原地更新（不重建图表，保持缩放/平移，跟随右缘）
     // shift>0 表示历史前插了 shift 根，视口需右移 shift 保持看到原K线
     // ============================================================
+    // v0.4.3 bug6：单指标 series 增量更新（indicator_update 轮询重算广播走这里，
+    // 不再全量 renderChart 重建——重建=拆图建图=每 5s 闪一下）
+    function updateIndicatorSeries(instId) {
+        const ind = state.indicators[instId];
+        if (!ind) return;
+        const seriesList = state.seriesMap[instId] || [];
+        const want = (ind.lines && ind.lines.length) ? ind.lines.length : (ind.values ? 1 : 0);
+        if (seriesList.length !== want) { renderChart(); return; }  // 结构变化才全量
+        if (ind.lines && ind.lines.length) {
+            zOrdered(ind.lines).forEach((line, idx) => {
+                const s = seriesList[idx];
+                if (s && line.values) s.setData(buildSeriesData(line.values, line.type || 'line', line.style));
+            });
+        } else if (ind.values && seriesList[0]) {
+            seriesList[0].setData(buildSeriesData(ind.values, ind.type || 'line', ind.style));
+        }
+    }
+
     function applyDataUpdate(shift = 0) {
         // 结构未就绪 → 全量渲染
         if (!state.charts.main || !state.series.candle || !state.ohlcv.length) {
@@ -440,18 +511,8 @@ function _ensureResizeObserver() {
             })));
         }
 
-        // 更新所有指标 series（主图+副图）
-        Object.entries(state.indicators).forEach(([name, ind]) => {
-            const seriesList = state.seriesMap[name] || [];
-            if (ind.lines && ind.lines.length) {
-                zOrdered(ind.lines).forEach((line, idx) => {
-                    const s = seriesList[idx];
-                    if (s && line.values) s.setData(buildSeriesData(line.values, line.type || 'line', line.style));
-                });
-            } else if (ind.values && seriesList[0]) {
-                seriesList[0].setData(buildSeriesData(ind.values, ind.type || 'line', ind.style));
-            }
-        });
+        // 更新所有指标 series（主图+副图）——单 choke 点
+        Object.keys(state.indicators).forEach(updateIndicatorSeries);
 
         // 恢复视口（bug2 根治）：仅在前插(shift>0)或追加(newTotal>prevTotal)时动视口；
         // 原地 tick 更新（total 不变）绝不碰视口——否则 wasAtRight 分支的 +2 右边距
@@ -500,6 +561,17 @@ function _ensureResizeObserver() {
     // 视图上报（把用户当前看哪告诉后端，供 agent 查询）
     // ============================================================
     let viewReportTimer = null;
+
+    // v0.4.3 bug5：tab 隐藏=清 view 上报（后台/僵尸 tab 不再覆盖全局 current_view，
+    // 双客户端覆盖税#3 缓解；终极解=0.5 per-session 视图）；回前台立即重报
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            fetch('/api/view', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+                .catch(() => {});
+        } else {
+            reportView();
+        }
+    });
 
     function reportView() {
         clearTimeout(viewReportTimer);
@@ -786,7 +858,12 @@ function _ensureResizeObserver() {
             // bug4：价格更新后 setData 会让 LWC 对"带程序化十字准星的图"重发 crosshairMove，
             // 同步链会把它当源反向传播，把用户悬停图的水平线 setCrosshairPosition 吸附到K线值。
             // 用真实鼠标在哪个图上（mousemove/mouseleave）判定唯一同步源，程序化重发一律忽略。
-            const el = key === 'main' ? document.getElementById('main-chart') : state.subplotDivs[key];
+            // v0.4.3 bug3：charts 键='subplot_<name>'/'volume'，subplotDivs 键=裸名——
+            // 原直取 subplotDivs[key] 恒 undefined → 副图/成交量图永不绑定 hover 门 →
+            // 悬停副图时 _hoverChartKey 不更新 → 十字线同步单向（主→副通、副→主断）
+            const el = key === 'main' ? document.getElementById('main-chart')
+                : key === 'volume' ? state.volDiv
+                : state.subplotDivs[key.replace(/^subplot_/, '')];
             if (el && !el._akHoverBound) {
                 el._akHoverBound = true;
                 el.addEventListener('mousemove', () => { state._hoverChartKey = key; }, { passive: true });
@@ -1163,4 +1240,4 @@ function setVisibleTimeRange(fromSec, toSec) {
         }
     }
 
-export { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnapshot, setVisibleTimeRange, openIdCard, bindOverlays, applyQuoteTick };
+export { renderChart, applyDataUpdate, updateIndicatorSeries, syncDrawings, renderSubplots, captureSnapshot, setVisibleTimeRange, openIdCard, bindOverlays, applyQuoteTick };

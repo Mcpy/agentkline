@@ -1,12 +1,12 @@
 """
-内置指标：MA 均线组（v0.4.3 三线制，传统面板语义：一个实例一组线）
+内置指标：EMA 指数均线组（v0.4.3 新增，三线制同 MA）
 """
 
-NAME = "MA"
-DESC = "移动平均线组（默认 MA5/MA10/MA20 三线）"
+NAME = "EMA"
+DESC = "指数移动平均线组（默认 EMA5/EMA10/EMA20 三线）"
 PARAMS = {"periods": [5, 10, 20]}
 
-_COLORS = ["#f5c542", "#4fc3f7", "#b388ff", "#ef5350", "#26a69a", "#ff8a65"]
+_COLORS = ["#ffb300", "#29b6f6", "#ce93d8", "#ef5350", "#26a69a", "#ff8a65"]
 
 
 def main(params: dict, ohlcv: list) -> dict:
@@ -19,9 +19,13 @@ def main(params: dict, ohlcv: list) -> dict:
     lines = []
     for idx, p in enumerate(periods):
         p = int(p)
+        k = 2.0 / (p + 1)
         vals = [None] * len(closes)
-        for i in range(p - 1, len(closes)):
-            vals[i] = round(sum(closes[i - p + 1: i + 1]) / p, 2)
-        lines.append({"name": f"MA{p}", "type": "line", "values": vals,
+        ema = None
+        for i, c in enumerate(closes):
+            ema = c if ema is None else c * k + ema * (1 - k)
+            if i >= p - 1:
+                vals[i] = round(ema, 2)
+        lines.append({"name": f"EMA{p}", "type": "line", "values": vals,
                       "style": {"color": _COLORS[idx % len(_COLORS)], "lineWidth": 1}})
     return {"lines": lines}

@@ -30,6 +30,11 @@ export function applyState(data) {
     state.indicators = data.indicators || {};
     state.markers = data.markers || [];
     state.drawings = data.drawings || [];
-    state.subplots = data.subplots || [];
+    // v0.4.3 bug4：init/switch payload 的 subplots 是 list[{name,...}]，
+    // 而 state.subplots 是 dict 语义（subplot_create 广播写 dict、renderSubplots 读 Object.keys）；
+    // 原直赋值致 list 覆盖 dict → 任意 init/switch 后副图容器全灭（chips 仍在）
+    state.subplots = Array.isArray(data.subplots)
+        ? Object.fromEntries(data.subplots.map(x => [x.name, x]))
+        : (data.subplots || {});
     return state;
 }

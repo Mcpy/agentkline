@@ -99,17 +99,19 @@ class WatchlistManager:
         return {"status": "ok", "group_id": group_id, "name": name}
 
     def remove_group(self, group_id):
+        # v0.4.3 裁决变更（用户）：删组=级联删组内盯盘行（原"回落默认组"语义废弃）
         with self._lock:
             if group_id == "default":
                 return {"error": "GROUP_PROTECTED: 默认组不可改名/删除"}
             g = self._group(group_id)
             if not g:
                 return {"error": f"GROUP_NOT_FOUND: 无组 {group_id}"}
-            moved = len(g["rows"])
-            self.groups[0]["rows"].extend(g["rows"])  # 行回落默认组，不级联删
+            deleted = len(g["rows"])
+            for x in g["rows"]:
+                self.quotes.pop(self.key(x["source"], x["symbol"]), None)
             self.groups = [x for x in self.groups if x["id"] != group_id]
         self._bc_changed()
-        return {"status": "ok", "moved_rows": moved}
+        return {"status": "ok", "deleted_rows": deleted}
 
     def move_row(self, source, symbol, to_group_id, index=None):
         with self._lock:

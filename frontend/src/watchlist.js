@@ -123,18 +123,38 @@ function beginAddGroup() {
     inp.onblur = () => done(true);
 }
 
-async function renameGroup(g) {
-    const name = window.prompt(`重命名分组「${g.name}」`, g.name);
-    if (name == null || !name.trim() || name.trim() === g.name) return;
-    const r = await fetch('/api/watchlist/groups/rename', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ group_id: g.id, name: name.trim() }) });
-    if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || '重命名失败'); }
-    syncWatchlist();
+function renameGroup(g) {
+    // v0.4.3：inline 编辑——组名原位变输入框（Enter/失焦保存，Esc 取消），无弹窗
+    const hd = document.querySelector(`.watch-group-head[data-gid="${g.id}"]`);
+    if (!hd || hd.querySelector('.wg-input')) return;
+    const nameEl = hd.querySelector('.wg-name');
+    const inp = document.createElement('input');
+    inp.className = 'wg-input';
+    inp.value = g.name;
+    nameEl.replaceWith(inp);
+    inp.focus(); inp.select();
+    let done = false;
+    const commit = async (ok) => {
+        if (done) return; done = true;
+        const name = (inp.value || '').trim();
+        inp.replaceWith(nameEl);
+        if (!ok || !name || name === g.name) { renderWatchlist(); return; }
+        const r = await fetch('/api/watchlist/groups/rename', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ group_id: g.id, name }) });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || '重命名失败'); }
+        syncWatchlist();
+    };
+    inp.onkeydown = e => {
+        if (e.key === 'Enter') commit(true);
+        if (e.key === 'Escape') commit(false);
+        e.stopPropagation();
+    };
+    inp.onblur = () => commit(true);
 }
 
 async function removeGroup(g) {
-    if (!window.confirm(`删除分组「${g.name}」？\n组内 ${g.rows.length} 行将回落默认组（不删行）。`)) return;
+    // v0.4.3 裁决变更：直删无 confirm 弹窗；组内盯盘行级联删除（服务端语义）
     const r = await fetch(`/api/watchlist/groups?group_id=${encodeURIComponent(g.id)}`, { method: 'DELETE' });
     if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || '删组失败'); }
     syncWatchlist();
@@ -164,6 +184,7 @@ export function renderWatchlist() {
 
         const hd = document.createElement('div');
         hd.className = 'watch-group-head';
+        hd.dataset.gid = g.id;
         hd.innerHTML = `<span class="wg-caret">${coll ? '▸' : '▾'}</span>`
             + `<span class="wg-name">${g.name}</span><span class="wg-count">${rows.length}</span>`
             + (g.id !== 'default' ? '<span class="wg-menu" title="组管理">⋮</span>' : '');
@@ -178,7 +199,7 @@ export function renderWatchlist() {
             e.stopPropagation();
             showContextMenu(e.clientX, e.clientY, [
                 { label: '重命名…', onClick: () => renameGroup(g) },
-                { label: '删除组（行回落默认组）', danger: true, onClick: () => removeGroup(g) },
+                { label: `删除组（连同 ${g.rows.length} 行盯盘）`, danger: true, onClick: () => removeGroup(g) },
             ]);
         };
 
@@ -186,11 +207,12 @@ export function renderWatchlist() {
         rowsEl.className = 'watch-group-rows';
         rowsEl.dataset.gid = g.id;
         if (!coll) rows.forEach(r => rowsEl.appendChild(rowEl(r, g)));
-        // 拖拽投放区
-        rowsEl.ondragover = e => { e.preventDefault(); rowsEl.classList.add('drop-on'); };
-        rowsEl.ondragleave = () => rowsEl.classList.remove('drop-on');
-        rowsEl.ondrop = async e => {
-            e.preventDefault(); rowsEl.classList.remove('drop-on');
+        // v0.4.3 bug9：drop zone 绑整个组 section（空组 rowsEl 高度 0 无法落 →
+        // 原先只有有行的默认组能接拖拽）；落点 idx 仍按行中点计算，空白区=追加组尾
+        sec.ondragover = e => { e.preventDefault(); sec.classList.add('drop-on'); };
+        sec.ondragleave = () => sec.classList.remove('drop-on');
+        sec.ondrop = async e => {
+            e.preventDefault(); sec.classList.remove('drop-on');
             let d = {}; try { d = JSON.parse(e.dataTransfer.getData('text/plain') || '{}'); } catch {}
             if (!d.source) return;
             const rowEls = [...rowsEl.querySelectorAll('.watch-row:not(.dragging)')];
@@ -206,9 +228,14 @@ export function renderWatchlist() {
         box.appendChild(sec);
     });
 
+    // v0.4.3 bug8：空提示不再 innerHTML 整箱覆盖（那会抹掉组头）；
+    // 组结构永远可见可管理，提示追加在组头之后
     if (!total) {
-        box.innerHTML = `<div class="watch-empty">${f ? '无匹配行。' :
-            '雷达空着。搜索行点"＋盯"、或板标签右键"加入雷达"。'}</div>`;
+        const hint = document.createElement('div');
+        hint.className = 'watch-empty';
+        hint.textContent = f ? '无匹配行。' :
+            '雷达空着。搜索行点"＋盯"、或板标签右键"加入雷达"。';
+        box.appendChild(hint);
     }
 }
 

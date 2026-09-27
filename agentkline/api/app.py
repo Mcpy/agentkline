@@ -32,12 +32,30 @@ def _server_cfg():
     }
 
 
+def _warm_network_stack():
+    """v0.4.3 bug5 续：主线程预热 requests/urllib3/DNS/SSL——
+    轮询 loop 的首次 fetch 在 executor 子线程冷启动曾观测到永久挂起
+    （主线程同调用 0s 健康），预热把首次导入与解析移出子线程路径。"""
+    try:
+        import requests
+        requests.get("https://fapi.binance.com/fapi/v1/ping", timeout=5)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("network warm-up 失败（不阻塞启动）: %s", e)
+
+
 async def _serve():
     import uvicorn
     cfg = _server_cfg()
     logger.info("web   listen %s:%s", cfg["web_host"], cfg["web_port"])
     logger.info("agent listen %s:%s", cfg["agent_host"], cfg["agent_port"])
 
+    _warm_network_stack()
+    from .common import SCRIPTS_DIR
+    logger.info("custom scripts root: %s", SCRIPTS_DIR)
+    if "site-packages" in str(SCRIPTS_DIR):
+        logger.warning("custom 根位于 site-packages 内：venv 重建会丢失自建脚本！"
+                       "建议设 AGENTKLINE_SCRIPTS_DIR 指向用户目录（如 ~/.agentkline/scripts）")
     set_main_loop(asyncio.get_running_loop())
     service.datasource.start_polling()
     s_web = uvicorn.Server(uvicorn.Config(web_app, host=cfg["web_host"], port=cfg["web_port"],

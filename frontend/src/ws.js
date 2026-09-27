@@ -1,7 +1,7 @@
 import { state, applyState } from './state.js';
 import { log } from './log.js';
 import { renderBoardTabs, renderTimeframeTabs, switchBoard, switchTimeframe, refreshIntervalOptions } from './ui.js';
-import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnapshot, setVisibleTimeRange , applyQuoteTick } from './render.js';
+import { renderChart, applyDataUpdate, updateIndicatorSeries, syncDrawings, renderSubplots, captureSnapshot, setVisibleTimeRange , applyQuoteTick } from './render.js';
 import { refreshSearch } from './search.js';  // v0.4.2 fix: board_create/board_remove 首行调用，漏 import 曾致 ReferenceError 断 handler（老 bug1 回归真根因）
 
     // ============================================================
@@ -77,6 +77,7 @@ import { refreshSearch } from './search.js';  // v0.4.2 fix: board_create/board_
             case 'indicator_add':
             case 'indicator_update':
                 if (msg.board_id === state.currentBoard && msg.timeframe === state.currentTimeframe) {
+                    const hadSeries = (state.seriesMap[msg.inst_id] || []).length > 0;
                     state.indicators[msg.inst_id] = {
                         inst_id: msg.inst_id, kind: msg.kind, script: msg.script,
                         values: msg.values, lines: msg.lines, markers: msg.markers,
@@ -84,7 +85,9 @@ import { refreshSearch } from './search.js';  // v0.4.2 fix: board_create/board_
                         scope: msg.scope, params: msg.params,
                         display_name: msg.display_name,
                     };
-                    renderChart();
+                    // v0.4.3 bug6：add 或结构未就绪=全量建一次；update 且 series 已在=增量 setData（防 5s 一闪）
+                    if (msg.type === 'indicator_update' && hadSeries) updateIndicatorSeries(msg.inst_id);
+                    else renderChart();
                 }
                 log('ws', `${msg.type}: ${msg.inst_id}`);
                 break;

@@ -11,7 +11,7 @@ from . import routes
 
 def create_web_app() -> FastAPI:
     # 依赖级登录预留点：未来把 current_web_user 换成真实校验即可全量生效
-    app = FastAPI(title="AgentKline Web", version="0.4.2",
+    app = FastAPI(title="AgentKline Web", version="0.4.3",
                   dependencies=[Depends(current_web_user)])
     if (WEB_DIST / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=str(WEB_DIST / "assets")), name="assets")

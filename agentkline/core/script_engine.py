@@ -24,7 +24,7 @@ logger = logging.getLogger("agentkline.script")
 KINDS = ("datasource", "indicator", "strategy")
 CAPS_KEYS = ("backfill", "symbols", "ticker")
 STEM_RE = re.compile(r"^[a-z0-9_]+$")
-META_NAMES = ("NAME", "DESC", "PARAMS", "CAPS", "IDENTITY", "INTERVALS")
+META_NAMES = ("NAME", "DESC", "PARAMS", "CAPS", "IDENTITY", "INTERVALS", "SUBPLOT")
 SAVE_WARN_BYTES = 100_000  # save_script 大小告警阈值（R8 护栏族）
 
 
@@ -81,7 +81,8 @@ class ScriptEngine:
     def _meta_from_tree(tree) -> dict:
         meta = {"name": None, "desc": ast.get_docstring(tree), "params": {},
                 "caps": {k: False for k in CAPS_KEYS}, "caps_declared": False,
-                "identity": [], "defs": set(), "main_until": False, "has_main": False}
+                "identity": [], "defs": set(), "main_until": False, "has_main": False,
+                "subplot": False}
         literals = {}
         for node in tree.body:
             if isinstance(node, ast.Assign):
@@ -104,6 +105,8 @@ class ScriptEngine:
         ident = literals.get("IDENTITY")
         if isinstance(ident, list):
             meta["identity"] = [str(x) for x in ident]
+        if literals.get("SUBPLOT") is not None:
+            meta["subplot"] = bool(literals["SUBPLOT"])
         intervals = literals.get("INTERVALS")
         # 支持周期表（字面 list，如 ["15m","1h","4h","1d","1w"]）；不声明=离线源/自由槽
         meta["intervals"] = [str(x) for x in intervals] if isinstance(intervals, list) else None

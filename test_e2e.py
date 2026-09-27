@@ -11,6 +11,7 @@ import os
 import sys
 import json
 import argparse
+import sys
 import requests
 
 MCP_ONLY = {"take_snapshot"}  # 判决：刻意无 REST 触发
@@ -337,6 +338,56 @@ def test(port: int, token: str = None):
     r = s.delete(f"{base}/api/watchlist/rows?source=datasource/mock_btc&symbol=RAD/USDT")
     check("移盯不存在 404", r.status_code == 404, r.text)
 
+    # === 11.65 内置指标集 + toggle（v0.4.3 A/B） ===
+    print("📈 内置指标")
+    r = s.post(f"{base}/api/board", json={"id": "indb", "symbol": "IND/USDT",
+                                          "source": "datasource/mock_btc", "params": {"symbol": "IND/USDT"}})
+    check("指标板建锁", r.status_code == 200, r.text)
+    BUILTINS = ["indicator/sma", "indicator/ema", "indicator/bb", "indicator/sar",
+                "indicator/macd", "indicator/kdj", "indicator/rsi", "indicator/obv"]
+    inst_ids = {}
+    for ref in BUILTINS:
+        r = s.post(f"{base}/api/indicator", json={"board_id": "indb", "timeframe": "1d", "script": ref})
+        ok = r.status_code == 200 and not (r.json() or {}).get("error")
+        check(f"加 {ref}", ok, r.text[:120])
+        if ok:
+            inst_ids[ref] = (r.json() or {}).get("inst_id")
+    r = s.get(f"{base}/api/indicators?board_id=indb&timeframe=1d")
+    inds = r.json().get("indicators") or {}  # {inst_id: inst} dict 面
+    sma_inst = next((i for i in inds.values() if (i.get("script") or "").endswith("/sma")), None)
+    check("sma 三线 MA5/10/20", bool(sma_inst) and [l["name"] for l in (sma_inst.get("lines") or [])] == ["MA5", "MA10", "MA20"],
+          str(sma_inst and [l["name"] for l in sma_inst.get("lines") or []]))
+    ema_inst = next((i for i in inds.values() if (i.get("script") or "").endswith("/ema")), None)
+    check("ema 三线 EMA5/10/20", bool(ema_inst) and [l["name"] for l in (ema_inst.get("lines") or [])] == ["EMA5", "EMA10", "EMA20"],
+          str(ema_inst and [l["name"] for l in ema_inst.get("lines") or []]))
+    check("8 枚全在", len(inds) == 8, f"got {len(inds)}")
+    check("sma 实例带默认参数", bool(sma_inst) and (sma_inst.get("params") or {}).get("periods") == [5, 10, 20],
+          str(sma_inst and sma_inst.get("params")))
+    macd_inst = next((i for i in inds.values() if (i.get("script") or "").endswith("/macd")), None)
+    check("macd 自动归属副图", bool(macd_inst) and macd_inst.get("subplot") == "macd",
+          str(macd_inst and macd_inst.get("subplot")))
+    r = s.get(f"{base}/api/subplots?board_id=indb&timeframe=1d")
+    subnames = [x.get("name") if isinstance(x, dict) else x for x in (r.json().get("subplots") or [])]
+    check("副图列表含 macd", "macd" in subnames, str(subnames))
+    # toggle 对：删 sma 再列表无
+    if sma_inst:
+        r = s.delete(f"{base}/api/indicator/{sma_inst['inst_id']}?board_id=indb&timeframe=1d")
+        check("toggle 删 sma", r.status_code == 200, r.text[:100])
+        r = s.get(f"{base}/api/indicators?board_id=indb&timeframe=1d")
+        check("删后 7 枚", len(r.json().get("indicators") or {}) == 7, "")
+    # macd 删后副图回收
+    if macd_inst:
+        r = s.delete(f"{base}/api/indicator/{macd_inst['inst_id']}?board_id=indb&timeframe=1d")
+        check("toggle 删 macd", r.status_code == 200, r.text[:100])
+        r = s.get(f"{base}/api/subplots?board_id=indb&timeframe=1d")
+        subnames = [x.get("name") if isinstance(x, dict) else x for x in (r.json().get("subplots") or [])]
+        check("macd 副图回收", "macd" not in subnames, str(subnames))
+        inst_ids.pop("indicator/macd", None)
+    for ref, iid in inst_ids.items():
+        if iid and not (ref.endswith("/sma")):
+            s.delete(f"{base}/api/indicator/{iid}?board_id=indb&timeframe=1d")
+    s.delete(f"{base}/api/board/indb")
+
     # === 11.7 雷达分组（v0.4.2 A） ===
     print("🗂 雷达分组")
     _sfx = str(int(_t.time()))[-4:]  # 组名带运行后缀：跨运行零残留冲突
@@ -366,11 +417,11 @@ def test(port: int, token: str = None):
     s.put(f"{base}/api/watchlist/move", json={"source": "datasource/mock_btc",
                                               "symbol": "G1/USDT", "group_id": gid2})
     r = s.delete(f"{base}/api/watchlist/groups?group_id={gid2}")
-    check("删组 ok", r.status_code == 200 and r.json().get("moved_rows") == 1, r.text[:150])
+    check("删组 ok", r.status_code == 200 and r.json().get("deleted_rows") == 1, r.text[:150])
     r = s.get(f"{base}/api/watchlist")
     gids = [g["id"] for g in r.json()["groups"]]
     syms = [x["symbol"] for g in r.json()["groups"] for x in g["rows"]]
-    check("删组回落默认组", gid2 not in gids and "G1/USDT" in syms, f"{gids} {syms}")
+    check("删组级联删行（v0.4.3 裁决变更）", gid2 not in gids and "G1/USDT" not in syms, f"{gids} {syms}")
     s.delete(f"{base}/api/watchlist/rows?source=datasource/mock_btc&symbol=G1/USDT")
     s.delete(f"{base}/api/watchlist/groups?group_id={gid}")  # 节尾清组：e2e 自净化
 
@@ -398,6 +449,13 @@ def test(port: int, token: str = None):
     s.post(f"{base}/api/view", json={"board_id": "pf3", "timeframe": "1d"})
     r = s.get(f"{base}/api/board/pf3/timeframe/15m/kline_source")
     check("非可见日内槽 eff=60 降频", (r.json().get("kline_source") or {}).get("eff_poll_s") == 60, r.text[:150])
+    # bug5：空 view 上报=清空（tab 隐藏语义）→ 可见槽也降频；再报回→命中
+    s.post(f"{base}/api/view", json={})
+    r = s.get(f"{base}/api/board/pf3/timeframe/1d/kline_source")
+    check("空 view 清空→全降频", (r.json().get("kline_source") or {}).get("eff_poll_s") == 300, r.text[:150])
+    s.post(f"{base}/api/view", json={"board_id": "pf3", "timeframe": "1d"})
+    r = s.get(f"{base}/api/board/pf3/timeframe/1d/kline_source")
+    check("报回→命中 5s", (r.json().get("kline_source") or {}).get("eff_poll_s") == 5, r.text[:150])
     r = s.get(f"{base}/api/board/pf1/timeframe/1w/kline_source")
     check("非可见周槽 eff=300 降频", (r.json().get("kline_source") or {}).get("eff_poll_s") == 300, r.text[:150])
     s.post(f"{base}/api/watchlist/rows", json={"source": "datasource/mock_btc", "symbol": "B1/USDT"})
@@ -422,6 +480,12 @@ def test(port: int, token: str = None):
           and abs(q[0]["price"] - bars[-1]["close"]) < 1e-6, f"q={q and q[0]['price']} bar={bars and bars[-1]['close']}")
     s.delete(f"{base}/api/watchlist/rows?source=datasource/mock_btc&symbol=B1/USDT")
     s.delete(f"{base}/api/watchlist/rows?source=datasource/mock_btc&symbol=B2/USDT")
+
+    # === 11.9 前端护栏（v0.4.3 C：DAG 判环 + 跨模块未 import 门） ===
+    print("🛡 前端护栏")
+    import subprocess as _sp
+    gr = _sp.run([sys.executable, "scripts/check_fe_guards.py"], capture_output=True, text=True)
+    check("护栏：无环+无漏 import", gr.returncode == 0, (gr.stdout + gr.stderr)[:200])
 
     # === 12. 清理 ===
     print("🧹 清理")

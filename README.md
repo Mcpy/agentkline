@@ -36,6 +36,7 @@ Since v0.4 the chart is a **scene per symbol** (one symbol, one locked board): t
 - 🔐 **One symbol, one scene** — boards lock to `(source, symbol)` at creation; switching symbol/source means a new scene; collisions return `SOURCE_LOCKED` with a one-click "create board with this config" suggestion
 - 🔍 **User self-service search flow** — search symbols across CAPS-enabled datasources, click a row = board created & locked & charted in one step; a fixed "＋" button in the toolbar starts it; right-click a board tab for its ID card
 - ⚡ **Request budget** — visibility-tiered polling (visible slot fast, others 60/120/300s + refetch-on-switch), per-source batched tickers, visible-row quote dedup: ~80% fewer exchange calls
+- 📈 **One-click indicators** — traditional-panel toggle menu (MA/EMA 3-line, BOLL, SAR, MACD, KDJ, RSI, OBV); click on, click off
 - 🗂 **Radar groups** — themed watch groups (collapse/rename/drag-move, delete falls rows back to default)
 - 📡 **Radar watchlist** — pin symbols across boards (CAPS.ticker sources); live price/change with three-state dispatch (visible heartbeat / hidden unread badge / watch-only); row click = jump to scene or one-step lock-create
 - ⏱ **Realtime multi-timeframe** — locked boards default to 15m/1h/4h/1d/1w (∩ source `INTERVALS`), all slots auto-configured; the "+" on the timeframe row adds any supported interval, tabs keep short→long order
