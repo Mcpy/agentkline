@@ -1,5 +1,6 @@
 import { state } from './state.js';
 import { log } from './log.js';
+import { showContextMenu } from './menu.js';
 
     // ============================================================
     // 标的搜索流（P1）：搜索弹层 → 点行 = 一步建板即锁
@@ -76,16 +77,21 @@ import { log } from './log.js';
                 <span class="sr-watch ${row.watched ? 'on' : ''}" title="${row.watched ? '已在雷达：点击取消盯盘' : '加入雷达盯盘'}">${row.watched ? '盯盘中' : '＋盯'}</span>`;
             div.querySelector('.sr-watch').addEventListener('click', async (e) => {
                 e.stopPropagation();
-                const isOn = !!row.watched;
-                const url = isOn
-                    ? `/api/watchlist/rows?source=${encodeURIComponent(row.source)}&symbol=${encodeURIComponent(row.symbol)}`
-                    : '/api/watchlist/rows';
-                const r = await fetch(url, {
-                    method: isOn ? 'DELETE' : 'POST',   // 约定：DELETE 走 query，POST 走 body
-                    headers: { 'Content-Type': 'application/json' },
-                    body: isOn ? undefined : JSON.stringify({ source: row.source, symbol: row.symbol }) });
-                if (!r.ok) { const d = await r.json().catch(() => ({})); toast(d.detail || '操作失败'); }
-                else refreshSearch();   // 行内盯盘态即时翻转
+                if (row.watched) {   // 取消盯盘：DELETE 走 query
+                    const url = `/api/watchlist/rows?source=${encodeURIComponent(row.source)}&symbol=${encodeURIComponent(row.symbol)}`;
+                    const r = await fetch(url, { method: 'DELETE' });
+                    if (!r.ok) { const d = await r.json().catch(() => ({})); toast(d.detail || '操作失败'); }
+                    else refreshSearch();
+                    return;
+                }
+                // v0.4.2：多组时弹组选择；单组直接进默认组
+                const gs = state.watch.groups || [];
+                if (gs.length > 1) {
+                    showContextMenu(e.clientX, e.clientY, gs.map(g => ({
+                        label: `＋盯 · ${g.name}`, onClick: () => doWatchAdd(row, g.id) })));
+                    return;
+                }
+                await doWatchAdd(row, null);
             });
             div.addEventListener('click', () => pickRow(row));
             box.appendChild(div);
@@ -95,6 +101,15 @@ import { log } from './log.js';
     let lastBoardId = null;
     let lastQuery = '';  // 最近一次搜索词（refreshSearch 用）
     const inflight = new Set();
+
+    async function doWatchAdd(row, groupId) {
+        const r = await fetch('/api/watchlist/rows', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source: row.source, symbol: row.symbol,
+                                   ...(groupId ? { group_id: groupId } : {}) }) });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); toast(d.detail || '操作失败'); }
+        else refreshSearch();   // 行内盯盘态即时翻转
+    }
 
     export function refreshSearch() {
         if (_el('search-overlay').style.display !== 'none') runQuery(lastQuery);

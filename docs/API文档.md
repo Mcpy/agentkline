@@ -186,3 +186,24 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
 
 ### 13.3 量级
 3 板+5 行：240 req/分 → ≈46（↓81%）；10 板+20 行：840 → ≈170（↓80%）。
+
+
+## 14. 雷达分组（v0.4.2）
+
+- 结构：`watchlist_list` 返回 `groups[]→rows[]`（0.4.1 已铺，0.4.2 长出管理面）；
+- 组管理四工具（MCP 39→43）：
+  - `watchlist_group_add(name)` → 重名 `GROUP_EXISTS`(400)
+  - `watchlist_group_rename(group_id, name)` / `watchlist_group_remove(group_id)`
+    → 默认组 `GROUP_PROTECTED`；**删组=行回落默认组，不级联删行**
+  - `watchlist_move(source, symbol, group_id, index=None)` → 移组+定位（拖拽落定调用）
+- `watchlist_add` 扩 `group_id` 可选参（不传=default，向后兼容）；
+- WS `watchlist_changed` 自 0.4.2 起携带**全组结构**（前端不再压平丢组信息）；
+- 前端：组头（名称+行数+折叠，折叠态 localStorage）/ ⋮ 菜单（重命名/删除）/
+  行右键"移到组→"/ HTML5 拖拽排序+跨组 / 面板过滤框 / hover 卡（24h 高/低/量，quote.extra）。
+
+
+## 15. 快照 allow_stale（v0.4.2 B）
+
+- `take_snapshot` 默认 fail-loud：无浏览器在线报 `NO_BROWSER`（不回退磁盘旧图，防僵尸快照误导）；
+- `allow_stale=true`：显式接受最近磁盘快照，返回体带 `stale: true` + `stale_since`（文件时间戳），
+  调用方自行判断可用性；MCP 返回的 TextContent 同样透传两字段。

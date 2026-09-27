@@ -575,3 +575,30 @@ body {
 
 .watch-x { color: #4a4e59; cursor: pointer; padding: 0 2px; font-size: 11px; }
 .watch-x:hover { color: #ef5350; }
+
+/* ============ v0.4.2 雷达分组 ============ */
+.watch-head { gap: 8px; justify-content: flex-start; }
+.watch-head > span:first-child { flex: 1; }
+.watch-addgroup { cursor: pointer; color: #b2b5be; font-size: 13px; padding: 0 2px; }
+.watch-addgroup:hover { color: #2962ff; }
+.watch-filter { width: 100%; box-sizing: border-box; background: #131722; border: none;
+    border-bottom: 1px solid #2a2e39; color: #d1d4dc; font-size: 12px; padding: 6px 12px; outline: none; }
+.watch-filter::placeholder { color: #555; }
+.watch-group-head { display: flex; align-items: center; gap: 6px; padding: 6px 12px;
+    background: #131722; font-size: 11px; cursor: pointer; border-bottom: 1px solid #1e222d;
+    position: sticky; top: 0; z-index: 1; }
+.wg-caret { width: 10px; color: #787b86; }
+.wg-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #b2b5be; }
+.wg-count { color: #555; }
+.wg-menu { cursor: pointer; padding: 0 2px; color: #787b86; }
+.wg-menu:hover { color: #2962ff; }
+.wg-input { flex: 1; background: #131722; border: 1px solid #2962ff; color: #d1d4dc;
+    font-size: 11px; padding: 1px 4px; outline: none; }
+.watch-group-rows.drop-on { outline: 1px dashed #2962ff; outline-offset: -1px; background: #1a1e2e; }
+.watch-row.dragging { opacity: .4; }
+.watch-row { position: relative; }
+.watch-extra { display: none; position: absolute; right: calc(100% - 8px); top: 0; z-index: 20;
+    background: #1e222d; border: 1px solid #2a2e39; border-radius: 6px; padding: 6px 10px;
+    font-size: 11px; color: #d1d4dc; white-space: nowrap;
+    box-shadow: 0 4px 12px rgba(0,0,0,.5); pointer-events: none; }
+.watch-row:hover .watch-extra { display: block; }

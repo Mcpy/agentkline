@@ -24,13 +24,22 @@ class WatchlistManager:
     def key(source, symbol):
         return f"{source}|{symbol}"
 
-    def add_row(self, source, symbol):
+    def _group(self, group_id):
+        for g in self.groups:
+            if g["id"] == group_id:
+                return g
+        return None
+
+    def add_row(self, source, symbol, group_id=None):
         r = self.svc.script_engine.ticker(source, {"symbol": symbol})
         if r.get("error"):
             return {"error": f"TICKER_UNSUPPORTED: {r['error']}（雷达只盯有 CAPS.ticker 的源）"}
         with self._lock:
-            g = self.groups[0]
-            if any(x["source"] == source and x["symbol"] == symbol for x in g["rows"]):
+            g = self._group(group_id or "default")
+            if not g:
+                return {"error": f"GROUP_NOT_FOUND: 无组 {group_id}"}
+            if any(x["source"] == source and x["symbol"] == symbol
+                   for gg in self.groups for x in gg["rows"]):
                 return {"status": "ok", "noop": True}
             g["rows"].append({"source": source, "symbol": symbol})
             self.quotes.setdefault(self.key(source, symbol),
@@ -38,7 +47,7 @@ class WatchlistManager:
                                     "state": "watch", "fails": 0, "stale": False})
         self._ensure_polling()
         self._bc_changed()
-        return {"status": "ok", "rows": len(self.groups[0]["rows"])}
+        return {"status": "ok", "group_id": g["id"], "rows": len(g["rows"])}
 
     def has_row(self, source, symbol):
         return any(x["source"] == source and x["symbol"] == symbol
@@ -46,14 +55,84 @@ class WatchlistManager:
 
     def remove_row(self, source, symbol):
         with self._lock:
-            g = self.groups[0]
-            before = len(g["rows"])
-            g["rows"] = [x for x in g["rows"] if not (x["source"] == source and x["symbol"] == symbol)]
+            hit = None
+            for g in self.groups:
+                before = len(g["rows"])
+                g["rows"] = [x for x in g["rows"]
+                             if not (x["source"] == source and x["symbol"] == symbol)]
+                if len(g["rows"]) != before:
+                    hit = g
             self.quotes.pop(self.key(source, symbol), None)
-            if len(g["rows"]) == before:
+            if not hit:
                 return {"error": "ROW_NOT_FOUND: 雷达无此行"}
         self._bc_changed()
-        return {"status": "ok", "rows": len(self.groups[0]["rows"])}
+        return {"status": "ok", "rows": len(hit["rows"])}
+
+    # ---------- 组管理（v0.4.2 A1） ----------
+    def add_group(self, name):
+        name = (name or "").strip()
+        if not name:
+            return {"error": "GROUP_NAME_EMPTY: 组名不能为空"}
+        with self._lock:
+            if any(g["name"] == name for g in self.groups):
+                return {"error": f"GROUP_EXISTS: 组名 {name} 已存在"}
+            import uuid
+            gid = f"grp_{uuid.uuid4().hex[:8]}"
+            self.groups.append({"id": gid, "name": name, "rows": []})
+        self._bc_changed()
+        return {"status": "ok", "group_id": gid, "name": name}
+
+    def rename_group(self, group_id, name):
+        name = (name or "").strip()
+        if not name:
+            return {"error": "GROUP_NAME_EMPTY: 组名不能为空"}
+        with self._lock:
+            if group_id == "default":
+                return {"error": "GROUP_PROTECTED: 默认组不可改名/删除"}
+            g = self._group(group_id)
+            if not g:
+                return {"error": f"GROUP_NOT_FOUND: 无组 {group_id}"}
+            if any(x["name"] == name and x["id"] != group_id for x in self.groups):
+                return {"error": f"GROUP_EXISTS: 组名 {name} 已存在"}
+            g["name"] = name
+        self._bc_changed()
+        return {"status": "ok", "group_id": group_id, "name": name}
+
+    def remove_group(self, group_id):
+        with self._lock:
+            if group_id == "default":
+                return {"error": "GROUP_PROTECTED: 默认组不可改名/删除"}
+            g = self._group(group_id)
+            if not g:
+                return {"error": f"GROUP_NOT_FOUND: 无组 {group_id}"}
+            moved = len(g["rows"])
+            self.groups[0]["rows"].extend(g["rows"])  # 行回落默认组，不级联删
+            self.groups = [x for x in self.groups if x["id"] != group_id]
+        self._bc_changed()
+        return {"status": "ok", "moved_rows": moved}
+
+    def move_row(self, source, symbol, to_group_id, index=None):
+        with self._lock:
+            to = self._group(to_group_id)
+            if not to:
+                return {"error": f"GROUP_NOT_FOUND: 无组 {to_group_id}"}
+            row = None
+            for g in self.groups:
+                for x in g["rows"]:
+                    if x["source"] == source and x["symbol"] == symbol:
+                        row = x
+                        g["rows"].remove(x)
+                        break
+                if row:
+                    break
+            if not row:
+                return {"error": "ROW_NOT_FOUND: 雷达无此行"}
+            if index is None or index >= len(to["rows"]):
+                to["rows"].append(row)
+            else:
+                to["rows"].insert(max(0, int(index)), row)
+        self._bc_changed()
+        return {"status": "ok", "group_id": to_group_id}
 
     def list_watchlist(self):
         return {"groups": [{**g, "rows": [self._row_view(x) for x in g["rows"]]} for g in self.groups]}
@@ -79,7 +158,7 @@ class WatchlistManager:
         board_id = self._board_for(row["source"], row["symbol"])
         return {**row, "price": q.get("price"), "change_pct": q.get("change_pct"),
                 "ts": q.get("ts"), "state": self._state_of(row["source"], row["symbol"], board_id),
-                "stale": q.get("stale", False),
+                "stale": q.get("stale", False), "extra": q.get("extra"),
                 "has_board": board_id is not None, "board_id": board_id}
 
     # ---------- 轮询 ----------
@@ -165,6 +244,8 @@ class WatchlistManager:
                                              "state": "watch", "fails": 0, "stale": False})
             cur["price"] = q["price"]
             cur["ts"] = q["ts"]
+            if q.get("extra") is not None:
+                cur["extra"] = q.get("extra")
             if not keep_pct or q.get("change_pct") is not None:
                 cur["change_pct"] = q.get("change_pct")
             cur["fails"] = 0

@@ -44,3 +44,13 @@ description: AI 引导呈现流程（v0.4）——把分析结论（标记/划�
 - 盯盘用 watchlist_add/list + get_quotes；行三态 visible/hidden/watch 解读用户注意力；
 - 读 `eff_poll_s` 判断槽当前轮询档；非可见槽数据允许分钟级旧——讲解时切即补拉已兜底；
 - 大批量盯盘同源只占一次批量请求，放心加行。
+
+
+## 分组意识（v0.4.2）
+- 用户雷达可能多组（主题/市场归类）：加盯可带 group_id；讲解涉及"用户盯的某类标的"时
+  先 watchlist_list 看组结构再按组取行；移组/建组用 watchlist_move / watchlist_group_*。
+
+
+## 快照回退意识（v0.4.2）
+- take_snapshot 无浏览器在线报 NO_BROWSER；确需旧图时显式 allow_stale=true，
+  读返回的 stale/stale_since 判断时效，讲解时注明"磁盘旧快照于 <时间>"。

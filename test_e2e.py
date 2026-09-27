@@ -50,6 +50,10 @@ TOOL_REST_MAP = {
     "get_snapshot": ("get", "/api/snapshot"),
     "watchlist_list": ("get", "/api/watchlist"),
     "watchlist_add": ("post", "/api/watchlist/rows"),
+    "watchlist_group_add": ("post", "/api/watchlist/groups"),
+    "watchlist_group_rename": ("put", "/api/watchlist/groups/rename"),
+    "watchlist_group_remove": ("delete", "/api/watchlist/groups"),
+    "watchlist_move": ("put", "/api/watchlist/move"),
     "watchlist_remove": ("delete", "/api/watchlist/rows"),
     "get_quotes": ("get", "/api/quotes"),
     "list_skills": ("get", "/api/skills"),
@@ -286,7 +290,7 @@ def test(port: int, token: str = None):
     print("🔗 两表面对齐")
     try:
         tools = mcp_tools(base, s)
-        check("MCP 工具数=39", len(tools) == 39, f"got {len(tools)}")
+        check("MCP 工具数=43", len(tools) == 43, f"got {len(tools)}")
         missing = [t for t in tools if t not in TOOL_REST_MAP and t not in MCP_ONLY]
         check("无未映射工具", not missing, str(missing))
         spec = s.get(f"{base}/openapi.json").json()
@@ -332,6 +336,43 @@ def test(port: int, token: str = None):
     check("移盯 ok", r.status_code == 200, r.text)
     r = s.delete(f"{base}/api/watchlist/rows?source=datasource/mock_btc&symbol=RAD/USDT")
     check("移盯不存在 404", r.status_code == 404, r.text)
+
+    # === 11.7 雷达分组（v0.4.2 A） ===
+    print("🗂 雷达分组")
+    _sfx = str(int(_t.time()))[-4:]  # 组名带运行后缀：跨运行零残留冲突
+    r = s.post(f"{base}/api/watchlist/groups", json={"name": f"加密观察{_sfx}"})
+    check("建组", r.status_code == 200 and r.json().get("group_id"), r.text[:150])
+    gid = r.json()["group_id"]
+    r = s.post(f"{base}/api/watchlist/groups", json={"name": f"加密观察{_sfx}"})
+    check("重名 GROUP_EXISTS", r.status_code == 400 and "GROUP_EXISTS" in r.text, r.text[:150])
+    r = s.post(f"{base}/api/watchlist/rows", json={"source": "datasource/mock_btc",
+                                                   "symbol": "G1/USDT", "group_id": gid})
+    check("加行带 group_id", r.status_code == 200 and r.json().get("group_id") == gid, r.text[:150])
+    r = s.get(f"{base}/api/watchlist")
+    grps = {g["id"]: [x["symbol"] for x in g["rows"]] for g in r.json()["groups"]}
+    check("行落指定组", grps.get(gid) == ["G1/USDT"], str(grps))
+    r = s.put(f"{base}/api/watchlist/groups/rename", json={"group_id": gid, "name": f"链上{_sfx}"})
+    check("重命名", r.status_code == 200 and r.json().get("name") == f"链上{_sfx}", r.text[:150])
+    r = s.delete(f"{base}/api/watchlist/groups?group_id=default")
+    check("默认组保护 GROUP_PROTECTED", r.status_code == 400 and "GROUP_PROTECTED" in r.text, r.text[:150])
+    r = s.put(f"{base}/api/watchlist/move", json={"source": "datasource/mock_btc",
+                                                  "symbol": "G1/USDT", "group_id": "default", "index": 0})
+    check("移组到默认", r.status_code == 200, r.text[:150])
+    r = s.get(f"{base}/api/watchlist")
+    d0 = [x["symbol"] for x in r.json()["groups"][0]["rows"]]
+    check("index=0 置顶", d0[0] == "G1/USDT", str(d0))
+    r = s.post(f"{base}/api/watchlist/groups", json={"name": f"临时{_sfx}"})
+    gid2 = r.json()["group_id"]
+    s.put(f"{base}/api/watchlist/move", json={"source": "datasource/mock_btc",
+                                              "symbol": "G1/USDT", "group_id": gid2})
+    r = s.delete(f"{base}/api/watchlist/groups?group_id={gid2}")
+    check("删组 ok", r.status_code == 200 and r.json().get("moved_rows") == 1, r.text[:150])
+    r = s.get(f"{base}/api/watchlist")
+    gids = [g["id"] for g in r.json()["groups"]]
+    syms = [x["symbol"] for g in r.json()["groups"] for x in g["rows"]]
+    check("删组回落默认组", gid2 not in gids and "G1/USDT" in syms, f"{gids} {syms}")
+    s.delete(f"{base}/api/watchlist/rows?source=datasource/mock_btc&symbol=G1/USDT")
+    s.delete(f"{base}/api/watchlist/groups?group_id={gid}")  # 节尾清组：e2e 自净化
 
     # === 11.6 性能（v0.4.1 四优化） ===
     print("⚡ 性能")

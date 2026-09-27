@@ -2,6 +2,7 @@ import { state, applyState } from './state.js';
 import { log } from './log.js';
 import { renderBoardTabs, renderTimeframeTabs, switchBoard, switchTimeframe, refreshIntervalOptions } from './ui.js';
 import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnapshot, setVisibleTimeRange , applyQuoteTick } from './render.js';
+import { refreshSearch } from './search.js';  // v0.4.2 fix: board_create/board_remove 首行调用，漏 import 曾致 ReferenceError 断 handler（老 bug1 回归真根因）
 
     // ============================================================
     // WebSocket（v0.4 标准信封 {v,type,seq,ts,payload} 硬切）
@@ -16,6 +17,10 @@ import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnap
             document.getElementById('ws-status').className = 'connected';
             document.getElementById('ws-status').textContent = '● 已连接';
             log('ws', 'WebSocket 已连接');
+            // v0.4.2 C：重连韧性——重连后主动全量拉雷达（断线期间增删/价格一次补齐）
+            if (state.watchHooks && state.watchHooks.resync) {
+                try { state.watchHooks.resync(); } catch (e) { log('error', 'resync 失败: ' + e); }
+            }
         };
 
         state.ws.onclose = () => {
@@ -235,8 +240,9 @@ import { renderChart, applyDataUpdate, syncDrawings, renderSubplots, captureSnap
                 if (state.watchHooks && state.watchHooks.quotes) state.watchHooks.quotes(msg.rows);
                 break;
             case 'watchlist_changed':
+                // v0.4.2：传全组结构（applyStructure），不再压平丢组信息
                 if (state.watchHooks && state.watchHooks.changed)
-                    state.watchHooks.changed((msg.groups && msg.groups[0] ? msg.groups[0].rows : []) || []);
+                    state.watchHooks.changed(msg.groups || []);
                 break;
             case 'quote':
                 if (msg.board_id === state.currentBoard) applyQuoteTick(msg);

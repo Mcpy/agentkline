@@ -407,15 +407,39 @@ def watchlist_list():
 
 
 @api_tool(group="user_write", method="POST", path="/api/watchlist/rows", err_status=400)
-def watchlist_add(source: str, symbol: str):
-    """加入雷达盯盘（幂等）。源须声明 CAPS.ticker，违则 TICKER_UNSUPPORTED"""
-    return service.watchlist.add_row(source, symbol)
+def watchlist_add(source: str, symbol: str, group_id: str = None):
+    """加入雷达盯盘（幂等）。源须声明 CAPS.ticker，违则 TICKER_UNSUPPORTED；group_id 可选（默认组 default）"""
+    return service.watchlist.add_row(source, symbol, group_id)
 
 
 @api_tool(group="user_write", method="DELETE", path="/api/watchlist/rows", err_status=404)
 def watchlist_remove(source: str, symbol: str):
     """移出雷达盯盘"""
     return service.watchlist.remove_row(source, symbol)
+
+
+@api_tool(group="user_write", method="POST", path="/api/watchlist/groups", err_status=400)
+def watchlist_group_add(name: str):
+    """雷达新建分组（重名 GROUP_EXISTS）"""
+    return service.watchlist.add_group(name)
+
+
+@api_tool(group="user_write", method="PUT", path="/api/watchlist/groups/rename", err_status=400)
+def watchlist_group_rename(group_id: str, name: str):
+    """雷达分组改名（默认组 GROUP_PROTECTED）"""
+    return service.watchlist.rename_group(group_id, name)
+
+
+@api_tool(group="user_write", method="DELETE", path="/api/watchlist/groups", err_status=400)
+def watchlist_group_remove(group_id: str):
+    """删除雷达分组——行回落默认组，不级联删行（默认组 GROUP_PROTECTED）"""
+    return service.watchlist.remove_group(group_id)
+
+
+@api_tool(group="user_write", method="PUT", path="/api/watchlist/move", err_status=400)
+def watchlist_move(source: str, symbol: str, group_id: str, index: int = None):
+    """雷达行移组+定位（index=None 追加组尾；拖拽落定调用）"""
+    return service.watchlist.move_row(source, symbol, group_id, index)
 
 
 @api_tool(group="read", path="/api/quotes")
@@ -426,11 +450,13 @@ def get_quotes():
 
 # ============ MCP-only（二进制/图片，REST 豁免） ============
 @api_tool(group="exec", method="POST", path="", rest=False, mcp=False)
-def take_snapshot(board_id: Optional[str] = None, timeframe: Optional[str] = None, wait: float = 1.5):
+def take_snapshot(board_id: Optional[str] = None, timeframe: Optional[str] = None, wait: float = 1.5,
+                  allow_stale: bool = False):
     """触发前端截图并返回图片+路径。需有浏览器连着 /ws。
     发送 snapshot_request 后等待 wait 秒再读取最新快照。
-    无浏览器在线时明确报 NO_BROWSER（不回退磁盘旧图，防僵尸快照误导）。"""
-    return service.take_snapshot(board_id, timeframe, wait)
+    无浏览器在线时明确报 NO_BROWSER（不回退磁盘旧图，防僵尸快照误导）；
+    allow_stale=true 显式接受最近磁盘快照（带 stale:true + stale_since）。"""
+    return service.take_snapshot(board_id, timeframe, wait, allow_stale)
 
 
 @api_tool(group="exec", method="POST", path="", rest=False, mcp=False)

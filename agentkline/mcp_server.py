@@ -39,11 +39,13 @@ _register_registry_tools()
 
 
 @mcp.tool()
-async def take_snapshot(board_id: str = None, timeframe: str = None, wait: float = 1.5):
+async def take_snapshot(board_id: str = None, timeframe: str = None, wait: float = 1.5,
+                        allow_stale: bool = False):
     """触发前端截图并返回图片+路径。需有浏览器连着 /ws。
     发送 snapshot_request 后等待 wait 秒再读取最新快照。
-    无浏览器在线时明确报 NO_BROWSER（不回退磁盘旧图，防僵尸快照误导）。"""
-    r = await service.take_snapshot(board_id, timeframe, wait)
+    无浏览器在线时明确报 NO_BROWSER（不回退磁盘旧图，防僵尸快照误导）；
+    allow_stale=true 显式接受最近磁盘快照（返回带 stale:true + stale_since 时间戳）。"""
+    r = await service.take_snapshot(board_id, timeframe, wait, allow_stale)
     return _snapshot_content(r)
 
 
@@ -58,5 +60,7 @@ def _snapshot_content(r):
         return [TextContent(type="text", text=_j(r))]
     return [
         ImageContent(type="image", data=r["image_b64"], mimeType="image/png"),
-        TextContent(type="text", text=_j({"path": r["path"], "size": r["size"]})),
+        TextContent(type="text", text=_j({"path": r["path"], "size": r["size"],
+                                          **({"stale": True, "stale_since": r.get("stale_since")}
+                                             if r.get("stale") else {})})),
     ]

@@ -49,6 +49,10 @@
 | POST | `/api/view` | Report View |
 | POST | `/api/view/range` | Set View Range |
 | GET | `/api/watchlist` | Watchlist List |
+| POST | `/api/watchlist/groups` | Watchlist Group Add |
+| DELETE | `/api/watchlist/groups` | Watchlist Group Remove |
+| PUT | `/api/watchlist/groups/rename` | Watchlist Group Rename |
+| PUT | `/api/watchlist/move` | Watchlist Move |
 | POST | `/api/watchlist/rows` | Watchlist Add |
 | DELETE | `/api/watchlist/rows` | Watchlist Remove |
 
@@ -90,8 +94,12 @@
 | `create_subplot` | 创建副图——主图下方的独立小面板，用于放置指标（如 MACD/KDJ/成交量）。 |
 | `delete_subplot` | 删除副图（连同其上指标） |
 | `watchlist_list` | 雷达面板数据：groups[]→rows[]，每行含最新价/涨跌幅/三态(visible/hidden/watch)/未读心跳/●现场徽标 |
-| `watchlist_add` | 加入雷达盯盘（幂等）。源须声明 CAPS.ticker，违则 TICKER_UNSUPPORTED |
+| `watchlist_add` | 加入雷达盯盘（幂等）。源须声明 CAPS.ticker，违则 TICKER_UNSUPPORTED；group_id 可选（默认组 default） |
 | `watchlist_remove` | 移出雷达盯盘 |
+| `watchlist_group_add` | 雷达新建分组（重名 GROUP_EXISTS） |
+| `watchlist_group_rename` | 雷达分组改名（默认组 GROUP_PROTECTED） |
+| `watchlist_group_remove` | 删除雷达分组——行回落默认组，不级联删行（默认组 GROUP_PROTECTED） |
+| `watchlist_move` | 雷达行移组+定位（index=None 追加组尾；拖拽落定调用） |
 | `get_quotes` | 全行 quotes 快照（AI 读盘用）；面板实时走 WS quotes_update |
 | `take_snapshot` | 触发前端截图并返回图片+路径。需有浏览器连着 /ws。 |
 | `get_snapshot` | 读取最新快照（图片+路径）。快照由浏览器截图上传产生。 |

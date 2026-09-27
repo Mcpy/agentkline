@@ -27,7 +27,7 @@ def _to_ms(v):
 class AgentKlineService:
     """AgentKline 业务核心"""
 
-    VERSION = "0.4.1"
+    VERSION = "0.4.2"
 
     def __init__(self, scripts_dir: str, limits: dict = None):
         limits = limits or {}
@@ -838,12 +838,23 @@ class AgentKlineService:
             self.state.create_subplot(board_id, tf, subplot, 150, subplot)
 
     # ============ 快照（v0.4.1 收编自 mcp_server；NO_BROWSER 门） ============
-    async def take_snapshot(self, board_id=None, timeframe=None, wait=1.5):
-        """触发前端截图并返回图片+路径；无浏览器在线报 NO_BROWSER（不回退磁盘旧图）"""
+    async def take_snapshot(self, board_id=None, timeframe=None, wait=1.5, allow_stale=False):
+        """触发前端截图并返回图片+路径；无浏览器在线报 NO_BROWSER（默认不回退磁盘旧图）。
+        allow_stale=True（v0.4.2 B）：无浏览器时显式接受最近磁盘快照，
+        返回体带 stale:true + 文件时间戳，调用方自行判断可用性。"""
         import asyncio
         if not self._ws_active():
+            if allow_stale:
+                r = self.get_snapshot(board_id, timeframe)
+                if not r.get("error"):
+                    import os, datetime as _dt
+                    r["stale"] = True
+                    r["stale_since"] = _dt.datetime.fromtimestamp(
+                        os.path.getmtime(r["path"])).isoformat()
+                return r
             return {"error": "NO_BROWSER: 无浏览器连接 /ws，快照需在线前端；"
-                             "请先打开 Web UI（或确认目标标签页存活）再截图"}
+                             "请先打开 Web UI（或确认目标标签页存活）再截图；"
+                             "接受旧图可传 allow_stale=true（返回带 stale:true 标记）"}
         self.notify({"type": "snapshot_request", "board_id": board_id, "timeframe": timeframe})
         await asyncio.sleep(wait)
         return self.get_snapshot(board_id, timeframe)

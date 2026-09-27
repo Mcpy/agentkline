@@ -1,7 +1,7 @@
 import { state, applyState } from './state.js';
 import { log } from './log.js';
 import { showContextMenu } from './menu.js';
-import { openIdCard } from './render.js';
+import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoard 删光路径调 renderChart，漏 import 曾致 ReferenceError 断链（老 bug1 回归真根因之一）
 
 
     // ============================================================
