@@ -7,12 +7,15 @@ import { showContextMenu } from './menu.js';
     // 行 = 完整二元组 (源, 裸符号)；● = 已有现场（点击直跳，防重复建板）
     // ============================================================
     let _debounce = null;
+    let _srcFilter = null;   // v0.4.4 源筛选 chips
+    let _srcList = null;
 
     function _el(id) { return document.getElementById(id); }
 
     export function openSearch(prefill = '') {
         const ov = _el('search-overlay');
         ov.style.display = 'flex';
+        ensureSrcBtn();
         const input = _el('search-input');
         input.value = prefill;
         input.focus();
@@ -38,11 +41,11 @@ import { showContextMenu } from './menu.js';
         });
     }
 
-    async function runQuery(q) {
+    async function runQuery(q, opts = {}) {
         lastQuery = q;
         const box = _el('search-results');
         q = (q || '').trim();
-        box.innerHTML = '<div class="search-row hint">搜索中…</div>';
+        box.innerHTML = '<div class="search-row hint">搜索中…（首次使用需建索引，约 5-10s）</div>';
         // 高级输入：@源名 裸符号 → 直达行（无徽章源也能配）
         if (q.startsWith('@')) {
             const m = q.slice(1).match(/^(\S+)\s+(.*)$/);
@@ -52,16 +55,77 @@ import { showContextMenu } from './menu.js';
             }
         }
         try {
-            const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+            const srcQ = _srcFilter ? `&source=${encodeURIComponent(_srcFilter)}` : '';
+            const rfQ = opts.refresh ? '&refresh=true' : '';
+            const ctl = new AbortController();  // v0.4.4：20s 超时防烂网转圈 forever
+            const timer = setTimeout(() => ctl.abort(), 20000);
+            let r;
+            try {
+                r = await fetch(`/api/search?q=${encodeURIComponent(q)}${srcQ}${rfQ}`, { signal: ctl.signal });
+            } finally {
+                clearTimeout(timer);
+            }
             const d = await r.json();
+            if (d.sources) setSrcList(d.sources);
             if (!d.rows || d.rows.length === 0) {
                 box.innerHTML = '<div class="search-row hint">无匹配（索引=CAPS.symbols 源；无徽章源用 @源名 裸符号）</div>';
                 return;
             }
             renderRows(d.rows);
         } catch (e) {
-            box.innerHTML = `<div class="search-row hint">搜索失败: ${e.message}</div>`;
+            const msg = e.name === 'AbortError'
+                ? '搜索超时（索引构建中或源网络限流窗）——请稍后重试'
+                : `搜索失败: ${e.message}`;
+            box.innerHTML = `<div class="search-row hint">${msg}</div>`;
         }
+    }
+
+    // v0.4.4 源筛选 = 搜索框行左侧下拉按钮（源多也不排串；复用右键菜单组件）
+    function ensureSrcBtn() {
+        if (_el('search-srcbtn')) return;
+        const input = _el('search-input');
+        const head = document.createElement('div');
+        head.className = 'search-head';
+        input.parentNode.insertBefore(head, input);
+        const btn = document.createElement('button');
+        btn.id = 'search-srcbtn'; btn.className = 'src-btn';
+        const rf = document.createElement('button');
+        rf.id = 'search-refresh'; rf.className = 'src-refresh';
+        rf.innerHTML = '<span class="rf-ic">⟳</span>';  // 图标独立 span：旋转只转图标不转按钮框
+        rf.title = '重建搜索索引（手动刷新）';
+        rf.onclick = (e) => {
+            e.stopPropagation();
+            if (rf.classList.contains('spinning')) return;
+            rf.classList.add('spinning');
+            runQuery(lastQuery, { refresh: true }).finally(() => rf.classList.remove('spinning'));
+        };
+        head.append(btn, input, rf);
+        updateSrcBtn();
+        btn.onclick = (e) => {
+            e.stopPropagation();  // 防全局 document click 关闭刚弹出的菜单
+            const r = btn.getBoundingClientRect();
+            const items = [{ label: '全部源', onClick: () => pickSrc(null) }];
+            (_srcList || []).forEach(x => items.push({ label: x.display, onClick: () => pickSrc(x.id) }));
+            showContextMenu(r.left, r.bottom + 4, items);
+        };
+    }
+
+    function pickSrc(id) {
+        _srcFilter = id;
+        updateSrcBtn();
+        runQuery(lastQuery);
+    }
+
+    function updateSrcBtn() {
+        const btn = _el('search-srcbtn'); if (!btn) return;
+        const cur = (_srcList || []).find(x => x.id === _srcFilter);
+        btn.textContent = cur ? `源: ${cur.display} ▾` : '源: 全部 ▾';
+    }
+
+    // 源清单随 search 响应附带的 sources 字段（不另开端点）
+    function setSrcList(ids) {
+        _srcList = (ids || []).map(id => ({ id, display: id.split('/')[1] }));
+        updateSrcBtn();
     }
 
     function renderRows(rows) {

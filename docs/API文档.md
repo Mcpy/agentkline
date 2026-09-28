@@ -110,7 +110,7 @@ CSV 入图 = 内置 `datasource/csv` 脚本（path 归操作参数，IDENTITY=[]
 
 ## 9. 脚本约定（v0.4）
 
-详见 `docs/脚本编写指南.md` 与 `skills/script-authoring.md`（agent 权威）。要点：
+详见 `docs/脚本编写指南.md` 与 skills 双卷 `datasource-authoring` / `indicator-authoring`（agent 权威）。要点：
 双根三层目录；id=kind/name；字面元数据族 NAME/DESC/PARAMS/CAPS/IDENTITY（ast 静态抽取零 exec）；
 CAPS 声明⇒实现（backfill⇒until 参/symbols⇒list_symbols/ticker⇒ticker）；指标等长+warmup None+禁 NaN；
 数据源 until 回溯可重放跨窗连续；单槽 max_bars_per_slot=50000 截旧+dropped；重算尾窗 max_window=5000；
@@ -216,3 +216,8 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
 - 前端指标栏"＋指标"菜单 = 传统面板式开关：点未加项=add_indicator（默认参数 recipe），
   点 ✓ 项=删该 script 全部实例；MCP 面无新工具（add/delete/list 现成）；
 - MA/EMA 三线制：一个实例一组线（periods=[5,10,20] 可改参）。
+
+## 内置数据源（v0.4.4）
+| `datasource/binance` | Binance 直连（requests 非 ccxt 库）：现货+永续全量、K线全周期、批量实时；含股票代币（现货 B 后缀 78 + TradFi 永续 205，display 带官方分类标注） |
+| `datasource/ashare_free` | A 股实时：K线八档+复权/批量实时/搜索；东财主+腾讯/新浪备回落；symbol=`600519.SH` 族 |
+| `datasource/usstock_free` | 美股实时：Yahoo K线（单厂商）+实时互备 spark→腾讯qt+搜索；索引=wiki S&P500+Nasdaq100 种子；symbol=`AAPL.US` 族 |

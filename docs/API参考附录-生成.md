@@ -62,8 +62,8 @@
 |---|---|
 | `list_boards` | 列出所有画板 |
 | `list_skills` | 列出可用 skills（name+description）。先用它发现，再用 load_skill 读全文。 |
-| `load_skill` | 加载指定 skill 的完整文档（如 script-authoring / ai-walkthrough）。 |
-| `search_symbols` | 标的搜索（P1）：返回 rows=[{symbol, source, display, has_board}]，行=完整二元组(源,裸符号)； |
+| `load_skill` | 加载指定 skill 的完整文档（如 datasource-authoring / indicator-authoring / ai-walkthrough）。 |
+| `search_symbols` | 搜索可交易标的。返回候选行，每行=一个"来源+符号"组合（has_board=True 表示该组合已有画板）。 |
 | `switch_board` | 切换当前画板，前端随之显示该画板（广播其默认周期状态）；用于 AI 主动展示。 |
 | `list_timeframes` | 列出画板的时间周期 |
 | `switch_timeframe` | 切换当前时间周期，前端随之显示该周期（广播该周期状态）；用于 AI 主动展示，类比 switch_board。 |
@@ -74,31 +74,31 @@
 | `list_subplots` | 列出画板+周期的所有副图 |
 | `list_drawings` | 列出画板+周期的所有划线 |
 | `get_current_view` | 获取用户当前视图（画板/周期/可见时间窗口），由前端上报 |
-| `create_board` | 创建画板。intervals 为初始周期列表（如 ["1d","4h"]），首个为默认周期。 |
+| `create_board` | 新建一个图表画板。两种用法： |
 | `add_drawing` | 画线。type: hline(水平,points=[{price}]) / trend(趋势,points=[{time,price},{time,price}])。 |
 | `update_drawing` | 更新划线：visible(显隐)/color/line_width/line_style(solid|dashed|dotted)/text |
 | `delete_drawing` | 删除划线 |
-| `backfill` | 向左补充更早的历史K线（前插到现有最早一根之前）。 |
+| `backfill` | 向左补拉更早的历史 K 线（看更久远的行情用）。前提：该板数据源支持历史回补（list_scripts 里 caps 含 backfill；csv 类源不支持，返回 prepended=0）。返回本次补拉根数与当前总根数。 |
 | `set_markers` | 在K线主图设置标记（覆盖式，替换该周期已有全部标记；读取用 get_markers）。 |
-| `create_timeframe` | 给画板添加时间周期（如 1d/4h/1h）。已锁定在线板：新周期槽由系统自动注入 |
-| `delete_indicator` | 按 inst_id 删除指标实例（登记处+各周期物化一次删净；现有 inst_id 见 overview）。 |
-| `update_indicator` | 更新指标实例（inst_id 把手）。params=新参数(重声明配方触发重算)；style=整体样式； |
+| `create_timeframe` | 给画板加一个时间周期（如 '4h'）。实时板的新周期会自动取数出图；加完用 switch_timeframe 切过去看。 |
+| `delete_indicator` | 把一个指标从图上移除（inst_id 从 overview 的 indicators 列表拿），一次删净不留残影。改参数请用 update_indicator，别删了重加。 |
+| `update_indicator` | 改一个已加指标（inst_id 从 overview 的 indicators 列表拿）。 |
 | `delete_board` | 删除画板（连同其所有周期、K线、指标、副图与画线，不可恢复）。 |
 | `delete_timeframe` | 删除时间周期（连同其K线/指标/画线）。若删的是当前周期，自动回退到默认周期。 |
-| `list_scripts` | 列出全部脚本（双根：builtin 内置只读 / custom 可写）。 |
-| `save_script` | 保存自定义脚本到 custom 根（保存即校验：main 存在/CAPS 一致性/字面元数据合法）。 |
+| `list_scripts` | 列出全部可用脚本（内置+自定义）。每条含：id（引用格式如 'indicator/macd'，加指标/配源都用它）、 |
+| `save_script` | 保存自定义脚本到 custom 根（保存即校验：入口函数存在/能力声明一致/元数据合法）。 |
 | `set_view_range` | 让前端聚焦到指定时间窗口（AI 主动把画面拉到某段时间，如回测亏损区间）。 |
-| `run_script` | 执行脚本并返回结果（窄身：图上不留痕，save_as 已废除）。 |
-| `add_indicator` | 加指标（统一入口，inst_id 把手）。 |
-| `set_kline_source` | 声明式配置 K 线来源（幂等，PUT 语义）。script 为 id（kind/name，如 datasource/ccxt_binance）。 |
+| `run_script` | 跑一次脚本拿计算结果（**不上图、不留痕**）。适合：试算指标输出、拉一段数据源样本检查。要让指标上图用 add_indicator；要当画板数据源用 set_kline_source。 |
+| `add_indicator` | 加一个指标到图上。最常用：加内置指标，如 script='indicator/macd'（内置清单见 list_skills 之外的 list_scripts）。 |
+| `set_kline_source` | 给"画板+周期"配置或更换 K 线数据来源。 |
 | `create_subplot` | 创建副图——主图下方的独立小面板，用于放置指标（如 MACD/KDJ/成交量）。 |
 | `delete_subplot` | 删除副图（连同其上指标） |
-| `watchlist_list` | 雷达面板数据：groups[]→rows[]，每行含最新价/涨跌幅/三态(visible/hidden/watch)/未读心跳/●现场徽标 |
+| `watchlist_list` | 读雷达盯盘面板：groups[]→rows[]，每行=一个盯盘标的，含最新价/涨跌幅/显隐状态/是否有对应画板在现场。加盯用 watchlist_add，移组用 watchlist_move，建组用 watchlist_group_add。 |
 | `watchlist_add` | 加入雷达盯盘（幂等）。源须声明 CAPS.ticker，违则 TICKER_UNSUPPORTED；group_id 可选（默认组 default） |
 | `watchlist_remove` | 移出雷达盯盘 |
 | `watchlist_group_add` | 雷达新建分组（重名 GROUP_EXISTS） |
 | `watchlist_group_rename` | 雷达分组改名（默认组 GROUP_PROTECTED） |
-| `watchlist_group_remove` | 删除雷达分组——行回落默认组，不级联删行（默认组 GROUP_PROTECTED） |
+| `watchlist_group_remove` | 删除雷达分组，**组内盯盘行一并级联删除**（行不保留，组删行没）；默认组不可删（GROUP_PROTECTED）。只想移走行请先用 watchlist_move。 |
 | `watchlist_move` | 雷达行移组+定位（index=None 追加组尾；拖拽落定调用） |
 | `get_quotes` | 全行 quotes 快照（AI 读盘用）；面板实时走 WS quotes_update |
 | `take_snapshot` | 触发前端截图并返回图片+路径。需有浏览器连着 /ws。 |

@@ -616,3 +616,26 @@ body {
 .ind-add { cursor: pointer; color: #2962ff; font-size: 11px; padding: 1px 8px;
     border: 1px solid #2a2e39; border-radius: 4px; margin-left: 6px; user-select: none; }
 .ind-add:hover { border-color: #2962ff; }
+
+/* v0.4.4 搜索源筛选 = 搜索框行左侧下拉按钮 */
+.search-head { display: flex; gap: 8px; align-items: stretch; }
+.search-head #search-input { flex: 1; }
+.src-btn { flex: none; padding: 0 12px; border: 1px solid #333; border-radius: 6px; background: #1a1e2e; color: #9aa0a6; cursor: pointer; font-size: 13px; }
+.src-btn:hover { color: #4fc3f7; border-color: #4fc3f7; }
+
+/* v0.4.4 搜索框行右侧手动刷新按钮（圆圈标志） */
+.src-refresh { flex: none; width: 34px; border: 1px solid #333; border-radius: 6px; background: #1a1e2e; color: #9aa0a6; cursor: pointer; font-size: 16px; line-height: 1; }
+.src-refresh:hover { color: #4fc3f7; border-color: #4fc3f7; }
+.src-refresh.spinning { color: #4fc3f7; }
+.src-refresh.spinning .rf-ic { display: inline-block; animation: srcspin 0.9s linear infinite; }
+@keyframes srcspin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+/* v0.4.4 板标签 C 案：短名+定宽省略+溢出下拉 */
+.board-tab { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board-overflow { color: #9aa0a6; }
+.board-overflow.on { color: #4fc3f7; border-color: #4fc3f7; }
+.ov-row { display: flex; align-items: center; gap: 8px; max-width: 320px; }
+.ov-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-name.ov-cur::before { content: '✓ '; color: #4fc3f7; }
+.ov-x { flex: none; color: #666; padding: 0 4px; }
+.ov-x:hover { color: #ef5350; }

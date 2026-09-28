@@ -50,7 +50,7 @@ def list_skills():
 
 @api_tool(group="read", path="/api/skills/{name}", err_status=404)
 def load_skill(name: str):
-    """加载指定 skill 的完整文档（如 script-authoring / ai-walkthrough）。"""
+    """加载指定 skill 的完整文档（如 datasource-authoring / indicator-authoring / ai-walkthrough）。"""
     return _skills.load_skill(name)
 
 
@@ -61,11 +61,12 @@ def interval_options(board_id: str):
 
 
 @api_tool(group="read", path="/api/search")
-def search_symbols(q: str = "", refresh: bool = False):
-    """标的搜索（P1）：返回 rows=[{symbol, source, display, has_board}]，行=完整二元组(源,裸符号)；
-    has_board=True=该二元组已有现场(●徽标，防重复建板)。索引=CAPS.symbols 源首用全量+TTL 日级，
-    搜索永不穿透交易所；refresh=true 强刷索引。无徽章源用 @源名 裸符号 直配。"""
-    return service.search_symbols(q, refresh)
+def search_symbols(q: str = "", refresh: bool = False, source: Optional[str] = None):
+    """搜索可交易标的。返回候选行，每行=一个"来源+符号"组合（has_board=True 表示该组合已有画板）。
+    source=按数据源 id 筛选（如 'datasource/ashare_free'），在结果截断前过滤。
+    用法：把选中行的 symbol 与 source 原样传给 create_board 建板。
+    无搜索索引的来源（list_scripts 里 caps 不含 symbols 的）可跳过搜索、直接给 symbol+该 source 建板。"""
+    return service.search_symbols(q, refresh, source)
 
 
 @api_tool(group="read", path="/api/board/{board_id}", err_status=404)
@@ -163,10 +164,10 @@ def get_current_view():
 def create_board(board_id: str, name: Optional[str] = None, intervals: Optional[list] = None,
                  symbol: Optional[str] = None, source: Optional[str] = None,
                  params: Optional[dict] = None, poll_s: Optional[int] = None):
-    """创建画板。intervals 为初始周期列表（如 ["1d","4h"]），首个为默认周期。
-    给 symbol+source = 建板即锁（一标的一板：source_lock={script, identity 快照}），并自动配置默认周期；
-    皆无 = 裸板（未锁定初始态，仅 AI 可建），首配 set_kline_source 时锁定。
-    换标的/换源被锁禁掉 → 请新建画板（撞锁返回 SOURCE_LOCKED+suggestion）。"""
+    """新建一个图表画板。两种用法：
+    ① 给 symbol+source = 开箱即用的实时板（自动配默认周期 [15m,1h,4h,1d,1w] ∩ 源支持档，初始显示 1d）；
+    ② 都不给 = 空板，之后用 set_kline_source 配来源。
+    同一 symbol+source 只允许一个画板，重复建会报 SOURCE_LOCKED 并指认现有板。intervals=初始周期列表，首个为默认。"""
     return service.create_board(board_id, name, intervals, symbol, source, params, poll_s)
 
 
@@ -212,11 +213,7 @@ def delete_drawing(board_id: Optional[str] = None, timeframe: Optional[str] = No
 @api_tool(group="user_write", method="POST", path="/api/board/{board_id}/timeframe/{timeframe}/backfill",
            err_passthrough=True)
 def backfill(board_id: str, timeframe: str, limit: int = 200):
-    """向左补充更早的历史K线（前插到现有最早一根之前）。
-    场景：图表向左滚动、已加载的最早K线不够看时，回溯拉取更早行情（前端左滑也会自动触发）。
-    前提：该画板/周期已配置数据源，且其 CAPS.backfill=True（如 datasource/ccxt_binance、datasource/mock_btc）；
-    无 backfill 徽章（如 datasource/csv）返回 prepended=0 并注明 NO_BACKFILL。
-    返回：prepended(本次前插根数) / total(当前总根数)。"""
+    """向左补拉更早的历史 K 线（看更久远的行情用）。前提：该板数据源支持历史回补（list_scripts 里 caps 含 backfill；csv 类源不支持，返回 prepended=0）。返回本次补拉根数与当前总根数。"""
     return service.backfill(board_id, timeframe, limit)
 
 
@@ -251,15 +248,14 @@ def set_markers(board_id: Optional[str] = None, timeframe: Optional[str] = None,
 
 @api_tool(group="user_write", method="POST", path="/api/board/{board_id}/timeframe", err_status=400)
 def create_timeframe(board_id: str, interval: str):
-    """给画板添加时间周期（如 1d/4h/1h）。已锁定在线板：新周期槽由系统自动注入
-    {script, identity+interval} 直接出图；离线/裸板新槽为空白待配。"""
+    """给画板加一个时间周期（如 '4h'）。实时板的新周期会自动取数出图；加完用 switch_timeframe 切过去看。"""
     return service.create_timeframe(board_id, interval)
 
 
 # ============ manage ============
 @api_tool(group="manage", method="DELETE", path="/api/indicator/{inst_id}", err_status=404)
 def delete_indicator(board_id: Optional[str] = None, timeframe: Optional[str] = None, inst_id: str = ""):
-    """按 inst_id 删除指标实例（登记处+各周期物化一次删净；现有 inst_id 见 overview）。"""
+    """把一个指标从图上移除（inst_id 从 overview 的 indicators 列表拿），一次删净不留残影。改参数请用 update_indicator，别删了重加。"""
     board_id, timeframe = _resolve(board_id, timeframe)
     return service.delete_indicator(board_id, timeframe, inst_id)
 
@@ -269,9 +265,9 @@ def update_indicator(board_id: Optional[str] = None, timeframe: Optional[str] = 
                      params: Optional[dict] = None, style: Optional[dict] = None,
                      lines_style: Optional[dict] = None, display_name: Optional[str] = None,
                      auto_label: Optional[bool] = None):
-    """更新指标实例（inst_id 把手）。params=新参数(重声明配方触发重算)；style=整体样式；
-    lines_style={线名:{color,lineWidth,lineStyle}}；display_name=覆盖显示名；
-    auto_label=true 恢复自动命名。blob 改 params 报错。"""
+    """改一个已加指标（inst_id 从 overview 的 indicators 列表拿）。
+    params=新参数，改后自动重算（如 MA 周期档、MACD 快慢慢期）；style/lines_style=颜色/线宽/线型；display_name=改显示名。
+    要把指标从图上拿走用 delete_indicator。"""
     board_id, timeframe = _resolve(board_id, timeframe)
     return service.update_indicator(board_id, timeframe, inst_id, params, style,
                                     lines_style, display_name, auto_label)
@@ -292,19 +288,17 @@ def delete_timeframe(board_id: str, timeframe: str):
 # ============ exec ============
 @api_tool(group="exec", path="/api/scripts")
 def list_scripts():
-    """列出全部脚本（双根：builtin 内置只读 / custom 可写）。
-    返回 [{id, kind, source, display, desc, params, caps, identity}]：
-    id=kind/name 是一切引用的唯一格式；caps=能力徽章（backfill/symbols/ticker）；
-    identity=板锁身份键（如 ["symbol"]）。写新脚本前先读 load_skill('script-authoring')。"""
+    """列出全部可用脚本（内置+自定义）。每条含：id（引用格式如 'indicator/macd'，加指标/配源都用它）、
+    desc、params（默认参数）、caps 能力（backfill=支持历史回补 / symbols=有搜索索引 / ticker=支持实时报价）。
+    写自定义脚本前先按 kind 读 skill：datasource-authoring / indicator-authoring。"""
     return {"scripts": service.script_engine.list_scripts()}
 
 
 @api_tool(group="exec", method="POST", path="/api/scripts", err_status=400)
 def save_script(id: str, code: str):
-    """保存自定义脚本到 custom 根（保存即校验：main 存在/CAPS 一致性/字面元数据合法）。
-    id=kind/name（kind∈datasource/indicator/strategy）；内置脚本不可改。
-    契约：datasource main(params[, until])→bars；indicator main(params, ohlcv)→values|{values,lines,markers}；
-    元数据 NAME/DESC/PARAMS/CAPS/IDENTITY 必须模块顶层字面常量。错误当场返回。"""
+    """保存自定义脚本到 custom 根（保存即校验：入口函数存在/能力声明一致/元数据合法）。
+    **写之前先按 kind 读 skill：datasource-authoring / indicator-authoring**。id 格式 kind/name（如 indicator/my_macd）；
+    同名 custom 覆盖同名内置（shadow 优先）。custom 根位置见 get_config，升级不丢（包外）。"""
     if not id or not code:
         return {"error": "SAVE_EMPTY: 需要 id 与 code"}
     return service.save_script(id, code)
@@ -323,9 +317,7 @@ def set_view_range(board_id: Optional[str] = None, timeframe: Optional[str] = No
 
 @api_tool(group="exec", method="POST", path="/api/run-script", err_status=500)
 def run_script(script: str, params: Optional[dict] = None):
-    """执行脚本并返回结果（窄身：图上不留痕，save_as 已废除）。
-    script 为 id（kind/name，如 indicator/macd、datasource/mock_btc）；裸文件名已废弃。
-    指标上图 = save_script + add_indicator(script=...)；K线入图 = set_kline_source 配方。"""
+    """跑一次脚本拿计算结果（**不上图、不留痕**）。适合：试算指标输出、拉一段数据源样本检查。要让指标上图用 add_indicator；要当画板数据源用 set_kline_source。"""
     return service.run_script(script, params)
 
 
@@ -336,10 +328,10 @@ def add_indicator(board_id: Optional[str] = None, timeframe: Optional[str] = Non
                   lines: Optional[list] = None, script: Optional[str] = None,
                   params: Optional[dict] = None, scope: Optional[str] = None,
                   display_name: Optional[str] = None):
-    """加指标（统一入口，inst_id 把手）。
-    - 计算型 recipe：给 script（id 格式 kind/name，如 'indicator/macd'）+params，随K线自动重算
-    - 冻结 blob：给 values 或多线 lines，钉死本周期（传 scope 报 BLOB_SCOPE）
-    - inst_id 撞名报 INST_EXISTS；不传自动 macd_2 式生成；两者皆无报 EMPTY_INDICATOR。"""
+    """加一个指标到图上。最常用：加内置指标，如 script='indicator/macd'（内置清单见 list_skills 之外的 list_scripts）。
+    subplot 族（macd/kdj/rsi/obv）不传 subplot 时自动建副图放置；主图族（sma/ema/bb/sar）叠在主图。
+    params=参数覆盖（如 {'periods':[10,20,60]} 换均线档）；inst_id 不传自动生成。
+    返回 inst_id；改参/改样式用 update_indicator，从图上移除用 delete_indicator。"""
     board_id, timeframe = _resolve(board_id, timeframe)
     return service.add_indicator(board_id, timeframe, inst_id=inst_id, values=values,
                                  subplot=subplot, style=style, markers=None, lines=lines,
@@ -356,29 +348,29 @@ def refresh_indicator(board_id: Optional[str] = None, timeframe: Optional[str] =
 
 @api_tool(group="exec", method="PUT", path="/api/board/{board_id}", mcp=False, err_status=404)
 def update_board(board_id: str, patch: Optional[dict] = None):
-    """更新画板展示属性（name 等）；锁字段不可改"""
+    """改画板的展示属性（目前仅展示名 name）。标的/来源等绑定信息不可改——要换请新建画板。"""
     return service.update_board(board_id, patch or {})
 
 
 @api_tool(group="exec", method="PUT", path="/api/board/{board_id}/timeframe/{timeframe}/kline_source", err_status=400)
 def set_kline_source(board_id: str, timeframe: str, script: str,
                      params: Optional[dict] = None, poll_s: Optional[int] = None):
-    """声明式配置 K 线来源（幂等，PUT 语义）。script 为 id（kind/name，如 datasource/ccxt_binance）。
-    空板首配=锁定；已锁板须 script 与 IDENTITY 键全等，违则 SOURCE_LOCKED（带 suggestion 一键改道建板）。
-    IDENTITY 之外 params=操作参数自由改（改即重拉）；仅 poll_s 变=不碰数据；poll_s>0 轮询实时刷新。
-    附指标请用 add_indicator（打包参已废除）。"""
+    """给"画板+周期"配置或更换 K 线数据来源。
+    注意：**一个画板只绑定一个标的+源**（首次配置即锁定）；换标的或换源请新建画板（create_board），
+    对已锁板调本工具会报 SOURCE_LOCKED 并附建议。同板同源可改 params（如 limit）与轮询间隔 poll_s。
+    常规流程：create_board(symbol=..., source=...) 一步到位，无需单独调本工具。"""
     return service.set_kline_source(board_id, timeframe, script, params, poll_s)
 
 
 @api_tool(group="exec", path="/api/board/{board_id}/timeframe/{timeframe}/kline_source", mcp=False)
 def get_kline_source(board_id: str, timeframe: str):
-    """读取槽配置 {script, params, mode, poll_s}（诊断用）"""
+    """读画板某周期当前的 K 线来源配置（来源脚本/参数/轮询间隔），诊断用。"""
     return service.get_kline_source(board_id, timeframe)
 
 
 @api_tool(group="exec", method="POST", path="/api/board/{board_id}/timeframe/{timeframe}/refresh", mcp=False)
 def refresh_timeframe(board_id: str, timeframe: str):
-    """手动重拉该槽 K 线（不等轮询）"""
+    """立即重拉指定画板+周期的 K 线一次，不等自动轮询到点。改了数据源参数想马上看效果时用。"""
     return service.refresh_timeframe(board_id, timeframe)
 
 
@@ -409,7 +401,7 @@ def delete_subplot(board_id: Optional[str] = None, timeframe: Optional[str] = No
 # ============ 雷达（v0.4.1） ============
 @api_tool(group="read", path="/api/watchlist")
 def watchlist_list():
-    """雷达面板数据：groups[]→rows[]，每行含最新价/涨跌幅/三态(visible/hidden/watch)/未读心跳/●现场徽标"""
+    """读雷达盯盘面板：groups[]→rows[]，每行=一个盯盘标的，含最新价/涨跌幅/显隐状态/是否有对应画板在现场。加盯用 watchlist_add，移组用 watchlist_move，建组用 watchlist_group_add。"""
     return service.watchlist.list_watchlist()
 
 
@@ -439,7 +431,7 @@ def watchlist_group_rename(group_id: str, name: str):
 
 @api_tool(group="user_write", method="DELETE", path="/api/watchlist/groups", err_status=400)
 def watchlist_group_remove(group_id: str):
-    """删除雷达分组——行回落默认组，不级联删行（默认组 GROUP_PROTECTED）"""
+    """删除雷达分组，**组内盯盘行一并级联删除**（行不保留，组删行没）；默认组不可删（GROUP_PROTECTED）。只想移走行请先用 watchlist_move。"""
     return service.watchlist.remove_group(group_id)
 
 

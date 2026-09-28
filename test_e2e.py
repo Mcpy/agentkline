@@ -157,6 +157,22 @@ def test(port: int, token: str = None):
     print("📜 backfill")
     r = s.post(f"{base}/api/board/bare/timeframe/1d/backfill", json={"limit": 100})
     check("backfill 前插", r.json().get("prepended", 0) == 100, r.text)
+    r = s.post(f"{base}/api/board/bare/timeframe/1d/backfill?limit=7")
+    check("backfill query limit 通达（v0.4.4 routes 修）", r.json().get("prepended", 0) == 7, r.text)
+    # v0.4.4 建板失败语义：慢源首拉超 cap = 失败+原因，不建空板
+    r = s.post(f"{base}/api/scripts", json={"id": "datasource/slowsrc", "code":
+               'NAME="慢源"\nCAPS={"backfill": False, "symbols": False, "ticker": False}\nIDENTITY=[]\n'
+               'import time\ndef main(params, until=None):\n    time.sleep(15)\n    return []\n'})
+    check("save 慢源", r.status_code == 200, r.text)
+    r = s.post(f"{base}/api/board", json={"id": "slowb", "symbol": "X", "source": "datasource/slowsrc"})
+    check("慢源建板失败+原因", r.status_code == 400 and "SOURCE_FETCH_TIMEOUT" in r.text, r.text[:150])
+    r = s.get(f"{base}/api/boards")
+    check("慢源板不残留", all(b["id"] != "slowb" for b in r.json()["boards"]), str([b['id'] for b in r.json()['boards']]))
+
+    r = s.get(f"{base}/api/search", params={"q": "A", "source": "datasource/syms_test"})
+    rows = r.json().get("rows", [])
+    check("搜索 source 筛选（v0.4.4）", rows and all(x["source"] == "datasource/syms_test" for x in rows),
+          str([x["source"] for x in rows][:4]))
     r = s.post(f"{base}/api/scripts", json={"id": "datasource/nobf", "code":
                'NAME="无回溯"\nCAPS={"backfill": False, "symbols": False, "ticker": False}\nIDENTITY=[]\n'
                'def main(params):\n    return []\n'})
@@ -487,14 +503,79 @@ def test(port: int, token: str = None):
     gr = _sp.run([sys.executable, "scripts/check_fe_guards.py"], capture_output=True, text=True)
     check("护栏：无环+无漏 import", gr.returncode == 0, (gr.stdout + gr.stderr)[:200])
 
+    # === 11.35 内置 A 股源元数据（v0.4.4；不碰真网） ===
+    r = s.get(f"{base}/api/scripts")
+    lst = r.json().get("scripts", r.json())
+    me = next((x for x in lst if x["id"] == "datasource/ashare_free"), None)
+    check("builtin 含 ashare_free", me is not None, str([x['id'] for x in lst][:8]))
+    if me:
+        caps = me.get("caps") or {}
+        check("A股源三徽章", caps.get("backfill") and caps.get("symbols") and caps.get("ticker"), str(caps))
+        check("A股源 INTERVALS 八档", me.get("intervals") == ["1m", "5m", "15m", "30m", "1h", "1d", "1w", "1mo"],
+              str(me.get("intervals")))
+    me2 = next((x for x in lst if x["id"] == "datasource/usstock_free"), None)
+    check("builtin 含 usstock_free", me2 is not None, str([x['id'] for x in lst][:10]))
+    if me2:
+        caps2 = me2.get("caps") or {}
+        check("美股源三徽章", caps2.get("backfill") and caps2.get("symbols") and caps2.get("ticker"), str(caps2))
+
+    # === 11.4 skills 三卷（v0.4.4 拆分） ===
+    print("📚 skills")
+    r = s.get(f"{base}/api/skills")
+    names = sorted(x["name"] for x in r.json().get("skills", r.json()))
+    check("skills 三卷齐", names == ["ai-walkthrough", "datasource-authoring", "indicator-authoring"], str(names))
+    r = s.get(f"{base}/api/skills/datasource-authoring")
+    body = r.json().get("content", r.text)
+    check("datasource 卷含契约章", "datasource 契约" in body and "INTERVALS" in body, body[:80])
+    r = s.get(f"{base}/api/skills/indicator-authoring")
+    body = r.json().get("content", r.text)
+    check("indicator 卷含 SUBPLOT", "SUBPLOT" in body and "indicator 契约" in body, body[:80])
+
+    # === 11.5 MCP 提示词黑话门禁（v0.4.4） ===
+    print("📜 MCP docstring 黑话门禁")
+    section_docstring_jargon(check)
+
     # === 12. 清理 ===
     print("🧹 清理")
-    for bid in ["lk", "bare", "nobfboard", "bigb", "symboard", "ivb", "radb", "pf1", "pf2", "pf3"]:
+    for bid in ["lk", "bare", "nobfboard", "bigb", "symboard", "ivb", "radb", "pf1", "pf2", "pf3"]:  # slowb 断言不残留，清理段不删
         r = s.delete(f"{base}/api/board/{bid}")
         check(f"delete {bid}", r.status_code == 200, r.text)
 
     print(f"\n{'='*60}\nResults: {passed} passed, {failed} failed, {passed+failed} total\n{'='*60}\n")
     return failed == 0
+
+
+# ── MCP 提示词黑话门禁（v0.4.4）：MCP 面 docstring 禁开发者黑话，防回归 ──
+def section_docstring_jargon(check):
+    import ast as _ast
+    JARGON = ["把手", "窄身", "登记处", "物化", "二元组", "前插", "槽", "锁字段",
+              "重声明配方", "identity 快照", "回落默认组", "徽章"]
+    tree = _ast.parse(open(os.path.join(os.path.dirname(__file__), "agentkline/api/tools.py")).read())
+    bad = []
+    for node in tree.body:
+        if not isinstance(node, _ast.FunctionDef):
+            continue
+        mcp_on = True
+        for dec in node.decorator_list:
+            if isinstance(dec, _ast.Call) and getattr(dec.func, "id", "") == "api_tool":
+                for kw in dec.keywords:
+                    if kw.arg == "mcp" and getattr(kw.value, "value", True) is False:
+                        mcp_on = False
+        if not mcp_on:
+            continue
+        doc = _ast.get_docstring(node) or ""
+        for w in JARGON:
+            if w in doc:
+                bad.append(f"{node.name}:{w}")
+    check("MCP docstring 无黑话", not bad, str(bad))
+    # skills 禁版本标记：消费方 agent 只应"读了就能用"，版本-技能匹配是发布方义务
+    import glob as _glob, re as _re
+    vb = []
+    for f in _glob.glob(os.path.join(os.path.dirname(__file__), "skills/*.md")):
+        for i, line in enumerate(open(f), 1):
+            if _re.search(r"v0\.\d", line):
+                vb.append(f"{os.path.basename(f)}:{i}")
+    check("skills 无版本标记", not vb, str(vb))
 
 
 if __name__ == "__main__":

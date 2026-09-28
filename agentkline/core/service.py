@@ -27,7 +27,7 @@ def _to_ms(v):
 class AgentKlineService:
     """AgentKline 业务核心"""
 
-    VERSION = "0.4.3"
+    VERSION = "0.4.4"
 
     def __init__(self, scripts_dir: str, limits: dict = None):
         limits = limits or {}
@@ -42,10 +42,60 @@ class AgentKlineService:
         self.state.MAX_BARS_PER_SLOT = self.max_bars_per_slot
         self.init_window = int(limits.get("init_window", 2000))
         self._symbol_index: dict = {}  # script_id -> {"ts": epoch, "symbols": [...]}
+        self._index_building: set = set()
+        import threading as _th
+        self._index_building_lock = _th.Lock()
         self.SYMBOL_INDEX_TTL = 86400  # 索引 TTL 日级；手动 refresh 可强刷
         self.DEFAULT_ONLINE_TFS = ["15m", "1h", "4h", "1d", "1w"]  # 实时源建板默认周期
         self.notify: Callable[[dict], None] = lambda msg: None  # 由传输层注入
         self.current_view: dict = {}  # 用户当前视图（前端上报）
+
+    def _build_index(self, sid):
+        """建单源索引（防重入：warmup 与搜索请求撞车不重复建）。返回 True=建成/已有，False=他人构建中。"""
+        import threading as _th
+        with self._index_building_lock:
+            if sid in self._index_building:
+                return False
+            self._index_building.add(sid)
+        try:
+            r = self.script_engine.list_symbols(sid, "")
+            if isinstance(r, dict) and r.get("error"):
+                logger.warning("索引构建失败 %s: %s", sid, r["error"])
+                return True
+            import time as _t
+            self._symbol_index[sid] = {"ts": _t.time(),
+                                       "symbols": r.get("symbols") if isinstance(r, dict) else r}
+            return True
+        except Exception as e:
+            logger.warning("索引构建异常 %s: %s", sid, e)
+            return True
+        finally:
+            with self._index_building_lock:
+                self._index_building.discard(sid)
+
+    def _refresh_expired(self, sids):
+        for sid in sids:
+            self._build_index(sid)  # 防重入；刷好即换，搜索无感
+
+    def warmup_symbol_index(self):
+        """v0.4.4 启动预热：后台并行建全源索引（不阻塞启动；把重启后首搜的一次性等待吸收进启动）。"""
+        from concurrent.futures import ThreadPoolExecutor
+        sids = [x["id"] for x in self.script_engine.list_scripts()
+                if x["kind"] == "datasource" and x["caps"].get("symbols")]
+        logger.info("索引预热开始: %s", sids)
+        with ThreadPoolExecutor(max_workers=max(1, len(sids))) as ex:
+            list(ex.map(self._build_index, sids))
+        logger.info("索引预热完成: %s", {k: len(v.get("symbols") or []) for k, v in self._symbol_index.items()})
+
+    def _symbol_display(self, sid, symbol):
+        """搜索索引里的 display（如 '浦发银行 600000'）；索引未建/无该 symbol → None。"""
+        ent = self._symbol_index.get(sid or "")
+        if not ent:
+            return None
+        for x in ent.get("symbols") or []:
+            if x.get("symbol") == symbol:
+                return x.get("display")
+        return None
 
     # ============ 画板 ============
     def create_board(self, board_id, name=None, intervals=None, symbol=None,
@@ -53,8 +103,11 @@ class AgentKlineService:
         """建板。给 symbol/source = 建板即锁（用户侧搜索流）；皆无 = 空板（仅 AI 可建）。"""
         if (symbol or source) and not name:
             # 默认名 = 显示链统一格式：源名: 标的名（去 kind/ 前缀）
+            # v0.4.4：display 优先（中文名等，搜索索引查得）；查不到回落 symbol——
+            # 加密源无索引/无 display → 与现状同，通用性零特判
             stem = str(source).split("/")[-1] if source else ""
-            name = f"{stem}: {symbol}" if (stem and symbol) else (symbol or stem or None)
+            label = self._symbol_display(source, symbol) or symbol
+            name = f"{stem}: {label}" if (stem and label) else (label or stem or None)
         if (symbol or source) and not intervals:
             # 实时源建板默认五周期 = [15m,1h,4h,1d,1w] ∩ 脚本 INTERVALS；离线源(未声明)保持单槽自由
             meta = self.script_engine.metadata(source) if source else {}
@@ -91,27 +144,29 @@ class AgentKlineService:
             board = self.state.get_board(board_id)
             try:
                 r = self.set_kline_source(board_id, board.current_timeframe, source,
-                                          full_params, poll_s)
+                                          full_params, poll_s, fetch_timeout=10)
             except Exception as e:
                 r = {"error": f"SOURCE_FETCH_ERROR: {e}"}
             if r.get("error"):
                 self.datasource.stop_sync(board_id, board.current_timeframe)
                 self.state.delete_board(board_id)
                 return r
-            # 其余初始周期槽同样自动注入配置（默认五周期都有K线，不留空槽）
-            slot_errors = {}
-            for tf in board.intervals:
-                if tf == board.current_timeframe:
-                    continue
-                try:
-                    rr = self._configure_slot(board_id, tf, poll_s)
-                    if rr.get("error"):
-                        slot_errors[tf] = rr["error"]
-                except Exception as e:
-                    slot_errors[tf] = str(e)
-            if slot_errors:
-                logger.warning("create_board 部分槽配置失败: %s", slot_errors)
-                result = {**result, "slot_errors": slot_errors}
+            # v0.4.4：其余初始槽后台线程配置（建板响应不等网络；槽由轮询线程填数自愈）
+            import threading as _th
+            _rest = [tf for tf in board.intervals if tf != board.current_timeframe]
+            if _rest:
+                def _bg_cfg():
+                    errs = {}
+                    for tf in _rest:
+                        try:
+                            rr = self._configure_slot(board_id, tf, poll_s)
+                            if rr.get("error"):
+                                errs[tf] = rr["error"]
+                        except Exception as e:
+                            errs[tf] = str(e)
+                    if errs:
+                        logger.warning("create_board 后台槽配置失败: %s", errs)
+                _th.Thread(target=_bg_cfg, daemon=True, name=f"cfg-{board_id}").start()
             result = {**result, "source_lock": board.source_lock}
         self._bc({"type": "board_create", "board": result})
         return result
@@ -294,25 +349,55 @@ class AgentKlineService:
             st = {**st, "ohlcv": st["ohlcv"][-w:], "windowed": True}
         return st
 
-    def search_symbols(self, q: str = "", refresh: bool = False) -> dict:
+    def search_symbols(self, q: str = "", refresh: bool = False, source: str = None) -> dict:
         """标的搜索（P1）：索引=CAPS.symbols 源首用全量+TTL 日级+手动 refresh；
         搜索永不穿透交易所（首用后本地过滤）。行=完整二元组(源,裸符号)+●现场徽标"""
         import time as _t
         q = (q or "").strip().upper()
         rows, errors = [], []
-        for s in self.script_engine.list_scripts():
-            if s["kind"] != "datasource" or not s["caps"].get("symbols"):
-                continue
+        cands = [s for s in self.script_engine.list_scripts()
+                 if s["kind"] == "datasource" and s["caps"].get("symbols")
+                 and (not source or s["id"] == source)]  # v0.4.4 源筛选：50 截断前过滤
+        now0 = _t.time()
+        # v0.4.4 stale-while-revalidate：过期源=旧索引继续服务+后台刷新（用户永撞不到重建等待；
+        # 索引是符号+名字清单，旧一天几乎零害；手动 refresh 仍同步=显式要新）
+        expired = [s["id"] for s in cands
+                   if not refresh and self._symbol_index.get(s["id"])
+                   and (now0 - self._symbol_index[s["id"]]["ts"]) > self.SYMBOL_INDEX_TTL]
+        if expired:
+            import threading as _th
+            _th.Thread(target=self._refresh_expired, args=(expired,), daemon=True,
+                       name="index-refresh").start()
+        # 冷态（无索引/手动 refresh）：并行构建 + 每源 8s 超时（单源烂网不拖全局）
+        stale = [s["id"] for s in cands
+                 if (refresh or self._symbol_index.get(s["id"]) is None)
+                 and s["id"] not in expired]
+        if stale:
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as _TE
+            def _build(sid):
+                return sid, self._build_index(sid)
+            ex = ThreadPoolExecutor(max_workers=len(stale))
+            futs = {ex.submit(_build, sid): sid for sid in stale}
+            for f in futs:
+                sid = futs[f]
+                try:
+                    _, ok = f.result(timeout=8)
+                except _TE:
+                    errors.append({sid: "INDEX_BUILD_TIMEOUT: 索引构建超 8s（源网络限流窗？稍后重试）"})
+                    continue
+                except Exception as e:
+                    errors.append({sid: str(e)[:120]})
+                    continue
+                if ok is False:
+                    errors.append({sid: "INDEX_WARMING: 索引后台构建中，稍后重试"})
+            # v0.4.4：wait=False——超时源线程让它自己跑完死掉，绝不拖搜索响应
+            ex.shutdown(wait=False, cancel_futures=True)
+        for s in cands:
             sid = s["id"]
             ent = self._symbol_index.get(sid)
+            if not ent:
+                continue
             now = _t.time()
-            if ent is None or refresh or (now - ent["ts"]) > self.SYMBOL_INDEX_TTL:
-                r = self.script_engine.list_symbols(sid, "")
-                if r.get("error"):
-                    errors.append({sid: r["error"]})
-                    continue
-                ent = {"ts": now, "symbols": r["symbols"]}
-                self._symbol_index[sid] = ent
             for sym in ent["symbols"]:
                 symbol, display = sym.get("symbol"), sym.get("display") or sym.get("symbol")
                 if q and q not in str(symbol).upper() and q not in str(display).upper():
@@ -328,7 +413,10 @@ class AgentKlineService:
                     break
             if len(rows) >= 50:
                 break
-        return {"rows": rows, "errors": errors}
+        # v0.4.4：随响应附 symbols 徽章源清单（前端筛选 chips 用；web 端口不开放 /api/scripts）
+        srcs = [x["id"] for x in self.script_engine.list_scripts()
+                if x["kind"] == "datasource" and x["caps"].get("symbols")]
+        return {"rows": rows, "errors": errors, "sources": srcs}
 
     def set_markers(self, board_id, timeframe, markers):
         markers = list(markers or [])
@@ -706,7 +794,7 @@ class AgentKlineService:
         return {"subplots": self.state.list_subplots(board_id, timeframe)}
 
     # ============ 数据源 ============
-    def set_kline_source(self, board_id, tf, script, params=None, poll_s=None):
+    def set_kline_source(self, board_id, tf, script, params=None, poll_s=None, fetch_timeout=None):
         """声明式配置 K 线来源（幂等，PUT 语义）。script 为 id（kind/name）。
         - 空板首配 = 锁定（source_lock 就位）；已锁板全槽全等校验，违则 SOURCE_LOCKED+suggestion
         - IDENTITY 键之外的 params = 操作参数，自由改（改即重拉）；仅 poll_s 变 = 不碰数据
@@ -751,7 +839,21 @@ class AgentKlineService:
 
         # script/params 变 = 停旧源、重拉一次
         self.datasource.stop_sync(board_id, tf)
-        result = self.script_engine.run_script(script, params)
+        if fetch_timeout:
+            # v0.4.4：同步首拉上限（超时=空K线建板、轮询线程后续填数自愈）——
+            # 建板响应永不被烂网/慢源阻塞（曾致 hang 源建板 45s+ 连带搜索全瘫）
+            from concurrent.futures import ThreadPoolExecutor
+            _ex = ThreadPoolExecutor(max_workers=1)
+            _f = _ex.submit(self.script_engine.run_script, script, params)
+            try:
+                result = _f.result(timeout=fetch_timeout)
+            except Exception:
+                # v0.4.4 用户裁决：拉不到数据=建板失败+原因，不建空板
+                result = {"error": f"SOURCE_FETCH_TIMEOUT: 首拉超 {fetch_timeout}s 无数据"
+                          f"（源网络限流窗/不可达）——建板失败，请稍后重试"}
+            _ex.shutdown(wait=False, cancel_futures=True)
+        else:
+            result = self.script_engine.run_script(script, params)
         if result.get("error"):
             return result
         data = result.get("data", [])

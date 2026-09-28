@@ -60,6 +60,12 @@ def _make_endpoint(fn, meta):
                 key = meta["aliases"].get(name, name)
                 if key in body:
                     kwargs[name] = body[key]
+                else:
+                    # v0.4.4：POST/PUT 也收 query 作补充源（body 优先）——
+                    # 修 backfill?limit= 等 POST+query 组合被静默丢弃（曾致回补根数恒=默认）
+                    raw = request.query_params.get(key)
+                    if raw is not None:
+                        kwargs[name] = _cast(param.annotation, raw)
         else:
             for name, param in sig.parameters.items():
                 if name in path_params:
@@ -67,9 +73,14 @@ def _make_endpoint(fn, meta):
                 raw = request.query_params.get(name)
                 if raw is not None:
                     kwargs[name] = _cast(param.annotation, raw)
-        result = fn(**kwargs)
-        if hasattr(result, "__await__"):
-            result = await result
+        # v0.4.4 架构根治：sync 工具离 event loop（原 async wrapper 直调 sync fn
+        # = 慢工具阻塞全 loop = 全局串行 choke；曾致建板拖垮全部 REST/WS）
+        import inspect
+        if inspect.iscoroutinefunction(fn):
+            result = await fn(**kwargs)
+        else:
+            from starlette.concurrency import run_in_threadpool
+            result = await run_in_threadpool(fn, **kwargs)
         if isinstance(result, dict) and result.get("error") and not meta.get("err_passthrough"):
             if result.get("code") == "SOURCE_LOCKED":
                 raise HTTPException(409, result)

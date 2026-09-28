@@ -5,8 +5,8 @@
 """
 import time
 
-NAME = "Binance 永续 (ccxt)"
-DESC = "Binance USDT 永续合约 K 线；symbol 参数化；支持搜索/报价/回溯"
+NAME = "Binance 现货+永续"
+DESC = "Binance 直连（requests 直连 REST，非 ccxt 库）：现货+USDT 永续全量、K线全周期、批量实时；含股票代币（现货 B 后缀 37 + 股票永续 87）"
 PARAMS = {"symbol": "BTC/USDT:USDT", "interval": "1d", "limit": 200}
 CAPS = {"backfill": True, "symbols": True, "ticker": True}
 IDENTITY = ["symbol"]
@@ -22,8 +22,25 @@ TF_MS = {
 
 
 def _base(symbol: str) -> str:
-    """BTC/USDT:USDT -> BTCUSDT"""
+    """BTC/USDT:USDT -> BTCUSDT；BTC/USDT -> BTCUSDT"""
     return symbol.split(':')[0].replace('/', '')
+
+
+def _is_spot(symbol: str) -> bool:
+    """v0.4.4 双市场：无 :USDT 后缀 = 现货（api.binance.com）；有 = 永续（fapi）。"""
+    return ':' not in (symbol or "")
+
+
+def _host(symbol: str) -> str:
+    return "https://api.binance.com" if _is_spot(symbol) else "https://fapi.binance.com"
+
+
+def _kline_path(symbol: str) -> str:
+    return "/api/v3/klines" if _is_spot(symbol) else "/fapi/v1/klines"
+
+
+def _ticker_path(symbol: str) -> str:
+    return "/api/v3/ticker/24hr" if _is_spot(symbol) else "/fapi/v1/ticker/24hr"
 
 
 def _fetch_klines_direct(symbol, timeframe, limit, since=None):
@@ -32,7 +49,7 @@ def _fetch_klines_direct(symbol, timeframe, limit, since=None):
     params = {'symbol': _base(symbol), 'interval': timeframe, 'limit': limit}
     if since is not None:
         params['startTime'] = since
-    r = requests.get('https://fapi.binance.com/fapi/v1/klines', params=params, timeout=10)
+    r = requests.get(_host(symbol) + _kline_path(symbol), params=params, timeout=10)
     r.raise_for_status()
     return [[int(row[0]), float(row[1]), float(row[2]), float(row[3]),
              float(row[4]), float(row[5])] for row in r.json()]
@@ -95,20 +112,36 @@ def list_symbols(query: str = "") -> list:
     """标的搜索：直连 exchangeInfo（永不穿透 ccxt 的 markets 缓存问题）"""
     import requests
     r = requests.get('https://fapi.binance.com/fapi/v1/exchangeInfo', timeout=10)
+    rs = requests.get('https://api.binance.com/api/v3/exchangeInfo', timeout=10)
     r.raise_for_status()
     q = (query or "").upper().strip()
     out = []
     for s in r.json().get("symbols", []):
-        if s.get("contractType") != "PERPETUAL" or s.get("status") != "TRADING":
+        # v0.4.4：TRADIFI_PERPETUAL = 股票/TradFi 永续区（underlyingType=EQUITY 等），
+        # 原只收 PERPETUAL 致 OPENAI/TENCENT/XAU 等 205 只搜不到（用户报）
+        if s.get("contractType") not in ("PERPETUAL", "TRADIFI_PERPETUAL") or s.get("status") != "TRADING":
             continue
         if s.get("quoteAsset") != "USDT":
             continue
         sym = f"{s['baseAsset']}/USDT:USDT"
         if q and q not in sym.upper():
             continue
-        out.append({"symbol": sym, "display": f"{s['baseAsset']}/USDT 永续"})
-        if len(out) >= 200:
+        tag = "股票永续" if s.get("underlyingType") == "EQUITY" else (
+            "TradFi永续" if s.get("contractType") == "TRADIFI_PERPETUAL" else "永续")
+        out.append({"symbol": sym, "display": f"{s['baseAsset']}/USDT {tag}"})
+        if len(out) >= 2000:
             break
+    # v0.4.4 spot 行（双市场索引）
+    if rs.ok:
+        for s2 in rs.json().get("symbols", []):
+            if s2.get("status") != "TRADING" or s2.get("quoteAsset") != "USDT":
+                continue
+            sym2 = f"{s2['baseAsset']}/USDT"
+            if q and q not in sym2.upper():
+                continue
+            out.append({"symbol": sym2, "display": f"{s2['baseAsset']}/USDT 现货"})
+            if len(out) >= 2000:
+                break
     return out
 
 
@@ -116,7 +149,7 @@ def ticker(params: dict) -> dict:
     """实时报价：24h ticker（last/涨跌/涨跌%）"""
     import requests
     symbol = params.get("symbol", "BTC/USDT:USDT")
-    r = requests.get('https://fapi.binance.com/fapi/v1/ticker/24hr',
+    r = requests.get(_host(symbol) + _ticker_path(symbol),
                      params={'symbol': _base(symbol)}, timeout=10)
     r.raise_for_status()
     d = r.json()
@@ -134,10 +167,17 @@ def tickers(params_list: list) -> list:
     """批量报价（性能②）：一次 fapi 24hr 请求拿全部盯盘符号（symbols 数组，权重远低于逐行）"""
     import requests, time as _t, json as _json
     bases = [_base(p.get("symbol", "BTC/USDT:USDT")) for p in params_list]
-    r = requests.get('https://fapi.binance.com/fapi/v1/ticker/24hr',
-                     params={'symbols': _json.dumps(bases)}, timeout=10)
-    r.raise_for_status()
-    by_sym = {d["symbol"]: d for d in r.json()}
+    spots = [_is_spot(p.get("symbol", "")) for p in params_list]
+    by_sym = {}
+    for is_sp in (False, True):  # 按市场两批（fapi / spot 端点分离）
+        bs = [b for b, sp in zip(bases, spots) if sp == is_sp]
+        if not bs:
+            continue
+        host = "https://api.binance.com" if is_sp else "https://fapi.binance.com"
+        path = "/api/v3/ticker/24hr" if is_sp else "/fapi/v1/ticker/24hr"
+        r = requests.get(host + path, params={'symbols': _json.dumps(bs)}, timeout=10)
+        r.raise_for_status()
+        by_sym.update({d["symbol"]: d for d in r.json()})
     ts = int(_t.time() * 1000)
     out = []
     for b in bases:

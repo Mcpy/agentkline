@@ -7,14 +7,58 @@ import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoa
     // ============================================================
     // UI 渲染
     // ============================================================
-    function renderBoardTabs() {
-        const container = document.getElementById('board-tabs');
-        container.innerHTML = '';
-        state.boards.forEach(board => {
-            const tab = document.createElement('div');
-            tab.className = `board-tab ${board.id === state.currentBoard ? 'active' : ''}`;
-            tab.textContent = board.name || board.id;
-            tab.onclick = () => switchBoard(board.id);
+    const TAB_MAX = 8;  // v0.4.4 C 案：明排上限，溢出收下拉
+
+    // v0.4.4 tab 短名：去源 stem → 摘 tag → 去 /USDT → CJK 取首段 / 拉丁取末段
+    function shortBoardName(name) {
+        let t = (name || '').split(':').slice(1).join(':').trim() || name || '';
+        let tag = '';
+        for (const [k, v] of [['TradFi永续', 'TradFi'], ['股票永续', '股票'], [' 现货', '现货'], [' 永续', '永续']]) {
+            if (t.endsWith(k)) { tag = v; t = t.slice(0, -k.length).trim(); break; }
+        }
+        t = t.replace(/\/USDT$/, '').trim();
+        const parts = t.split(/\s+/).filter(Boolean);
+        let core = parts.length && /[\u4e00-\u9fa5]/.test(parts[0]) ? parts[0]
+                 : (parts[parts.length - 1] || t);
+        return (core + (tag ? ' ' + tag : '')).trim() || name || '';
+    }
+
+    function closeOverflow() {
+        const m = document.getElementById('board-overflow-menu');
+        if (m) m.remove();
+    }
+
+    function openOverflowMenu(anchor, overflow) {
+        closeOverflow();
+        const m = document.createElement('div');
+        m.className = 'tf-menu'; m.id = 'board-overflow-menu';
+        overflow.forEach(b => {
+            const row = document.createElement('div');
+            row.className = 'tf-menu-item ov-row';
+            const nm = document.createElement('span');
+            nm.className = 'ov-name' + (b.id === state.currentBoard ? ' ov-cur' : '');
+            nm.textContent = b.name || b.id;
+            const x = document.createElement('span');
+            x.className = 'ov-x'; x.textContent = '×'; x.title = '删除画板';
+            x.onclick = (e) => { e.stopPropagation(); closeOverflow(); deleteBoard(b.id); };
+            row.append(nm, x);
+            row.onclick = () => { closeOverflow(); switchBoard(b.id); };
+            m.appendChild(row);
+        });
+        const r = anchor.getBoundingClientRect();
+        m.style.position = 'fixed';
+        m.style.left = Math.max(4, r.right - 260) + 'px';
+        m.style.top = (r.bottom + 4) + 'px';
+        document.body.appendChild(m);
+        setTimeout(() => document.addEventListener('click', closeOverflow, { once: true }), 0);
+    }
+
+    function tabEl(board) {
+        const tab = document.createElement('div');
+        tab.className = `board-tab ${board.id === state.currentBoard ? 'active' : ''}`;
+        tab.textContent = shortBoardName(board.name || board.id);
+        tab.title = board.name || board.id;   // 全名 tooltip
+        tab.onclick = () => switchBoard(board.id);
             // 右键菜单：板身份证卡（锁信息入口，铭牌已撤）/ 删除画板
             tab.oncontextmenu = (e) => {
                 e.preventDefault(); e.stopPropagation();
@@ -34,8 +78,29 @@ import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoa
                 items.push({ label: '删除画板', danger: true, onClick: () => deleteBoard(board.id) });
                 showContextMenu(e.clientX, e.clientY, items);
             };
-            container.appendChild(tab);
-        });
+        return tab;
+    }
+
+    function renderBoardTabs() {
+        const container = document.getElementById('board-tabs');
+        container.innerHTML = '';
+        const boards = state.boards;
+        let visible = boards.slice(0, TAB_MAX);
+        const cur = boards.find(b => b.id === state.currentBoard);
+        if (cur && !visible.includes(cur)) {
+            visible = boards.slice(0, TAB_MAX - 1).concat([cur]);  // 当前板永远明排
+        }
+        const overflow = boards.filter(b => !visible.includes(b));
+        visible.forEach(b => container.appendChild(tabEl(b)));
+        if (overflow.length) {
+            const ob = document.createElement('div');
+            ob.className = 'board-tab board-overflow' +
+                (cur && overflow.includes(cur) ? ' on' : '');
+            ob.textContent = `…+${overflow.length} ▾`;
+            ob.title = '更多画板';
+            ob.onclick = (e) => { e.stopPropagation(); openOverflowMenu(ob, overflow); };
+            container.appendChild(ob);
+        }
     }
 
     function deleteBoard(boardId) {

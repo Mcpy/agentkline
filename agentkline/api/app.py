@@ -57,6 +57,9 @@ async def _serve():
         logger.warning("custom 根位于 site-packages 内：venv 重建会丢失自建脚本！"
                        "建议设 AGENTKLINE_SCRIPTS_DIR 指向用户目录（如 ~/.agentkline/scripts）")
     set_main_loop(asyncio.get_running_loop())
+    # v0.4.4 启动预热：后台建搜索索引（不阻塞启动；更新机制不变=TTL 日级懒更新+手动 refresh+新源懒建）
+    import threading as _th
+    _th.Thread(target=service.warmup_symbol_index, daemon=True, name="index-warmup").start()
     service.datasource.start_polling()
     s_web = uvicorn.Server(uvicorn.Config(web_app, host=cfg["web_host"], port=cfg["web_port"],
                                           log_level="warning"))

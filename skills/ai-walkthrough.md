@@ -1,13 +1,13 @@
 ---
 name: ai-walkthrough
-description: AI 引导呈现流程（v0.4）——把分析结论（标记/划线）自动带到用户屏幕：set_markers/add_drawing → switch_board/switch_timeframe → set_view_range；含板锁语义（现场=锁定画板、SOURCE_LOCKED 跟 suggestion 改道）、省 token 读取与 get_current_view。
+description: AI 引导呈现流程——把分析结论（标记/划线）自动带到用户屏幕：set_markers/add_drawing → switch_board/switch_timeframe → set_view_range；含板锁语义（现场=锁定画板、SOURCE_LOCKED 跟 suggestion 改道）、省 token 读取与 get_current_view。
 ---
 
-# AgentKline AI 引导呈现（v0.4 skill）
+# AgentKline AI 引导呈现
 
 让 AI 把"回测亏损归因 / 信号解读"等结论**自动呈现**到用户眼前，无需人工翻找。
 
-## 0. 现场语义（v0.4 一标的一板）
+## 0. 现场语义（一标的一板）
 - 画板 = 某标的的分析**现场**：`source_lock={script, identity快照}`，建板即锁、不可变。
 - 你的分析要落在**对应标的的现场**里：先 `list_boards`/`overview` 找现成现场；
   没有就 `create_board(symbol=..., source=..., params=...)` 建板即锁，或空板（仅 AI 可建）+ `set_kline_source` 首配锁。
@@ -40,22 +40,37 @@ description: AI 引导呈现流程（v0.4）——把分析结论（标记/划�
 - 截图反映响应 snapshot_request 的浏览器当前视图；无浏览器在线时不会回退旧图（报 NO_BROWSER 姿态）。
 
 
-## 雷达与性能意识（v0.4.1）
+## 雷达与性能意识
 - 盯盘用 watchlist_add/list + get_quotes；行三态 visible/hidden/watch 解读用户注意力；
 - 读 `eff_poll_s` 判断槽当前轮询档；非可见槽数据允许分钟级旧——讲解时切即补拉已兜底；
 - 大批量盯盘同源只占一次批量请求，放心加行。
 
 
-## 分组意识（v0.4.2）
+## 分组意识
 - 用户雷达可能多组（主题/市场归类）：加盯可带 group_id；讲解涉及"用户盯的某类标的"时
   先 watchlist_list 看组结构再按组取行；移组/建组用 watchlist_move / watchlist_group_*。
 
 
-## 快照回退意识（v0.4.2）
+## 快照回退意识
 - take_snapshot 无浏览器在线报 NO_BROWSER；确需旧图时显式 allow_stale=true，
   读返回的 stale/stale_since 判断时效，讲解时注明"磁盘旧快照于 <时间>"。
 
 
-## 指标意识（v0.4.3）
+## 指标意识
 - 用户可用指标栏"＋指标"自助开关内置 8 枚；AI 加指标走同一 add_indicator（subplot 族自动归属副图）；
 - 讲解时读 overview.indicators 知用户当前开了什么；改参走 update_indicator params（如 MA 周期档）。
+
+
+## 任务→工具组合索引
+| 任务 | 组合 |
+|---|---|
+| 探查图上有什么 | overview → 按需 get_kline / get_indicators |
+| 讲一段行情 | get_kline(区间) ＋ take_snapshot 看图说话 |
+| 多周期对比 | create_board(intervals=[...]) 或 create_timeframe → switch_timeframe 逐档 → get_kline |
+| 回测归因闭环 | 回测工具 → set_markers(亏损点) ＋ add_drawing(趋势线) ＋ set_view_range(聚焦亏损区间，先 switch 后 range) → take_snapshot |
+| 雷达盯盘配置 | watchlist_add(group_id 可选) → watchlist_list 核对；组管理 group_add/rename/remove(级联删行)/move |
+| 指标调参 | overview 拿 inst_id → update_indicator(params) → get_indicators 核对 |
+| 历史回溯 | backfill(源需 caps.backfill) → get_kline(早段) |
+| 写新脚本 | load_skill(datasource-authoring 或 indicator-authoring 按 kind) → save_script → run_script 试算 → add_indicator / create_board 上图 |
+| 股票代币/TradFi | binance 源搜 TENCENT/OPENAI/XAU（display 带官方分类标注）→ 建板即看；现货代币=B 后缀 symbol |
+| 用户视角验收 | get_current_view 知用户在看哪 → 操作后 take_snapshot 自证 |
