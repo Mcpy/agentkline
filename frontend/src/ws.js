@@ -1,3 +1,4 @@
+import { t } from './i18n.js';
 import { state, applyState } from './state.js';
 import { log } from './log.js';
 import { renderBoardTabs, renderTimeframeTabs, switchBoard, switchTimeframe, refreshIntervalOptions } from './ui.js';
@@ -15,23 +16,23 @@ import { refreshSearch } from './search.js';  // v0.4.2 fix: board_create/board_
 
         state.ws.onopen = () => {
             document.getElementById('ws-status').className = 'connected';
-            document.getElementById('ws-status').textContent = '● 已连接';
-            log('ws', 'WebSocket 已连接');
+            document.getElementById('ws-status').textContent = '● ' + t('bar.connected');
+            log('ws', t('ws.connected_log'));
             // v0.4.2 C：重连韧性——重连后主动全量拉雷达（断线期间增删/价格一次补齐）
             if (state.watchHooks && state.watchHooks.resync) {
-                try { state.watchHooks.resync(); } catch (e) { log('error', 'resync 失败: ' + e); }
+                try { state.watchHooks.resync(); } catch (e) { log('error', t('ws.resync_fail', {e})); }
             }
         };
 
         state.ws.onclose = () => {
             document.getElementById('ws-status').className = 'disconnected';
-            document.getElementById('ws-status').textContent = '● 已断开';
-            log('ws', 'WebSocket 断开，5秒后重连...');
+            document.getElementById('ws-status').textContent = '● ' + t('bar.disconnected');
+            log('ws', t('ws.reconnect_log'));
             setTimeout(connectWebSocket, 5000);
         };
 
         state.ws.onerror = (e) => {
-            log('error', 'WebSocket 错误');
+            log('error', t('ws.error_log'));
         };
 
         state.ws.onmessage = (event) => {
@@ -177,7 +178,7 @@ import { refreshSearch } from './search.js';  // v0.4.2 fix: board_create/board_
                 log('info', `kline_source: ${msg.board_id}/${msg.timeframe} → ${msg.script} (poll_s=${msg.poll_s ?? 'once'})`);
                 break;
             case 'scripts_changed':
-                log('info', `脚本库变化: ${msg.id}（搜索/列表下次读取生效）`);
+                log('info', t('ws.scripts_changed', {id: msg.id}));
                 break;
             case 'timeframe_create':
                 if (msg.board_id === state.currentBoard) {
@@ -232,11 +233,11 @@ import { refreshSearch } from './search.js';  // v0.4.2 fix: board_create/board_
                 log('ws', `subplot_remove: ${msg.name}`);
                 break;
             case 'datasource_error':
-                log('error', `数据源错误: ${msg.board_id}/${msg.timeframe}: ${msg.error}`);
+                log('error', t('ws.ds_error', {b: msg.board_id, tf: msg.timeframe, e: msg.error}));
                 break;
             case 'snapshot_request':
                 captureSnapshot();
-                log('ws', 'snapshot_request: 截图并上传');
+                log('ws', t('ws.snap_log'));
                 break;
             case 'quotes_update':
                 // 信封已解：msg 即 payload。经钩子转发，避免 ws→watchlist 循环依赖坏绑定
@@ -253,7 +254,7 @@ import { refreshSearch } from './search.js';  // v0.4.2 fix: board_create/board_
             case 'pong':
                 break;
             default:
-                log('ws', `未知消息: ${msg.type}`);
+                log('ws', t('ws.unknown_msg', {type: msg.type}));
         }
     }
 
@@ -269,7 +270,7 @@ import { refreshSearch } from './search.js';  // v0.4.2 fix: board_create/board_
         renderTimeframeTabs();
         renderChart();
         refreshIntervalOptions();
-        log('info', `初始化完成: ${state.currentBoard}/${state.currentTimeframe}`);
+        log('info', t('ws.init_done', {b: state.currentBoard, tf: state.currentTimeframe}));
     }
 
 

@@ -47,7 +47,7 @@ class DataSourceManager:
             "script": script,
             "params": params,
             "mode": "poll" if (poll_s and poll_s > 0) else "once",
-            "poll_s": poll_s if (poll_s and poll_s > 0) else None,
+            "poll_s": poll_s or 5,   # v0.4.4 bug10：缺失兜底 5，防 None 语义漂移
         }
         self.status.setdefault(key, {})
 
@@ -57,6 +57,7 @@ class DataSourceManager:
 
     def start(self, board_id: str, timeframe: str, script: str, params: dict, poll_s: int):
         """启动一个轮询数据源；script 为 id（kind/name）；配置与运行态分家"""
+        poll_s = poll_s or 5   # v0.4.4 bug10 choke 点兜底（调用方不传 poll_s 曾致线程不启=价格永冻）
         key = self._key(board_id, timeframe)
 
         # 先停止旧的
@@ -147,6 +148,13 @@ class DataSourceManager:
         if view.get("board_id") == config.get("board_id") and \
                 view.get("timeframe") == config.get("timeframe"):
             return base
+        # v0.4.4 bug11：无浏览器上报（headless/重启后未开页）时 current_view 空 →
+        # 原连当前槽也降频 300s = REST/MCP 消费方见"价格永冻"。空 view = 各板当前槽免降频。
+        if not view:
+            board = getattr(self.service, "state", None)
+            b = board.get_board(config.get("board_id")) if board else None
+            if b and getattr(b, "current_timeframe", None) == config.get("timeframe"):
+                return base
         return self._decay_s(config.get("timeframe"))
 
     def poke(self, board_id: str, timeframe: str):

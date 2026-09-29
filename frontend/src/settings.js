@@ -1,10 +1,11 @@
+import { t } from './i18n.js';
 import { state } from './state.js';
 import { log } from './log.js';
 
 // ============================================================
 // 指标设置弹窗：显示名 / 参数 / 颜色 / 线宽 / 线型
 // ============================================================
-const LINE_STYLES = [[0, '实线'], [1, '点线'], [2, '虚线']];
+const LINE_STYLES = [[0, t('set.solid')], [1, t('set.dotted')], [2, t('set.dashed')]];
 
 function post(name, payload) {
     return fetch(`/api/indicator/${encodeURIComponent(name)}`, {   // v0.4.1: flat body 约定
@@ -36,11 +37,11 @@ export async function openSettings(name) {
 
     const title = document.createElement('div');
     title.className = 'set-title';
-    title.textContent = `指标设置 · ${ind.display_name || name}`;
+    title.textContent = t('set.title', {name: ind.display_name || name});
     panel.appendChild(title);
 
     // ---- 显示名 ----
-    panel.appendChild(row(`<label>显示名</label>`));
+    panel.appendChild(row(`<div class="set-sec">${t('set.sec_name')}</div>`));
     const nameRow = row('');
     const nameInput = document.createElement('input');
     nameInput.type = 'text';
@@ -48,10 +49,10 @@ export async function openSettings(name) {
     nameInput.placeholder = name;
     const autoBtn = document.createElement('button');
     autoBtn.className = 'set-btn';
-    autoBtn.textContent = '恢复自动';
-    autoBtn.title = '按 根名(参数) 自动命名';
+    autoBtn.textContent = t('set.auto_btn');
+    autoBtn.title = t('set.auto_title');
     let wantAuto = false;
-    autoBtn.onclick = () => { wantAuto = true; nameInput.value = ''; nameInput.placeholder = '(自动)'; };
+    autoBtn.onclick = () => { wantAuto = true; nameInput.value = ''; nameInput.placeholder = t('set.auto_suffix'); };
     nameRow.appendChild(nameInput);
     nameRow.appendChild(autoBtn);
     panel.appendChild(nameRow);
@@ -68,7 +69,7 @@ export async function openSettings(name) {
     const params = { ...metaParams, ...(ind.params || {}) };
     const paramInputs = {};
     if (Object.keys(params).length) {
-        panel.appendChild(row(`<label>参数</label>`));
+        panel.appendChild(row(`<div class="set-sec">${t('set.sec_params')}</div>`));
         const grid = document.createElement('div');
         grid.className = 'set-grid';  // 双列网格，参数多时不撑高弹窗
         Object.entries(params).forEach(([k, v]) => {
@@ -80,7 +81,7 @@ export async function openSettings(name) {
             if (Array.isArray(v)) {
                 inp.type = 'text';
                 inp.value = v.join(',');
-                inp.title = '逗号分隔列表';
+                inp.title = t('set.list_ph');
                 inp.dataset.list = '1';
             } else {
                 inp.type = 'number';
@@ -97,7 +98,7 @@ export async function openSettings(name) {
     // ---- 样式 ----
     const isMulti = Array.isArray(ind.lines) && ind.lines.length > 0;
     const styleInputs = [];  // {getKey, color, width, style}
-    panel.appendChild(row(`<label>样式</label>`));
+    panel.appendChild(row(`<div class="set-sec">${t('set.sec_style')}</div>`));
     const mkStyle = (getCur, keyLabel, isHist) => {
         const cur = getCur() || {};
         const r = row('');
@@ -112,22 +113,22 @@ export async function openSettings(name) {
             auto = document.createElement('input');
             auto.type = 'checkbox';
             auto.checked = cur.autoColor !== false;
-            auto.title = '涨跌自动红绿';
+            auto.title = t('set.auto_rg');
             const sync = () => { color.disabled = auto.checked; };
             auto.onchange = sync; sync();
-            r.appendChild(auto); r.appendChild(hint('自动红绿'));
-            r.appendChild(hint('柱颜色'));
+            r.appendChild(auto); r.appendChild(hint(t('set.auto_rg')));
+            r.appendChild(hint(t('set.hist_color')));
         } else {
             width = document.createElement('input');
             width.type = 'number'; width.min = '1'; width.max = '6'; width.value = cur.lineWidth || 2; width.style.width = '46px';
             lstyle = document.createElement('select');
             LINE_STYLES.forEach(([v, t]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; lstyle.appendChild(o); });
             lstyle.value = String(cur.lineStyle ?? 0);
-            r.appendChild(hint('颜色'));
+            r.appendChild(hint(t('set.color')));
         }
         r.appendChild(color);
-        if (width) { r.appendChild(hint('粗细')); r.appendChild(width); }
-        if (lstyle) { r.appendChild(hint('样式')); r.appendChild(lstyle); }
+        if (width) { r.appendChild(hint(t('set.width'))); r.appendChild(width); }
+        if (lstyle) { r.appendChild(hint(t('set.style'))); r.appendChild(lstyle); }
         panel.appendChild(r);
         return { color, width, lstyle, auto, isHist };
     };
@@ -146,10 +147,10 @@ export async function openSettings(name) {
     foot.className = 'set-foot';
     const saveBtn = document.createElement('button');
     saveBtn.className = 'set-btn primary';
-    saveBtn.textContent = '保存';
+    saveBtn.textContent = t('set.save');
     const cancelBtn = document.createElement('button');
     cancelBtn.className = 'set-btn';
-    cancelBtn.textContent = '取消';
+    cancelBtn.textContent = t('set.cancel');
     foot.appendChild(saveBtn); foot.appendChild(cancelBtn);
     panel.appendChild(foot);
 
@@ -195,10 +196,10 @@ export async function openSettings(name) {
             }
             await post(name, p2);
 
-            log('info', `指标更新: ${name}`);
+            log('info', t('set.updated', {name}));
             modal.remove();
         } catch (e) {
-            log('error', `指标更新失败: ${e}`);
+            log('error', t('set.update_fail', {e}));
         }
     };
 

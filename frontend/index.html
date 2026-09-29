@@ -4,14 +4,14 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
-    <title>AgentKline - 交互式K线画板</title>
+    <title data-i18n="doc.title">AgentKline - 交互式K线画板</title>
 </head>
 <body>
     <!-- 顶部工具栏：画板 -->
     <div class="toolbar">
         <h1>📊 AgentKline</h1>
-        <span id="board-add" class="board-add" title="增加画板：搜索标的，一步建板即锁">＋</span>
-        <span class="bar-label">画板:</span>
+        <span id="board-add" class="board-add" data-i18n-title="bar.add_board_title" title="增加画板：搜索标的，一步建板即锁">＋</span>
+        <span class="bar-label" data-i18n="bar.boards">画板:</span>
         <div class="board-tabs" id="board-tabs"></div>
         <div class="status-bar">
             <span id="ws-status" class="disconnected">● 未连接</span>
@@ -21,45 +21,45 @@
 
     <!-- 周期栏（独立一行） -->
     <div class="timeframe-bar">
-        <span class="bar-label">周期:</span>
+        <span class="bar-label" data-i18n="bar.tfs">周期:</span>
         <div class="timeframe-tabs" id="timeframe-tabs"></div>
     </div>
 
     <!-- 指标栏（显隐切换） -->
     <div class="indicator-bar" id="indicator-bar">
-        <span class="label">指标:</span>
+        <span class="label" data-i18n="bar.indicators">指标:</span>
     </div>
 
     <!-- 主区域：左绘图工具栏 + 图表 -->
     <div class="main-row">
         <div class="draw-toolbar" id="draw-toolbar">
-            <div class="draw-toolbar-title">划线<br>工具</div>
-            <div class="draw-tool" data-tool="hline" title="水平线">─</div>
-            <div class="draw-tool" data-tool="trend" title="趋势线">╱</div>
+            <div class="draw-toolbar-title" data-i18n-html="bar.draw_tools">划线<br>工具</div>
+            <div class="draw-tool" data-tool="hline" data-i18n-title="draw.hline" title="水平线">─</div>
+            <div class="draw-tool" data-tool="trend" data-i18n-title="draw.trend" title="趋势线">╱</div>
         </div>
         <div class="chart-container">
             <div id="main-chart"></div>
             <div id="subplots"></div>
             <div class="loading-overlay" id="loading">
-                <div class="loading-text">正在执行脚本...</div>
+                <div class="loading-text" data-i18n="chart.loading">正在执行脚本...</div>
             </div>
             <div class="empty-state" id="empty-state">
-                <h2>暂无数据</h2>
-                <p>此现场尚未配置 K 线来源（AI 可通过 set_kline_source 配置）</p>
-                <button id="empty-search-btn" class="btn-primary">🔍 搜索标的，进入新现场</button>
+                <h2 data-i18n="empty.title">暂无数据</h2>
+                <p data-i18n="empty.desc">此现场尚未配置 K 线来源（AI 可通过 set_kline_source 配置）</p>
+                <button id="empty-search-btn" class="btn-primary" data-i18n="empty.search_btn">🔍 搜索标的，进入新现场</button>
             </div>
             <div class="empty-state" id="guide" style="display:none;">
                 <h2>📊 AgentKline</h2>
-                <p>AI 操作图表，人看和决策。第一步：选一个标的，建立你的分析现场。</p>
-                <button id="guide-search-btn" class="btn-primary">🔍 搜索标的，建立现场</button>
-                <p class="hint">搜索后点行 = 一步建板即锁；AI 随后即可在该现场上叠加分析</p>
+                <p data-i18n="guide.desc">AI 操作图表，人看和决策。第一步：选一个标的，建立你的分析现场。</p>
+                <button id="guide-search-btn" class="btn-primary" data-i18n="guide.search_btn">🔍 搜索标的，建立现场</button>
+                <p class="hint" data-i18n="guide.hint">搜索后点行 = 一步建板即锁；AI 随后即可在该现场上叠加分析</p>
             </div>
         </div>
         <div class="radar-wrap" id="radar-wrap">
-            <button class="radar-tab" id="radar-tab" title="雷达：点击拉出/收回盯盘面板"><span>雷达</span></button>
+            <button class="radar-tab" id="radar-tab" data-i18n-title="bar.radar_tab_title" title="雷达：点击拉出/收回盯盘面板"><span data-i18n="bar.radar_tab">雷达</span></button>
             <aside class="watch-drawer" id="watch-drawer">
-                <div class="watch-head"><span>雷达 · 盯盘</span><span id="watch-addgroup" class="watch-addgroup" title="新建分组">＋</span><span id="watch-search" class="watch-search" title="搜索标的（建现场/加盯）">🔍</span></div>
-                <input id="watch-filter" class="watch-filter" type="text" placeholder="过滤行（symbol/源）…" />
+                <div class="watch-head"><span data-i18n="bar.radar">雷达 · 盯盘</span><span id="watch-addgroup" class="watch-addgroup" data-i18n-title="wl.addgroup_title" title="新建分组">＋</span><span id="watch-search" class="watch-search" data-i18n-title="wl.search_title" title="搜索标的（建现场/加盯）">🔍</span></div>
+                <input id="watch-filter" class="watch-filter" type="text" data-i18n-ph="wl.filter_ph" placeholder="过滤行（symbol/源）…" />
                 <div id="watch-rows" class="watch-rows"></div>
             </aside>
         </div>
@@ -68,9 +68,9 @@
     <!-- 标的搜索弹层（铭牌/引导页/空态共用） -->
     <div class="overlay" id="search-overlay" style="display:none;">
         <div class="overlay-card search-card">
-            <input id="search-input" placeholder="搜索标的（如 BTC）…  高级：@源名 裸符号" autocomplete="off" />
+            <input id="search-input" data-i18n-ph="search.ph" placeholder="搜索标的（如 BTC）…  高级：@源名 裸符号" autocomplete="off" />
             <div id="search-results" class="search-results"></div>
-            <div class="overlay-foot"><button id="search-close" class="btn-ghost">关闭 (Esc)</button></div>
+            <div class="overlay-foot"><button id="search-close" class="btn-ghost" data-i18n="search.close_btn">关闭 (Esc)</button></div>
         </div>
     </div>
 
@@ -80,7 +80,7 @@
             <div id="id-card-body"></div>
             <div class="overlay-foot">
                 <button id="idcard-new-scene" class="btn-primary">🔍 进入新现场…</button>
-                <button id="idcard-close" class="btn-ghost">关闭</button>
+                <button id="idcard-close" class="btn-ghost" data-i18n="common.close">关闭</button>
             </div>
         </div>
     </div>
@@ -91,7 +91,7 @@
     <!-- 日志面板（默认折叠） -->
     <div class="log-panel collapsed" id="log-panel">
         <div class="log-header">
-            <span>📋 日志</span>
+            <span data-i18n="bar.log">📋 日志</span>
             <span style="margin-left: auto;" id="log-toggle">▲</span>
         </div>
         <div class="log-content collapsed" id="log-content"></div>

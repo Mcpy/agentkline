@@ -4,6 +4,7 @@ import { isIntraday, formatTimeCN } from './format.js';
 import { log } from './log.js';
 import { LightweightCharts } from './lwc.js';
 import { openSettings } from './settings.js';
+import { t, localizeBoardName } from './i18n.js';
 import { showContextMenu } from './menu.js';
 import { attachDrawingInteraction } from './draw_interact.js';
 
@@ -88,12 +89,12 @@ function _ensureResizeObserver() {
 
     function renderIndicatorBar() {
         const bar = document.getElementById('indicator-bar');
-        bar.innerHTML = '<span class="label">指标:</span>';
+        bar.innerHTML = `<span class="label">${t('bar.indicators')}</span>`;
         // v0.4.3：传统面板式开关入口——点＋指标出菜单，✓ 态再点即删
         const addBtn = document.createElement('span');
         addBtn.className = 'ind-add';
-        addBtn.textContent = '＋指标';
-        addBtn.title = '内置指标开关：点一下出现，再点一下消失';
+        addBtn.textContent = t('bar.add_indicator');
+        addBtn.title = t('ind.menu_title');
         addBtn.onclick = (e) => { e.stopPropagation(); openIndicatorMenu(e); };
         bar.appendChild(addBtn);
 
@@ -101,7 +102,7 @@ function _ensureResizeObserver() {
         if (names.length === 0) {
             const empty = document.createElement('span');
             empty.style.cssText = 'font-size:11px;color:#555;';
-            empty.textContent = '（暂无指标）';
+            empty.textContent = t('ind.none');
             bar.appendChild(empty);
             return;
         }
@@ -111,7 +112,7 @@ function _ensureResizeObserver() {
             const visible = state.visibility[name] !== false;
             const chip = document.createElement('div');
             chip.className = `ind-chip ${visible ? '' : 'hidden'}`;
-            chip.title = '点击切换显示/隐藏';
+            chip.title = t('ind.toggle_hint');
 
             const dot = document.createElement('span');
             dot.className = 'dot';
@@ -121,8 +122,8 @@ function _ensureResizeObserver() {
             const txt = document.createElement('span');
             txt.className = 'name';
             let label = displayName(ind);
-            if (ind.subplot) label += ' [副图]';
-            if (ind.scope === 'timeframe') label += ' [本周期]';
+            if (ind.subplot) label += t('ind.subplot_tag');
+            if (ind.scope === 'timeframe') label += t('ind.scope_tag');
             txt.textContent = label;
             chip.appendChild(txt);
 
@@ -135,7 +136,7 @@ function _ensureResizeObserver() {
             const gear = document.createElement('span');
             gear.className = 'gear';
             gear.textContent = '⚙';
-            gear.title = '设置参数/样式';
+            gear.title = t('ind.settings');
             gear.onclick = (e) => { e.stopPropagation(); openSettings(name); };
             chip.appendChild(gear);
 
@@ -144,8 +145,8 @@ function _ensureResizeObserver() {
             chip.oncontextmenu = (e) => {
                 e.preventDefault(); e.stopPropagation();
                 showContextMenu(e.clientX, e.clientY, [
-                    { label: '设置参数/样式', onClick: () => openSettings(name) },
-                    { label: '删除指标', danger: true, onClick: () => deleteIndicator(name) },
+                    { label: t('ind.settings'), onClick: () => openSettings(name) },
+                    { label: t('ind.delete'), danger: true, onClick: () => deleteIndicator(name) },
                 ]);
             };
             bar.appendChild(chip);
@@ -165,26 +166,26 @@ function _ensureResizeObserver() {
         updateSubplotVisibility();
 
         renderIndicatorBar();
-        log('info', `指标 ${name} ${nowVisible ? '显示' : '隐藏'}`);
+        log('info', t('ind.toggled', {name, st: nowVisible ? t('ind.shown') : t('ind.hidden')}));
     }
 
     function deleteIndicator(name) {
         const url = `/api/indicator/${encodeURIComponent(name)}?board_id=${encodeURIComponent(state.currentBoard)}&timeframe=${encodeURIComponent(state.currentTimeframe)}`;
         fetch(url, { method: 'DELETE' })
             .then(r => r.json())
-            .then(d => { if (d.error) log('error', `删除指标失败: ${d.error}`); });
+            .then(d => { if (d.error) log('error', t('ind.delete_fail', {e: d.error})); });
     }
 
     // v0.4.3 内置指标开关菜单（传统面板手感：一族一开关）
     const BUILTIN_INDICATORS = [
-        { ref: 'indicator/sma',  label: 'MA 均线组',   group: '主图' },
-        { ref: 'indicator/ema',  label: 'EMA 指数均线', group: '主图' },
-        { ref: 'indicator/bb',   label: 'BOLL 布林带',  group: '主图' },
-        { ref: 'indicator/sar',  label: 'SAR 抛物转向', group: '主图' },
-        { ref: 'indicator/macd', label: 'MACD',       group: '副图' },
-        { ref: 'indicator/kdj',  label: 'KDJ',        group: '副图' },
-        { ref: 'indicator/rsi',  label: 'RSI',        group: '副图' },
-        { ref: 'indicator/obv',  label: 'OBV 能量潮',  group: '副图' },
+        { ref: 'indicator/sma',  label: t('ind.ma'),   group: t('ind.mainpane') },
+        { ref: 'indicator/ema',  label: t('ind.ema'), group: t('ind.mainpane') },
+        { ref: 'indicator/bb',   label: t('ind.boll'),  group: t('ind.mainpane') },
+        { ref: 'indicator/sar',  label: t('ind.sar'), group: t('ind.mainpane') },
+        { ref: 'indicator/macd', label: 'MACD',       group: t('ind.subpane') },
+        { ref: 'indicator/kdj',  label: 'KDJ',        group: t('ind.subpane') },
+        { ref: 'indicator/rsi',  label: 'RSI',        group: t('ind.subpane') },
+        { ref: 'indicator/obv',  label: t('ind.obv'),  group: t('ind.subpane') },
     ];
 
     function _instsOf(ref) {
@@ -194,7 +195,7 @@ function _ensureResizeObserver() {
     }
 
     function openIndicatorMenu(e) {
-        if (!state.currentBoard) { log('info', '先建现场再加指标'); return; }
+        if (!state.currentBoard) { log('info', t('ind.need_board')); return; }
         const items = BUILTIN_INDICATORS.map(b => {
             const on = _instsOf(b.ref).length > 0;
             return {
@@ -211,14 +212,14 @@ function _ensureResizeObserver() {
             for (const id of insts) {
                 const r = await fetch(`/api/indicator/${encodeURIComponent(id)}?board_id=${encodeURIComponent(state.currentBoard)}&timeframe=${encodeURIComponent(state.currentTimeframe)}`,
                                       { method: 'DELETE' });
-                if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || '删指标失败'); }
+                if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || t('ind.delete_fail_short')); }
             }
             return;
         }
         const r = await fetch('/api/indicator', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ board_id: state.currentBoard, timeframe: state.currentTimeframe, script: ref }) });
-        if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || '加指标失败'); }
+        if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || t('ind.add_fail')); }
     }
 
     // ============================================================
@@ -240,7 +241,7 @@ function _ensureResizeObserver() {
         try {
             _renderChartInner();
         } catch (e) {
-            log('error', `图表渲染错误: ${e.message}`);
+            log('error', t('chart.render_err', {e: e.message}));
             console.error(e);
         }
     }
@@ -449,7 +450,7 @@ function _ensureResizeObserver() {
         }));
     }
 
-    // 构建指标线数据。null 用"空白点"(仅time)占位，保留时间槽，保证主副图时间轴对齐
+    // 构建指标线数据。null 用t('draw.blank_hint')(仅time)占位，保留时间槽，保证主副图时间轴对齐
     function buildSeriesData(values, type, style) {
         return values.map((v, i) => {
             const time = Math.floor(state.ohlcv[i]?.timestamp / 1000) || i;
@@ -516,7 +517,7 @@ function _ensureResizeObserver() {
 
         // 恢复视口（bug2 根治）：仅在前插(shift>0)或追加(newTotal>prevTotal)时动视口；
         // 原地 tick 更新（total 不变）绝不碰视口——否则 wasAtRight 分支的 +2 右边距
-        // 会被计入下一次的 width，每 tick 蠕变 +2 格（"价格一变就往右缩一小格"）
+        // 会被计入下一次的 width，每 tick 蠕变 +2 格（t('chart.shift_hint')）
         const newTotal = state.ohlcv.length;
         if (prevRange && (shift > 0 || newTotal > prevTotal)) {
             state._programmaticRange = true;  // 程序化恢复，不触发历史加载
@@ -611,9 +612,9 @@ function _ensureResizeObserver() {
                 { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ limit: 200 }) }
             );
             const d = await r.json();
-            if (d.prepended > 0) log('info', `📜 加载历史 +${d.prepended} 根`);
+            if (d.prepended > 0) log('info', t('chart.backfill_ok', {n: d.prepended}));
         } catch (e) {
-            log('error', `加载历史失败: ${e.message}`);
+            log('error', t('chart.backfill_fail', {e: e.message}));
         } finally {
             historyLoading = false;
         }
@@ -779,13 +780,14 @@ function _ensureResizeObserver() {
     // ============ 图例（OHLC + 指标读数，随十字标更新，移开显示最新） ============
     function fmtP(v) { return (v == null || !isFinite(v)) ? '--' : Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
     function fmtC(v) { if (v == null || !isFinite(v)) return '--'; const a = Math.abs(v);
-        if (a >= 1e8) return (v / 1e8).toFixed(2) + '亿'; if (a >= 1e4) return (v / 1e4).toFixed(2) + '万';
+        if (a >= 1e8) return (v / 1e8).toFixed(2) + t('fmt.yi'); if (a >= 1e4) return (v / 1e4).toFixed(2) + t('fmt.wan');
         return Number(v).toLocaleString('en-US', { maximumFractionDigits: 2 }); }
 
     // v0.4 优化点1 补漏：图例符号位用统一显示名（源名: 标的名），不露裸板 id
     function boardLabel() {
         const bd = (state.boards || []).find(b => b.id === state.currentBoard);
-        return (bd && (bd.name || bd.identity_display)) || state.currentBoard || '';
+        // ②层展示翻译 choke 点：图例标题等全用面（binance tag 永续→Perp 等）
+        return localizeBoardName((bd && (bd.name || bd.identity_display)) || state.currentBoard || '');
     }
 
     function legendIndex(timeSec) {
@@ -818,7 +820,7 @@ function _ensureResizeObserver() {
         return `<span class="lg">${dot(c)}${displayName(ind)} <b>${fmtP(ind.values ? ind.values[i] : null)}</b></span>`;
     }
 
-    // 图例按"一个指标一行"纵向排布；行数超过 maxRows 时回退横排（.inline）
+    // 图例按t('ind.one_line_hint')纵向排布；行数超过 maxRows 时回退横排（.inline）
     function setLegend(key, host, sub, rows, maxRows) {
         const el = ensureLegendEl(key, host, sub);
         if (!el) return;
@@ -855,7 +857,7 @@ function _ensureResizeObserver() {
 
     function setupCrosshairSync() {
         Object.entries(state.charts).forEach(([key, chart]) => {
-            // bug4：价格更新后 setData 会让 LWC 对"带程序化十字准星的图"重发 crosshairMove，
+            // bug4：价格更新后 setData 会让 LWC 对t('chart.crosshair_hint')重发 crosshairMove，
             // 同步链会把它当源反向传播，把用户悬停图的水平线 setCrosshairPosition 吸附到K线值。
             // 用真实鼠标在哪个图上（mousemove/mouseleave）判定唯一同步源，程序化重发一律忽略。
             // v0.4.3 bug3：charts 键='subplot_<name>'/'volume'，subplotDivs 键=裸名——
@@ -993,7 +995,7 @@ function _ensureResizeObserver() {
         const volDiv = document.createElement('div');
         volDiv.className = 'subplot';
         volDiv.style.height = '110px';
-        volDiv.innerHTML = `<div class="subplot-title">成交量 VOL</div>`;
+        volDiv.innerHTML = `<div class="subplot-title">${t('chart.vol')}</div>`;
         container.appendChild(volDiv);
         state.volDiv = volDiv;
         const intradayV = isIntraday(state.currentTimeframe);
@@ -1209,7 +1211,7 @@ function setVisibleTimeRange(fromSec, toSec) {
         body.innerHTML = `<h3>${sym ? `${stem}: ${sym}` : (stem || bid)} · 🔒 已锁定</h3>
 <pre>${JSON.stringify({ identity: lock.identity || {}, script: lock.script,
     board: bid, intervals: b.intervals || [] }, null, 2)}</pre>
-<p class="hint">一标的一板：换标的/换源请「进入新现场」；分析层锚定本坐标系，不归档不克隆</p>`;
+<p class="hint">${t('lock.hint')}</p>`;
         document.getElementById('id-card').style.display = 'flex';
     }
 

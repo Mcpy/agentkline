@@ -1,3 +1,4 @@
+import { t } from './i18n.js';
 import { state } from './state.js';
 import { log } from './log.js';
 import { showContextMenu } from './menu.js';
@@ -120,7 +121,7 @@ function persist(d) {
     const url = `/api/drawing/${encodeURIComponent(d.id)}`;
     fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...d, board_id: state.currentBoard, timeframe: state.currentTimeframe }) })
-        .then(r => r.json()).then(r => { if (r.error) log('error', `更新划线失败: ${r.error}`); });
+        .then(r => r.json()).then(r => { if (r.error) log('error', t('draw.update_fail', {e: r.error})); });
 }
 
 // ---------- 拖拽 ----------
@@ -229,10 +230,10 @@ function openStyleDialog(d) {
 // ---------- 右键菜单 ----------
 function showDrawingMenu(x, y, d) {
     showContextMenu(x, y, [
-        { label: '改变样式', onClick: () => openStyleDialog(d) },
-        { label: '删除划线', danger: true, onClick: () => {
+        { label: t('draw.style'), onClick: () => openStyleDialog(d) },
+        { label: t('draw.delete'), danger: true, onClick: () => {
             fetch(`/api/drawing/${encodeURIComponent(d.id)}?board_id=${encodeURIComponent(state.currentBoard)}&timeframe=${encodeURIComponent(state.currentTimeframe)}`, { method: 'DELETE' })
-                .then(r => r.json()).then(r => { if (r.error) log('error', `删除划线失败: ${r.error}`); });
+                .then(r => r.json()).then(r => { if (r.error) log('error', t('draw.delete_fail', {e: r.error})); });
             clearSelection();
         } },
     ]);
@@ -322,7 +323,7 @@ function updatePreview(x, y) {
 function addDrawingRemote(drawing) {
     fetch('/api/drawing', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...drawing, board_id: state.currentBoard, timeframe: state.currentTimeframe }) })
-        .then(r => r.json()).then(r => { if (r.error) log('error', `添加划线失败: ${r.error}`); });
+        .then(r => r.json()).then(r => { if (r.error) log('error', t('draw.add_fail', {e: r.error})); });
 }
 
 function xyToTimePrice(x, y) {

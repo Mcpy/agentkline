@@ -382,7 +382,15 @@ body {
 .set-btn:hover { border-color: var(--border-strong); }
 .set-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .set-btn.primary:hover { background: var(--accent-hover); }
-.set-foot { justify-content: flex-end; margin-top: 8px; }
+.set-foot { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px;
+              padding-top: 12px; border-top: 1px solid var(--border); }
+/* v0.4.5 指标设置弹窗视觉分级：section 小标题条（与行内 label 区分） */
+.set-sec { width: 100%; font-size: 11px; letter-spacing: 1.5px; color: #8ab4f8;
+           margin: 14px 0 6px; padding: 3px 8px; background: rgba(79,195,247,.08);
+           border-left: 3px solid #4fc3f7; border-radius: 3px; }
+.set-sec:first-child { margin-top: 8px; }
+.set-btn:not(.primary) { background: transparent; }
+.set-btn:not(.primary):hover { background: var(--bg-input); }
 
 /* ============ 日志面板 ============ */
 .log-panel {
@@ -639,3 +647,10 @@ body {
 .ov-name.ov-cur::before { content: '✓ '; color: #4fc3f7; }
 .ov-x { flex: none; color: #666; padding: 0 4px; }
 .ov-x:hover { color: #ef5350; }
+
+/* v0.4.5 语言 toggle */
+.timeframe-bar { position: relative; }
+.lang-toggle { background: transparent; border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text-dim); font-size: 11px; padding: 2px 8px; cursor: pointer;
+  margin-left: auto; align-self: center; }
+.lang-toggle:hover { border-color: var(--border-strong); color: var(--text); }

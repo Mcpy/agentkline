@@ -102,6 +102,7 @@ def mcp_tools(base: str, session: requests.Session) -> list:
 
 
 def test(port: int, token: str = None):
+    import time as _tm
     base = f"http://localhost:{port}"
     s = requests.Session()
     if token:
@@ -468,7 +469,15 @@ def test(port: int, token: str = None):
     # bug5：空 view 上报=清空（tab 隐藏语义）→ 可见槽也降频；再报回→命中
     s.post(f"{base}/api/view", json={})
     r = s.get(f"{base}/api/board/pf3/timeframe/1d/kline_source")
-    check("空 view 清空→全降频", (r.json().get("kline_source") or {}).get("eff_poll_s") == 300, r.text[:150])
+    check("空 view→当前槽免降频(bug11)", (r.json().get("kline_source") or {}).get("eff_poll_s") == 5, r.text[:150])
+    eff = None
+    for _ in range(10):   # 后台槽配置就位等待
+        r = s.get(f"{base}/api/board/pf3/timeframe/15m/kline_source")
+        eff = (r.json().get("kline_source") or {}).get("eff_poll_s")
+        if eff is not None:
+            break
+        _tm.sleep(1)
+    check("空 view→非当前槽仍降频 60", eff == 60, f"eff={eff}")
     s.post(f"{base}/api/view", json={"board_id": "pf3", "timeframe": "1d"})
     r = s.get(f"{base}/api/board/pf3/timeframe/1d/kline_source")
     check("报回→命中 5s", (r.json().get("kline_source") or {}).get("eff_poll_s") == 5, r.text[:150])
@@ -533,6 +542,20 @@ def test(port: int, token: str = None):
 
     # === 11.5 MCP 提示词黑话门禁（v0.4.4） ===
     print("📜 MCP docstring 黑话门禁")
+    # bug10 回归：建板不传 poll_s 也必须有活轮询线程（曾致 set_config 后线程不启=价格永冻）
+    r = s.post(f"{base}/api/board", json={"id": "bug10probe", "symbol": "B10/USDT",
+                                                "source": "datasource/mock_btc"})
+    check("bug10 建板(无 poll_s) 200", r.status_code == 200, r.text)
+    # 线程启动铁证 = 服务 log 的 started 行（e2e 自带 WS 上报者，headless 语义在 e2e 内不成立，
+    # bug11 免降频断言保留性能段 pf3 对（WS 连接前 view 真空窗））
+    import glob as _g
+    logf = "/tmp/agentkline.log"
+    body = open(logf, errors="ignore").read() if _g.os.path.exists(logf) else ""
+    check("bug10 轮询线程启动(started log)", "DataSource started: bug10probe:1d" in body,
+          "log 无 started 行")
+    s.delete(f"{base}/api/board/bug10probe")
+
+
     section_docstring_jargon(check)
 
     # === 12. 清理 ===
@@ -561,6 +584,26 @@ def section_docstring_jargon(check):
                 for kw in dec.keywords:
                     if kw.arg == "mcp" and getattr(kw.value, "value", True) is False:
                         mcp_on = False
+    # ---- v0.4.5 前端 i18n 门禁：组件零中文硬编码（串表唯一源=i18n.js） ----
+    import re as _re2
+    bad_i18n = []
+    src_dir = os.path.join(os.path.dirname(__file__), "frontend", "src")
+    for fn in sorted(os.listdir(src_dir)):
+        if not fn.endswith(".js") or fn == "i18n.js":
+            continue  # locales/ 语言包=串表唯一源，核心 i18n.js 零串
+        for i, line in enumerate(open(os.path.join(src_dir, fn), encoding="utf-8"), 1):
+            if "lang() === 'zh'" in line or "切换到中文" in line:
+                continue  # 语言 toggle 的语言名=合法例外
+            for m in _re2.finditer(r"['\"`][^'\"`]*[\u4e00-\u9fa5][^'\"`]*['\"`]", line):
+                bad_i18n.append(f"{fn}:{i}:{m.group(0)[:30]}")
+    check("前端组件零中文硬编码(i18n 门禁)", not bad_i18n, str(bad_i18n[:5]))
+
+    # ---- MCP 面黑话门禁 ----
+    import ast as _ast
+    _tree = _ast.parse(open(os.path.join(os.path.dirname(__file__),
+                                         "agentkline", "api", "tools.py")).read())
+    bad = []
+    for node in _ast.walk(_tree):
         if not mcp_on:
             continue
         doc = _ast.get_docstring(node) or ""

@@ -1,6 +1,7 @@
 import { state, applyState } from './state.js';
 import { log } from './log.js';
 import { showContextMenu } from './menu.js';
+import { t, localizeBoardName } from './i18n.js';
 import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoard 删光路径调 renderChart，漏 import 曾致 ReferenceError 断链（老 bug1 回归真根因之一）
 
 
@@ -11,16 +12,18 @@ import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoa
 
     // v0.4.4 tab 短名：去源 stem → 摘 tag → 去 /USDT → CJK 取首段 / 拉丁取末段
     function shortBoardName(name) {
-        let t = (name || '').split(':').slice(1).join(':').trim() || name || '';
+        // 局部变量禁名 t（与 i18n t 函数 shadow 曾致整渲染链 throw = 板/周期行全空）
+        let src = (name || '').split(':').slice(1).join(':').trim() || name || '';
         let tag = '';
-        for (const [k, v] of [['TradFi永续', 'TradFi'], ['股票永续', '股票'], [' 现货', '现货'], [' 永续', '永续']]) {
-            if (t.endsWith(k)) { tag = v; t = t.slice(0, -k.length).trim(); break; }
+        // 解析键 = binance display 数据契约（TradFi永续/股票永续/ 现货/ 永续）；\u 转义保 i18n 门禁零字面量
+        for (const [k, v] of [['TradFi\u6c38\u7eed', 'tag.tradfi'], ['\u80a1\u7968\u6c38\u7eed', 'tag.stock'], [' \u73b0\u8d27', 'tag.spot'], [' \u6c38\u7eed', 'tag.perp']]) {
+            if (src.endsWith(k)) { tag = v; src = src.slice(0, -k.length).trim(); break; }
         }
-        t = t.replace(/\/USDT$/, '').trim();
-        const parts = t.split(/\s+/).filter(Boolean);
+        src = src.replace(/\/USDT$/, '').trim();
+        const parts = src.split(/\s+/).filter(Boolean);
         let core = parts.length && /[\u4e00-\u9fa5]/.test(parts[0]) ? parts[0]
-                 : (parts[parts.length - 1] || t);
-        return (core + (tag ? ' ' + tag : '')).trim() || name || '';
+                 : (parts[parts.length - 1] || src);
+        return (core + (tag ? ' ' + t(tag) : '')).trim() || name || '';
     }
 
     function closeOverflow() {
@@ -37,9 +40,9 @@ import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoa
             row.className = 'tf-menu-item ov-row';
             const nm = document.createElement('span');
             nm.className = 'ov-name' + (b.id === state.currentBoard ? ' ov-cur' : '');
-            nm.textContent = b.name || b.id;
+            nm.textContent = localizeBoardName(b.name || b.id);
             const x = document.createElement('span');
-            x.className = 'ov-x'; x.textContent = '×'; x.title = '删除画板';
+            x.className = 'ov-x'; x.textContent = '×'; x.title = t('tab.close_board');
             x.onclick = (e) => { e.stopPropagation(); closeOverflow(); deleteBoard(b.id); };
             row.append(nm, x);
             row.onclick = () => { closeOverflow(); switchBoard(b.id); };
@@ -57,25 +60,25 @@ import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoa
         const tab = document.createElement('div');
         tab.className = `board-tab ${board.id === state.currentBoard ? 'active' : ''}`;
         tab.textContent = shortBoardName(board.name || board.id);
-        tab.title = board.name || board.id;   // 全名 tooltip
+        tab.title = localizeBoardName(board.name || board.id);   // 全名 tooltip（②层展示翻译）
         tab.onclick = () => switchBoard(board.id);
             // 右键菜单：板身份证卡（锁信息入口，铭牌已撤）/ 删除画板
             tab.oncontextmenu = (e) => {
                 e.preventDefault(); e.stopPropagation();
                 const items = [];
                 if ((state.locks || {})[board.id]) {
-                    items.push({ label: '板身份证卡', onClick: () => openIdCard(board.id) });
+                    items.push({ label: t('ctx.idcard'), onClick: () => openIdCard(board.id) });
                 }
                 const lk = (state.locks || {})[board.id] || {};
                 if (lk.script && (lk.identity || {}).symbol) {
-                    items.push({ label: '加入雷达', onClick: () => {
+                    items.push({ label: t('ctx.watch'), onClick: () => {
                         fetch('/api/watchlist/rows', { method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ source: lk.script, symbol: lk.identity.symbol }) })
                             .then(r => r.json()).then(d => { if (d.error) log('error', d.error); });
                     } });
                 }
-                items.push({ label: '删除画板', danger: true, onClick: () => deleteBoard(board.id) });
+                items.push({ label: t('ctx.delete_board'), danger: true, onClick: () => deleteBoard(board.id) });
                 showContextMenu(e.clientX, e.clientY, items);
             };
         return tab;
@@ -97,7 +100,7 @@ import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoa
             ob.className = 'board-tab board-overflow' +
                 (cur && overflow.includes(cur) ? ' on' : '');
             ob.textContent = `…+${overflow.length} ▾`;
-            ob.title = '更多画板';
+            ob.title = t('tab.overflow_title');
             ob.onclick = (e) => { e.stopPropagation(); openOverflowMenu(ob, overflow); };
             container.appendChild(ob);
         }
@@ -107,7 +110,7 @@ import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoa
         fetch(`/api/board/${boardId}`, { method: 'DELETE' })
             .then(r => r.json())
             .then(d => {
-                if (d.error) { log('error', `删除画板失败: ${d.error}`); return; }
+                if (d.error) { log('error', t('err.delete_board', {e: d.error})); return; }
                 // 乐观更新：本客户端标签立即消失，不等 WS（WS 断连/漏推也自洽；
                 // 其他客户端靠 board_remove 广播，重连靠 init 全量同步）
                 state.boards = state.boards.filter(b => b.id !== boardId);
@@ -143,7 +146,7 @@ import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoa
             tab.oncontextmenu = (e) => {
                 e.preventDefault(); e.stopPropagation();
                 showContextMenu(e.clientX, e.clientY, [
-                    { label: '删除周期', danger: true, onClick: () => deleteTimeframe(tf) },
+                    { label: t('tf.delete'), danger: true, onClick: () => deleteTimeframe(tf) },
                 ]);
             };
             container.appendChild(tab);
@@ -154,7 +157,7 @@ import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoa
             const add = document.createElement('div');
             add.className = 'tf-tab tf-add';
             add.textContent = '+';
-            add.title = '添加周期（仅实时源）';
+            add.title = t('tf.add_title');
             add.onclick = () => openIntervalMenu(add);
             container.appendChild(add);
         }
@@ -170,8 +173,8 @@ import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoa
             } catch (e) { return; }
         }
         closeIntervalMenu();
-        if (!opts.online) { log('info', '离线源不支持添加周期'); return; }
-        if (!opts.addable || !opts.addable.length) { log('info', '支持的周期已全部添加'); return; }
+        if (!opts.online) { log('info', t('tf.offline_unsupported')); return; }
+        if (!opts.addable || !opts.addable.length) { log('info', t('tf.all_added')); return; }
         const menu = document.createElement('div');
         menu.className = 'tf-menu'; menu.id = 'tf-menu';
         opts.addable.forEach(iv => {
@@ -184,7 +187,7 @@ import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoa
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ interval: iv }) })
                     .then(r => r.json())
-                    .then(d => { if (d.error) log('error', `加周期失败: ${d.error}`); });
+                    .then(d => { if (d.error) log('error', t('err.add_tf', {e: d.error})); });
             };
             menu.appendChild(item);
         });
@@ -217,7 +220,7 @@ import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoa
     function deleteTimeframe(tf) {
         fetch(`/api/board/${state.currentBoard}/timeframe/${tf}`, { method: 'DELETE' })
             .then(r => r.json())
-            .then(d => { if (d.error) log('error', `删除周期失败: ${d.error}`); });
+            .then(d => { if (d.error) log('error', t('err.del_tf', {e: d.error})); });
     }
 
     function switchBoard(boardId) {
@@ -225,7 +228,7 @@ import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoa
             .then(r => r.json())
             .then(data => {
                 if (data.error) {
-                    log('error', `切换画板失败: ${data.error}`);
+                    log('error', t('err.switch_board', {e: data.error}));
                 }
             });
     }
@@ -235,7 +238,7 @@ import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoa
             .then(r => r.json())
             .then(data => {
                 if (data.error) {
-                    log('error', `切换时间周期失败: ${data.error}`);
+                    log('error', t('err.switch_tf', {e: data.error}));
                 }
             });
     }

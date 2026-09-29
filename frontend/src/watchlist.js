@@ -3,6 +3,7 @@
 // 结构：state.watch.groups = [{id,name,rows:[行视图]}]；quotes_update 平面行按 key 合并
 // 行点击：有板=切现场；无板=一步建板即锁（复用搜索流建板语义）
 // ============================================================
+import { t } from './i18n.js';
 import { state } from './state.js';
 import { log } from './log.js';
 import { switchBoard } from './ui.js';
@@ -55,7 +56,7 @@ export function applyQuotes(rows) {
     (state.watch.groups || []).forEach(g => {
         g.rows = (g.rows || []).map(r => { const u = m.get(rowKey(r)); if (u) { hit = true; return u; } return r; });
     });
-    if (!hit && !(state.watch.groups || []).length) applyStructure([{ id: 'default', name: '默认', rows: rows || [] }]);
+    if (!hit && !(state.watch.groups || []).length) applyStructure([{ id: 'default', name: t('wl.default'), rows: rows || [] }]);
     if (state.watch.open) renderWatchlist();
 }
 
@@ -73,7 +74,7 @@ export async function removeRow(source, symbol) {
     renderWatchlist();
     const r = await fetch(`/api/watchlist/rows?source=${encodeURIComponent(source)}&symbol=${encodeURIComponent(symbol)}`,
                           { method: 'DELETE' });
-    if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || '移盯失败'); syncWatchlist(); }
+    if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || t('wl.move_fail')); syncWatchlist(); }
 }
 
 export async function moveRow(source, symbol, toGroup, index) {
@@ -90,7 +91,7 @@ export async function moveRow(source, symbol, toGroup, index) {
     const r = await fetch('/api/watchlist/move', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ source, symbol, group_id: toGroup, index: index == null ? null : index }) });
-    if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || '移组失败'); }
+    if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || t('wl.movegroup_fail')); }
     syncWatchlist();
 }
 
@@ -107,7 +108,7 @@ function beginAddGroup() {
     const box = document.getElementById('watch-rows');
     if (!box || box.querySelector('.wg-input')) return;
     const inp = document.createElement('input');
-    inp.className = 'wg-input'; inp.placeholder = '组名，Enter 创建';
+    inp.className = 'wg-input'; inp.placeholder = t('wl.group_ph');
     box.prepend(inp); inp.focus();
     const done = async (ok) => {
         const name = (inp.value || '').trim();
@@ -116,7 +117,7 @@ function beginAddGroup() {
         const r = await fetch('/api/watchlist/groups', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name }) });
-        if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || '建组失败'); }
+        if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || t('wl.creategroup_fail')); }
         syncWatchlist();
     };
     inp.onkeydown = e => { if (e.key === 'Enter') done(true); if (e.key === 'Escape') done(false); };
@@ -142,7 +143,7 @@ function renameGroup(g) {
         const r = await fetch('/api/watchlist/groups/rename', {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ group_id: g.id, name }) });
-        if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || '重命名失败'); }
+        if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || t('wl.rename_fail')); }
         syncWatchlist();
     };
     inp.onkeydown = e => {
@@ -156,7 +157,7 @@ function renameGroup(g) {
 async function removeGroup(g) {
     // v0.4.3 裁决变更：直删无 confirm 弹窗；组内盯盘行级联删除（服务端语义）
     const r = await fetch(`/api/watchlist/groups?group_id=${encodeURIComponent(g.id)}`, { method: 'DELETE' });
-    if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || '删组失败'); }
+    if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || t('wl.deletegroup_fail')); }
     syncWatchlist();
 }
 
@@ -186,8 +187,8 @@ export function renderWatchlist() {
         hd.className = 'watch-group-head';
         hd.dataset.gid = g.id;
         hd.innerHTML = `<span class="wg-caret">${coll ? '▸' : '▾'}</span>`
-            + `<span class="wg-name">${g.name}</span><span class="wg-count">${rows.length}</span>`
-            + (g.id !== 'default' ? '<span class="wg-menu" title="组管理">⋮</span>' : '');
+            + `<span class="wg-name">${g.name === '\u9ed8\u8ba4' ? t('wl.default') : g.name}</span><span class="wg-count">${rows.length}</span>`
+            + (g.id !== 'default' ? `<span class="wg-menu" title="${t('wl.group_menu')}">⋮</span>` : '');
         hd.onclick = (e) => {
             if (e.target.classList.contains('wg-menu')) return;
             if (f) return;  // 过滤态不折叠
@@ -198,8 +199,8 @@ export function renderWatchlist() {
         if (menu) menu.onclick = (e) => {
             e.stopPropagation();
             showContextMenu(e.clientX, e.clientY, [
-                { label: '重命名…', onClick: () => renameGroup(g) },
-                { label: `删除组（连同 ${g.rows.length} 行盯盘）`, danger: true, onClick: () => removeGroup(g) },
+                { label: t('wl.rename'), onClick: () => renameGroup(g) },
+                { label: t('wl.delete_group', {n: g.rows.length}), danger: true, onClick: () => removeGroup(g) },
             ]);
         };
 
@@ -233,8 +234,8 @@ export function renderWatchlist() {
     if (!total) {
         const hint = document.createElement('div');
         hint.className = 'watch-empty';
-        hint.textContent = f ? '无匹配行。' :
-            '雷达空着。搜索行点"＋盯"、或板标签右键"加入雷达"。';
+        hint.textContent = f ? t('wl.nomatch') :
+            t('wl.empty');
         box.appendChild(hint);
     }
 }
@@ -251,17 +252,17 @@ function rowEl(r, g) {
         <span class="watch-price">${r.price == null ? '—' : r.price.toLocaleString()}</span>
         ${pct}
         <span class="watch-board">${r.has_board ? '●' : ''}</span>
-        ${r.stale ? '<span class="watch-stale" title="连续取价失败">stale</span>' : ''}`;
+        ${r.stale ? `<span class="watch-stale" title="${t('wl.fetch_fail')}">stale</span>` : ''}`;
     // hover 卡：24h 高/低/量（quote.extra 白捡数据；无 extra 不显示）
     if (r.extra && (r.extra.high != null || r.extra.low != null)) {
         const card = document.createElement('div');
         card.className = 'watch-extra';
-        card.textContent = `24h 高 ${fmtN(r.extra.high)} · 低 ${fmtN(r.extra.low)}`
-            + (r.extra.quote_volume != null ? ` · 量 ${fmtN(r.extra.quote_volume)}` : '');
+        card.textContent = t('wl.hl', {h: fmtN(r.extra.high), l: fmtN(r.extra.low)})
+            + (r.extra.quote_volume != null ? t('wl.vol', {v: fmtN(r.extra.quote_volume)}) : '');
         div.appendChild(card);
     }
     const x = document.createElement('span');
-    x.className = 'watch-x'; x.textContent = '✕'; x.title = '移出雷达';
+    x.className = 'watch-x'; x.textContent = '✕'; x.title = t('wl.remove');
     x.onclick = (e) => { e.stopPropagation(); removeRow(r.source, r.symbol); };
     div.appendChild(x);
     div.ondragstart = e => {
@@ -272,16 +273,16 @@ function rowEl(r, g) {
     div.ondragend = () => div.classList.remove('dragging');
     div.oncontextmenu = (e) => {
         e.preventDefault(); e.stopPropagation();
-        const items = [{ label: '移出雷达', danger: true, onClick: () => removeRow(r.source, r.symbol) }];
+        const items = [{ label: t('wl.remove'), danger: true, onClick: () => removeRow(r.source, r.symbol) }];
         (state.watch.groups || []).forEach(gg => {
-            if (gg.id !== g.id) items.push({ label: `移到组 ▸ ${gg.name}`, onClick: () => moveRow(r.source, r.symbol, gg.id, null) });
+            if (gg.id !== g.id) items.push({ label: t('wl.move_to', {g: gg.name}), onClick: () => moveRow(r.source, r.symbol, gg.id, null) });
         });
         showContextMenu(e.clientX, e.clientY, items);
     };
     div.onclick = async () => {
         if (r.has_board && r.board_id) { switchBoard(r.board_id); return; }
         const newId = await createBoardFor(r.symbol, r.source);
-        if (newId) { switchBoard(newId); log('info', `雷达行一步建板并进入: ${r.symbol}`); }
+        if (newId) { switchBoard(newId); log('info', t('wl.board_enter', {sym: r.symbol})); }
     };
     return div;
 }

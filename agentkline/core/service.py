@@ -800,6 +800,7 @@ class AgentKlineService:
         - IDENTITY 键之外的 params = 操作参数，自由改（改即重拉）；仅 poll_s 变 = 不碰数据
         - 指标随附打包参已废除——指标唯一入口 add_indicator"""
         params = params or {}
+        poll_s = poll_s or 5   # v0.4.4 bug10：入口归一，保 noop 恒等比较语义（None vs 5 曾致 noop 变 poll_only）
         board = self.state.get_board(board_id)
         if not board:
             return {"error": f"Board '{board_id}' not found"}
@@ -831,8 +832,7 @@ class AgentKlineService:
         if cur and cur["script"] == script and cur["params"] == params:
             self.datasource.stop_sync(board_id, tf)
             self.datasource.set_config(board_id, tf, script, params, poll_s)
-            if poll_s and poll_s > 0:
-                self.datasource.start(board_id, tf, script, params, poll_s)
+            self.datasource.start(board_id, tf, script, params, poll_s)  # bug10：无条件启线程
             self._bc({"type": "kline_source_set", "board_id": board_id, "timeframe": tf,
                       "script": script, "params": params, "poll_s": poll_s})
             return {"status": "ok", "poll_only": True}
@@ -860,8 +860,7 @@ class AgentKlineService:
         self.state.set_ohlcv(board_id, tf, data)
         self.recompute_indicators(board_id, tf)
         self.datasource.set_config(board_id, tf, script, params, poll_s)
-        if poll_s and poll_s > 0:
-            self.datasource.start(board_id, tf, script, params, poll_s)
+        self.datasource.start(board_id, tf, script, params, poll_s)  # bug10：无条件启线程
         # 首拉也是拉：status.last_fetch 语义=最近一次真实取数（去重/新鲜度判定依赖）
         st = self.datasource.status.setdefault(self.datasource._key(board_id, tf), {})
         st["last_fetch"] = datetime.now().isoformat()

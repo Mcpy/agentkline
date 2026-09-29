@@ -1,3 +1,4 @@
+import { t, localizeDisplay } from './i18n.js';
 import { state } from './state.js';
 import { log } from './log.js';
 import { showContextMenu } from './menu.js';
@@ -45,7 +46,7 @@ import { showContextMenu } from './menu.js';
         lastQuery = q;
         const box = _el('search-results');
         q = (q || '').trim();
-        box.innerHTML = '<div class="search-row hint">搜索中…（首次使用需建索引，约 5-10s）</div>';
+        box.innerHTML = `<div class="search-row hint">${t('search.building')}</div>`;
         // 高级输入：@源名 裸符号 → 直达行（无徽章源也能配）
         if (q.startsWith('@')) {
             const m = q.slice(1).match(/^(\S+)\s+(.*)$/);
@@ -68,14 +69,14 @@ import { showContextMenu } from './menu.js';
             const d = await r.json();
             if (d.sources) setSrcList(d.sources);
             if (!d.rows || d.rows.length === 0) {
-                box.innerHTML = '<div class="search-row hint">无匹配（索引=CAPS.symbols 源；无徽章源用 @源名 裸符号）</div>';
+                box.innerHTML = `<div class="search-row hint">${t('search.nomatch')}</div>`;
                 return;
             }
             renderRows(d.rows);
         } catch (e) {
             const msg = e.name === 'AbortError'
-                ? '搜索超时（索引构建中或源网络限流窗）——请稍后重试'
-                : `搜索失败: ${e.message}`;
+                ? t('search.timeout')
+                : t('search.fail', {e: e.message});
             box.innerHTML = `<div class="search-row hint">${msg}</div>`;
         }
     }
@@ -92,7 +93,7 @@ import { showContextMenu } from './menu.js';
         const rf = document.createElement('button');
         rf.id = 'search-refresh'; rf.className = 'src-refresh';
         rf.innerHTML = '<span class="rf-ic">⟳</span>';  // 图标独立 span：旋转只转图标不转按钮框
-        rf.title = '重建搜索索引（手动刷新）';
+        rf.title = t('search.refresh_title');
         rf.onclick = (e) => {
             e.stopPropagation();
             if (rf.classList.contains('spinning')) return;
@@ -104,7 +105,7 @@ import { showContextMenu } from './menu.js';
         btn.onclick = (e) => {
             e.stopPropagation();  // 防全局 document click 关闭刚弹出的菜单
             const r = btn.getBoundingClientRect();
-            const items = [{ label: '全部源', onClick: () => pickSrc(null) }];
+            const items = [{ label: t('search.all_sources'), onClick: () => pickSrc(null) }];
             (_srcList || []).forEach(x => items.push({ label: x.display, onClick: () => pickSrc(x.id) }));
             showContextMenu(r.left, r.bottom + 4, items);
         };
@@ -119,7 +120,7 @@ import { showContextMenu } from './menu.js';
     function updateSrcBtn() {
         const btn = _el('search-srcbtn'); if (!btn) return;
         const cur = (_srcList || []).find(x => x.id === _srcFilter);
-        btn.textContent = cur ? `源: ${cur.display} ▾` : '源: 全部 ▾';
+        btn.textContent = cur ? t('search.src_cur', {name: cur.display}) : t('search.src_all');
     }
 
     // 源清单随 search 响应附带的 sources 字段（不另开端点）
@@ -135,16 +136,16 @@ import { showContextMenu } from './menu.js';
             const div = document.createElement('div');
             div.className = 'search-row';
             div.dataset.key = `${row.source}|${row.symbol}`;
-            div.innerHTML = `<span class="sr-symbol">${row.display || row.symbol}</span>
+            div.innerHTML = `<span class="sr-symbol">${localizeDisplay(row.display) || row.symbol}</span>
                 <span class="sr-source">${row.source}</span>
-                <span class="sr-badge">${row.has_board ? '● 已有现场' : ''}</span>
-                <span class="sr-watch ${row.watched ? 'on' : ''}" title="${row.watched ? '已在雷达：点击取消盯盘' : '加入雷达盯盘'}">${row.watched ? '盯盘中' : '＋盯'}</span>`;
+                <span class="sr-badge">${row.has_board ? t('search.has_board') : ''}</span>
+                <span class="sr-watch ${row.watched ? 'on' : ''}" title="${row.watched ? t('search.watched_hint') : t('search.watch_add')}">${row.watched ? t('search.watching') : t('search.plus_watch')}</span>`;
             div.querySelector('.sr-watch').addEventListener('click', async (e) => {
                 e.stopPropagation();
                 if (row.watched) {   // 取消盯盘：DELETE 走 query
                     const url = `/api/watchlist/rows?source=${encodeURIComponent(row.source)}&symbol=${encodeURIComponent(row.symbol)}`;
                     const r = await fetch(url, { method: 'DELETE' });
-                    if (!r.ok) { const d = await r.json().catch(() => ({})); toast(d.detail || '操作失败'); }
+                    if (!r.ok) { const d = await r.json().catch(() => ({})); toast(d.detail || t('search.op_fail')); }
                     else refreshSearch();
                     return;
                 }
@@ -152,7 +153,7 @@ import { showContextMenu } from './menu.js';
                 const gs = state.watch.groups || [];
                 if (gs.length > 1) {
                     showContextMenu(e.clientX, e.clientY, gs.map(g => ({
-                        label: `＋盯 · ${g.name}`, onClick: () => doWatchAdd(row, g.id) })));
+                        label: t('search.plus_watch_group', {g: g.name}), onClick: () => doWatchAdd(row, g.id) })));
                     return;
                 }
                 await doWatchAdd(row, null);
@@ -171,7 +172,7 @@ import { showContextMenu } from './menu.js';
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ source: row.source, symbol: row.symbol,
                                    ...(groupId ? { group_id: groupId } : {}) }) });
-        if (!r.ok) { const d = await r.json().catch(() => ({})); toast(d.detail || '操作失败'); }
+        if (!r.ok) { const d = await r.json().catch(() => ({})); toast(d.detail || t('search.op_fail')); }
         else refreshSearch();   // 行内盯盘态即时翻转
     }
 
@@ -185,10 +186,10 @@ import { showContextMenu } from './menu.js';
         const badge = div.querySelector('.sr-badge');
         if (on) {
             div.classList.add('creating');
-            badge.innerHTML = '<span class="sr-spin"></span> 正在创建现场…';
+            badge.innerHTML = `<span class="sr-spin"></span> ${t('search.creating')}`;
         } else {
             div.classList.remove('creating');
-            badge.innerHTML = row.has_board ? '● 已有现场' : '';
+            badge.innerHTML = row.has_board ? t('search.has_board') : '';
         }
     }
 
@@ -203,7 +204,7 @@ import { showContextMenu } from './menu.js';
         if (res.status === 409) { toastLocked(await res.json()); return null; }
         if (!res.ok) {
             const d = await res.json().catch(() => ({}));
-            toast(`建板失败: ${d.detail || res.status}`);
+            toast(t('search.create_fail', {e: d.detail || res.status}));
             return null;
         }
         const d = await res.json().catch(() => ({}));
@@ -240,16 +241,16 @@ import { showContextMenu } from './menu.js';
         }
         const r2 = await createBoardFor(row.symbol, row.source);
         if (r2) {
-            refreshSearch();   // 行徽标动态变"● 已有现场"（弹层保持开，用户亲眼看到加载→完成）
+            refreshSearch();   // 行徽标动态变t('search.has_board')（弹层保持开，用户亲眼看到加载→完成）
             await fetch(`/api/board/${r2.id}`);  // 背后进入新现场；弹层不抢关，Esc/关闭或再点行离开
-            log('info', `搜索建板即锁: ${r2.id} ← ${row.symbol}@${row.source}`);
+            log('info', t('search.created_log', {id: r2.id, sym: row.symbol, src: row.source}));
         }
     }
 
     // ============ 撞锁 Toast + 一键改道（摩擦面 B） ============
     export function toastLocked(detail) {
         const sug = (detail && detail.suggestion) || {};
-        toast(detail?.error || 'SOURCE_LOCKED', '用此配置新建画板', async () => {
+        toast(detail?.error || 'SOURCE_LOCKED', t('search.recreate'), async () => {
             const id = 'b_' + String(sug.symbol || 'x').replace(/[^a-zA-Z0-9]+/g, '_').toLowerCase()
                 + '_' + Date.now().toString(36);
             const res = await fetch('/api/board', {
@@ -263,7 +264,7 @@ import { showContextMenu } from './menu.js';
                 closeSearch();
             } else {
                 const d = await res.json().catch(() => ({}));
-                toast(`改道建板失败: ${d.detail || res.status}`);
+                toast(t('search.recreate_fail', {e: d.detail || res.status}));
             }
         });
     }
