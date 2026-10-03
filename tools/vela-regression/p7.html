@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>P7 — 施工单未验四点补验</title>
+<style>body{background:#14161a;color:#ddd;font:12px monospace;margin:0}#chart{height:420px}#results{white-space:pre-wrap;padding:8px}</style></head>
+<body>
+<div id="chart"></div>
+<div id="results">running…</div>
+<script src="./package/dist/vela.global.min.js"></script>
+<script src="./mock-data.js"></script>
+<script>
+const R = [];
+const log = (...a) => { R.push(a.join(' ')); document.getElementById('results').textContent = R.join('\n'); console.log(...a); };
+const V = window.Vela;
+
+(async () => {
+    try {
+        const feed = {
+            load: async (cfg) => { log('feed.load', cfg.symbol); return MOCK.ohlcv.slice(); },
+            subscribe: (cfg, onBar) => () => {},
+        };
+        const chart = new V.Vela('#chart', { symbol: 'AAA/USD', timeframe: '1d', theme: 'dark' }, { dataFeed: feed });
+        await chart.ready();
+
+        // ① attribution 开关（归因甲案）
+        try {
+            chart.renderer && chart.renderer.set && chart.renderer.set('attribution', false);
+            log('① chart.renderer.set("attribution",false): 调用无异常（水印目验见截图）');
+        } catch (e) { log('① renderer.set 报错:', e.message); }
+        log('① chart.renderer 面:', chart.renderer ? Object.keys(chart.renderer).join(',') || '(无自有键,查原型)' : 'undefined');
+        if (chart.renderer) {
+            let o = chart.renderer, ks = [];
+            while (o && o !== Object.prototype) {
+                for (const k of Object.getOwnPropertyNames(o)) {
+                    const d = Object.getOwnPropertyDescriptor(o, k);
+                    if (d && typeof d.value === 'function') ks.push(k);   // 只读描述符，不触发 getter
+                }
+                o = Object.getPrototypeOf(o);
+            }
+            log('① renderer 方法:', [...new Set(ks)].join(','));
+        }
+
+        // ② viewport:changed / ③ market:changed 事件
+        const fired = {};
+        for (const n of ['viewport:changed', 'market:changed', 'range:changed']) {
+            try { chart.on(n, () => { fired[n] = (fired[n] || 0) + 1; }); } catch (e) { log('订阅', n, '报错:', e.message); }
+        }
+        chart.setVisibleRange({ from: MOCK.ohlcv[100].time, to: MOCK.ohlcv[200].time });
+        await new Promise(r => setTimeout(r, 800));
+        log('② viewport:changed fired:', fired['viewport:changed'] || 0, '| range:changed:', fired['range:changed'] || 0);
+        try {
+            const t = setTimeout(() => log('③ setMarket 5s 未 resolve（park?）'), 5000);
+            await chart.setMarket({ symbol: 'BBB/USD', timeframe: '1d' });
+            clearTimeout(t);
+            await new Promise(r => setTimeout(r, 800));
+            log('③ setMarket resolve ok; market:changed fired:', fired['market:changed'] || 0);
+        } catch (e) { log('③ setMarket 报错:', e.message); }
+
+        // ④ marks group 可见性开关
+        chart.marks.defineGroup({ id: 'trades', label: '交易点' });
+        chart.marks.add({ id: 'm1', time: MOCK.ohlcv[100].time, group: 'trades', glyph: { color: '#26a69a', letter: 'B' } });
+        let g1, g2, g3;
+        try { g1 = chart.marks.isGroupVisible('trades'); chart.marks.setGroupVisible('trades', false); g2 = chart.marks.isGroupVisible('trades'); chart.marks.setGroupVisible('trades', true); g3 = chart.marks.isGroupVisible('trades'); }
+        catch (e) { log('④ 报错:', e.message); }
+        log('④ isGroupVisible 初/关/开:', g1, g2, g3);
+        await new Promise(r => setTimeout(r, 500));
+        log('P7 结论：四点补验完成，见上');
+    } catch (e) { log('P7 ERROR:', e && e.message, (e && e.stack || '').split('\n')[1]); }
+})();
+</script>
+</body>
+</html>

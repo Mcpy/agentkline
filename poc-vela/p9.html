@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>P9 — histogram/columns kind 隔离</title>
+<style>body{background:#14161a;color:#ddd;font:12px monospace;margin:0}#chart{height:500px}#results{white-space:pre-wrap;padding:8px}</style></head>
+<body>
+<div id="chart"></div>
+<div id="results">running…</div>
+<script src="./package/dist/vela.global.min.js"></script>
+<script src="./mock-data.js"></script>
+<script>
+const R = [];
+const log = (...a) => { R.push(a.join(' ')); document.getElementById('results').textContent = R.join('\n'); console.log(...a); };
+const V = window.Vela;
+const kinds = ['histogram', 'columns', 'line'];
+kinds.forEach((k, i) => V.registerNativeIndicator({
+    type: 'p9-' + k, title: 'P9 ' + k, paneHint: 'new', overlay: false, legend: false,
+    inputsSchema: () => [], defaultInputs: () => ({}),
+    create: () => ({
+        start(ctx) {
+            ctx.emit({ series: [{
+                id: 's-' + k, title: k, paneId: '', kind: k,
+                points: MOCK.ohlcv.map(b => ({ time: b.time, value: b.volume, color: b.close >= b.open ? 'rgba(38,166,154,0.8)' : 'rgba(239,83,80,0.8)' })),
+                style: { color: '#4fc3f7', width: 1, lineStyle: 'solid', base: 0 },
+            }]});
+            log(k, 'emit ok');
+        },
+        onBars() {}, setInputs() {}, suspend() {}, resume() {}, stop() {},
+    }),
+}));
+(async () => {
+    const chart = new V.Vela('#chart', { data: MOCK.ohlcv.slice(), symbol: 'M/U', timeframe: '1d', theme: 'dark' });
+    await chart.ready();
+    kinds.forEach(k => chart.addNativeIndicator('p9-' + k, { id: 'p9-' + k }));
+    await new Promise(r => setTimeout(r, 1200));
+    const ins = chart.inspect();
+    log('inspect:', JSON.stringify(ins.indicators.map(x => ({ t: x.nativeType, pane: x.paneId, series: x.series }))));
+    log('P9 完成（目验三 pane 哪个有柱）');
+})();
+</script>
+</body>
+</html>

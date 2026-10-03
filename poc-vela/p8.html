@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>P8 — crosshair 桥 + screenshot 返回型</title>
+<style>body{background:#14161a;color:#ddd;font:12px monospace;margin:0}#chart{height:420px}#results{white-space:pre-wrap;padding:8px}</style></head>
+<body>
+<div id="chart"></div>
+<div id="results">running…</div>
+<script src="./package/dist/vela.global.min.js"></script>
+<script src="./mock-data.js"></script>
+<script>
+const R = [];
+const log = (...a) => { R.push(a.join(' ')); document.getElementById('results').textContent = R.join('\n'); console.log(...a); };
+(async () => {
+    const chart = new window.Vela.Vela('#chart', { data: MOCK.ohlcv.slice(), symbol: 'M/U', timeframe: '1d', theme: 'dark' });
+    await chart.ready();
+    // ① crosshair 桥：覆写 renderer.onCrosshairMove 看是否被框架调用
+    let crossN = 0, lastParam = null;
+    const orig = chart.renderer.onCrosshairMove;
+    chart.renderer.onCrosshairMove = function (param) { crossN++; lastParam = param; return orig ? orig.call(this, param) : undefined; };
+    // 模拟鼠标移到图中央
+    const el = document.getElementById('chart');
+    const rect = el.getBoundingClientRect();
+    el.dispatchEvent(new PointerEvent('pointermove', { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2, bubbles: true }));
+    el.dispatchEvent(new MouseEvent('mousemove', { clientX: rect.left + rect.width / 2, clientY: rect.height / 2 + rect.top, bubbles: true }));
+    await new Promise(r => setTimeout(r, 800));
+    log('① onCrosshairMove 覆写被调次数:', crossN, '| param 键:', lastParam ? Object.keys(lastParam).join(',') : 'none');
+    if (lastParam) log('① param 样例:', JSON.stringify(lastParam).slice(0, 300));
+    // ② screenshot 返回型
+    const shot = chart.renderer.screenshot ? chart.renderer.screenshot() : null;
+    log('② renderer.screenshot() 返回:', shot ? shot.constructor.name : 'null', shot && shot.width ? `${shot.width}x${shot.height}` : '');
+    log('P8 完成');
+})();
+</script>
+</body>
+</html>

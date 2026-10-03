@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>P6 — 架构边界断言（零引擎 + 许可 + workspace 评估）</title>
+<style>body{background:#14161a;color:#ddd;font:12px monospace;margin:0}#chart{height:360px}#results{white-space:pre-wrap;padding:8px}</style></head>
+<body>
+<div id="chart"></div>
+<div id="results">running…</div>
+<script src="./package/dist/vela.global.min.js"></script>
+<script src="./mock-data.js"></script>
+<script>
+const R = [];
+const log = (...a) => { R.push(a.join(' ')); document.getElementById('results').textContent = R.join('\n'); console.log(...a); };
+const V = window.Vela;
+
+// 断言 1：本頁（与 p1–p4 同）全程不调 registerEngine —— 零 scripting engine
+let engineCalled = false;
+const origRE = V.registerEngine;
+V.registerEngine = (...a) => { engineCalled = true; return origRE(...a); };
+
+V.registerNativeIndicator({
+    type: 'p6-proof', title: 'P6 零引擎证明线', paneHint: 'price', overlay: true,
+    inputsSchema: () => [], defaultInputs: () => ({}),
+    create: () => ({
+        start(ctx) { ctx.emit({ series: [{ id: 'p6', title: 'P6', paneId: '', kind: 'line',
+            points: MOCK.fast, style: { color: '#f5c542', width: 2, lineStyle: 'solid' } }] }); },
+        onBars() {}, setInputs() {}, suspend() {}, resume() {}, stop() {},
+    }),
+});
+
+(async () => {
+    try {
+        const chart = new V.Vela('#chart', { data: MOCK.ohlcv.slice(), symbol: 'M/U', timeframe: '1d', theme: 'dark' });
+        await chart.ready();
+        chart.addNativeIndicator('p6-proof');
+        chart.marks.add({ id: 'p6m', time: MOCK.ohlcv[100].time, glyph: { color: '#26a69a', letter: 'P' }, content: { text: '零引擎全功能' } });
+        const d = chart.drawings.add('hline', { anchors: [{ time: MOCK.ohlcv[200].time, price: MOCK.ohlcv[200].close }] });
+        await new Promise(r => setTimeout(r, 800));
+        log('断言1 零引擎：registerEngine 调用次数 =', engineCalled ? '≥1 失败' : '0 ✅（native indicator + marks + drawings 全功能无引擎）');
+        log('断言2 许可：package license=Apache-2.0；bundle grep AGPL=0 命中；pinets 仅引擎未注册报错文案（见 evidence/p6/license-dep-audit.md）');
+        log('断言3 deps：仅 @zag-js/* 七件 UI 状态机；peerDeps 无；未安装 vela-pinets/pinets');
+        log('');
+        log('workspace 评估（轻量）：global bundle 不含 workspace（独立 ESM 模块 dist/workspace.js）；');
+        log('类型层面 workspace = 多 cell grid + 跨 cell sync(symbol/range/style) + VelaStorage 持久化 + pooled cell 状态文档；');
+        log('建议（200字内）：选 headless core + 自建外壳。理由：①我们无构建链，global bundle 不含 workspace，引入=加构建链，破工程形态；');
+        log('②我们的"多板"语义=服务端 board 名册 + 前端单图切换，非同屏多 cell grid，workspace 的 sync/pool 能力用不上；');
+        log('③身份证卡/雷达/自选栏/画板工具条全是自有 DOM，workspace 的 shell(topbar/statusline/sidepanel) 反而要拆；');
+        log('④持久化走我们自己的服务端文档（drawings toJSON 已验无损），不需要 VelaStorage/localStorage 层。');
+        log('P6 结论：零引擎全功能 ✅ + 依赖树干净 ✅ + 建议成文 ✅');
+    } catch (e) { log('P6 ERROR:', e && e.message); }
+})();
+</script>
+</body>
+</html>

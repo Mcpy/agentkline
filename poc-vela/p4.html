@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>P4 — 交易标记（marks panel + MarkerSeries + 聚簇）</title>
+<style>
+body{background:#14161a;color:#ddd;font:12px monospace;margin:0}
+#chart{width:100%;height:560px}
+#results{white-space:pre-wrap;padding:8px;border-top:1px solid #333}
+</style></head>
+<body>
+<div id="chart"></div>
+<div id="results">running…</div>
+<script src="./package/dist/vela.global.min.js"></script>
+<script src="./mock-data.js"></script>
+<script>
+const R = [];
+const log = (...a) => { R.push(a.join(' ')); document.getElementById('results').textContent = R.join('\n'); console.log(...a); };
+const V = window.Vela;
+
+// 方案乙：MarkerSeries（native indicator 通道画买卖箭头）
+V.registerNativeIndicator({
+    type: 'poc-trade-arrows', title: 'PoC 交易箭头', paneHint: 'price', overlay: true, legend: false,
+    inputsSchema: () => [], defaultInputs: () => ({}),
+    create: () => ({
+        start(ctx) {
+            ctx.emit({ series: [{
+                id: 'trades', title: 'Trades', paneId: '', kind: 'markers',
+                markers: MOCK.trades.map((t, i) => ({
+                    time: t.time,
+                    position: t.side === 'buy' ? 'belowBar' : 'aboveBar',
+                    shape: t.side === 'buy' ? 'arrowUp' : 'arrowDown',
+                    color: t.side === 'buy' ? '#26a69a' : '#ef5350',
+                    text: t.side === 'buy' ? 'B' : 'S',
+                    size: 'normal',
+                })),
+            }]});
+            log('乙 MarkerSeries 买卖箭头 emit ok（legend:false host-owned）');
+        },
+        onBars() {}, setInputs() {}, suspend() {}, resume() {}, stop() {},
+    }),
+});
+
+(async () => {
+    try {
+        const chart = new V.Vela('#chart', { data: MOCK.ohlcv.slice(), symbol: 'MOCK/USD', timeframe: '1d', theme: 'dark' });
+        await chart.ready();
+        chart.setVisibleRange({ from: MOCK.ohlcv[0].time, to: MOCK.ohlcv[499].time });
+
+        // ---- 方案甲：marks.add + panel content（reason 可读可点） ----
+        chart.marks.defineGroup({ id: 'trades', label: '交易点' });
+        MOCK.trades.forEach((t, i) => {
+            chart.marks.add({
+                id: 'trade-' + i, time: t.time, group: 'trades',
+                title: (t.side === 'buy' ? '买入' : '卖出') + ' #' + (i + 1),
+                tooltip: t.reason,
+                glyph: { shape: t.side === 'buy' ? 'circle' : 'circle', color: t.side === 'buy' ? '#26a69a' : '#ef5350', letter: t.side === 'buy' ? 'B' : 'S' },
+                content: { panel: { items: [
+                    { type: 'field', label: '方向', value: t.side },
+                    { type: 'field', label: '价格', value: t.price.toFixed(2) },
+                    { type: 'field', label: 'reason', value: t.reason },
+                    { type: 'text', text: '—— AI 决策依据 ——' },
+                ]}},
+            });
+        });
+        log('甲 marks.add ×' + MOCK.trades.length + '（panel content 含 reason）');
+
+        // 聚簇：同 bar 双标
+        chart.marks.add({ id: 'dup-1', time: MOCK.trades[0].time, group: 'trades',
+            title: '同bar第二标', glyph: { color: '#ffa726', letter: '2' },
+            content: { text: '聚簇验证第二条' } });
+        log('聚簇种子已加（与 trade-0 同 bar）');
+
+        // mark:click 事件
+        let clicked = null;
+        chart.on('mark:click', (e) => { clicked = e; log('mark:click 事件 fired:', JSON.stringify(e).slice(0, 200)); });
+
+        // 方案乙挂载
+        chart.addNativeIndicator('poc-trade-arrows');
+        await new Promise(r => setTimeout(r, 1000));
+
+        log('marks.all():', chart.marks.all().length);
+        log('group 定义:', chart.marks.groupDefinitions ? JSON.stringify(chart.marks.groupDefinitions()) : '(运行时缺 groupDefinitions，类型层有——记录遗留)');
+        log('P4 结论：甲(marks+panel+聚簇+click) 与 乙(MarkerSeries 箭头) 均已挂载；弹窗视觉见截图（click 需交互，事件订阅就绪）');
+    } catch (e) { log('P4 ERROR:', e && e.message, (e && e.stack || '').split('\n')[1]); }
+})();
+</script>
+</body>
+</html>

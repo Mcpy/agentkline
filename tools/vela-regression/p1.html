@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>P1 — 数据线/副图渲染（values 直喂）</title>
+<style>
+body{background:#14161a;color:#ddd;font:12px monospace;margin:0}
+#chart{width:100%;height:640px}
+#results{white-space:pre-wrap;padding:8px;border-top:1px solid #333}
+</style></head>
+<body>
+<div id="chart"></div>
+<div id="results">running…</div>
+<script src="./package/dist/vela.global.min.js"></script>
+<script src="./mock-data.js"></script>
+<script>
+const R = [];
+const log = (...a) => { R.push(a.join(' ')); document.getElementById('results').textContent = R.join('\n'); console.log(...a); };
+const V = window.Vela;
+
+function lineSeries(id, title, points, color, width) {
+    return { id, title, paneId: '', kind: 'line', points,
+             style: { color, width: width || 2, lineStyle: 'solid' } };
+}
+
+(async () => {
+    try {
+        // ---- 路径 A：registerNativeIndicator（官方 values 直喂通道，零引擎） ----
+        V.registerNativeIndicator({
+            type: 'poc-ma', title: 'PoC 双均线（主图叠加）', paneHint: 'price', overlay: true,
+            inputsSchema: () => [], defaultInputs: () => ({}),
+            create: () => ({
+                start(ctx) {
+                    ctx.emit({ series: [
+                        lineSeries('ma-fast', 'MA10', MOCK.fast, '#f5c542', 2),
+                        lineSeries('ma-slow', 'MA30', MOCK.slow, '#42a5f5', 2),
+                    ]});
+                    ctx.setStatus('live');
+                    log('A1 emit 主图叠加双均线 ok');
+                },
+                onBars() {}, setInputs() {}, suspend() {}, resume() {}, stop() {},
+            }),
+        });
+        V.registerNativeIndicator({
+            type: 'poc-equity', title: 'PoC Equity 副图', paneHint: 'new', overlay: false,
+            inputsSchema: () => [], defaultInputs: () => ({}),
+            create: () => ({
+                start(ctx) {
+                    ctx.emit({
+                        series: [
+                            lineSeries('eq', 'Equity', MOCK.equity, '#66bb6a', 2),
+                            lineSeries('eq-norm', 'BuyHold 归一', MOCK.norm, '#ab47bc', 1),
+                            Object.assign(lineSeries('eq-peak', 'Peak', MOCK.peak, '#66bb6a', 1), { visible: false }),
+                        ],
+                        fills: [{ id: 'underwater', paneId: '', fromSeriesId: 'eq', toSeriesId: 'eq-peak',
+                                  color: 'rgba(239,83,80,0.25)' }],
+                    });
+                    ctx.setStatus('live');
+                    log('A2 emit 独立副图 equity+归一对照+underwater 填充 ok');
+                },
+                onBars() {}, setInputs() {}, suspend() {}, resume() {}, stop() {},
+            }),
+        });
+        log('A0 registerNativeIndicator ×2 ok（未注册任何 scripting engine）');
+
+        const chart = new V.Vela('#chart', {
+            data: MOCK.ohlcv, symbol: 'MOCK/USD', timeframe: '1d',
+            theme: 'dark', volume: false,
+        });
+        await chart.ready();
+        log('chart ready');
+
+        const h1 = chart.addNativeIndicator('poc-ma');
+        const h2 = chart.addNativeIndicator('poc-equity');
+        log('addNativeIndicator handles:', h1 && h1.id, h2 && h2.id);
+        await chart.ready();
+        await new Promise(r => setTimeout(r, 1200));
+
+        const ins = chart.inspect();
+        log('inspect panes:', JSON.stringify(ins.panes ? ins.panes.map ? ins.panes : ins.panes : ins).slice(0, 400));
+        log('inspect series 总数:', ins.series != null ? (ins.series.length ?? JSON.stringify(ins.series).slice(0,200)) : 'n/a');
+
+        // ---- 同轴联动：缩放视口后线是否跟随（数据层同轴 + 截图目验） ----
+        const r0 = chart.getVisibleRange();
+        log('range0:', JSON.stringify(r0));
+        const t0 = MOCK.ohlcv[200].time, t1 = MOCK.ohlcv[300].time;
+        chart.setVisibleRange({ from: t0, to: t1 });
+        await new Promise(r => setTimeout(r, 800));
+        const r1 = chart.getVisibleRange();
+        log('range1(缩放后):', JSON.stringify(r1));
+        log('P1 路径A 结论：主图叠加+独立副图+填充 已 emit；同轴联动见截图');
+    } catch (e) {
+        log('P1 ERROR:', e && e.message, e && e.stack && e.stack.split('\n')[1]);
+    }
+})();
+</script>
+</body>
+</html>

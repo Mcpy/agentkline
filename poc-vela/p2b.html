@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>P2b — chart 实例方法面枚举（找官方 tick 入口）</title>
+<style>body{background:#14161a;color:#ddd;font:12px monospace;margin:0}#results{white-space:pre-wrap;padding:8px}</style></head>
+<body>
+<div id="chart" style="height:300px"></div>
+<div id="results">running…</div>
+<script src="./package/dist/vela.global.min.js"></script>
+<script src="./mock-data.js"></script>
+<script>
+const R = [];
+const log = (...a) => { R.push(a.join(' ')); document.getElementById('results').textContent = R.join('\n'); console.log(...a); };
+(async () => {
+    const chart = new window.Vela.Vela('#chart', { data: MOCK.ohlcv.slice(), symbol: 'M/U', timeframe: '1d', theme: 'dark', live: true });
+    await chart.ready();
+    const keys = [];
+    let o = chart;
+    while (o && o !== Object.prototype) {
+        for (const k of Object.getOwnPropertyNames(o)) {
+            const d = Object.getOwnPropertyDescriptor(o, k);
+            if (d && typeof d.value === 'function') keys.push(k);
+        }
+        o = Object.getPrototypeOf(o);
+    }
+    log('chart 方法总数:', keys.length);
+    log('ALL:', [...new Set(keys)].sort().join(', '));
+    const hit = [...new Set(keys)].filter(k => /tick|update|bar|push|apply|feed|stream|live/i.test(k));
+    log('TICK/BAR 相关:', hit.join(', '));
+    const evHit = [...new Set(keys)].filter(k => /^on$|^off$|^emit$|event/i.test(k));
+    log('EVENT 相关:', evHit.join(', '));
+})();
+</script>
+</body>
+</html>

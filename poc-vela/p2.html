@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>P2 — 自定义 dataFeed（WS 推送集成点）</title>
+<style>
+body{background:#14161a;color:#ddd;font:12px monospace;margin:0}
+#chart{width:100%;height:560px}
+#results{white-space:pre-wrap;padding:8px;border-top:1px solid #333}
+</style></head>
+<body>
+<div id="chart"></div>
+<div id="results">running…</div>
+<script src="./package/dist/vela.global.min.js"></script>
+<script src="./mock-data.js"></script>
+<script>
+const R = [];
+const log = (...a) => { R.push(a.join(' ')); document.getElementById('results').textContent = R.join('\n'); console.log(...a); };
+const V = window.Vela;
+let emitN = 0, onBarsN = 0, wsTicks = 0;
+
+// ---- 我们的 WS 适配层 = MarketDataFeed port ----
+class MockWsFeed {
+    constructor() { this.subs = []; this.bars = MOCK.ohlcv.slice(); }
+    async load(cfg) { log(`feed.load(${cfg.symbol},${cfg.timeframe}) 历史 ${this.bars.length} 根`); return this.bars.slice(); }
+    subscribe(cfg, onBar) {
+        log('feed.subscribe 建立（= WS 连接点）');
+        this.subs.push(onBar);
+        // 模拟 WS 推送：400ms 一 tick，改最后一根 close；每 8 tick 追加新 bar
+        this.timer = setInterval(() => {
+            wsTicks++;
+            const last = this.bars[this.bars.length - 1];
+            if (wsTicks % 8 === 0) {
+                const nb = { time: last.time + MOCK.DAY_MS, open: last.close, high: last.close, low: last.close, close: last.close, volume: 100 };
+                this.bars.push(nb);
+                log(`WS 推送新 bar #${this.bars.length} t=${new Date(nb.time).toISOString().slice(0,10)}`);
+            } else {
+                last.close = +(last.close * (1 + (Math.random() - 0.5) * 0.008)).toFixed(2);
+                last.high = Math.max(last.high, last.close);
+                last.low = Math.min(last.low, last.close);
+            }
+            this.subs.forEach(f => f(Object.assign({}, last)));
+        }, 400);
+        return () => { clearInterval(this.timer); log('feed unsubscribe'); };
+    }
+    symbolInfo() { return undefined; }
+    destroy() { clearInterval(this.timer); }
+}
+
+V.registerNativeIndicator({
+    type: 'poc-live-ma', title: 'PoC 实时均线', paneHint: 'price', overlay: true,
+    inputsSchema: () => [], defaultInputs: () => ({}),
+    create: () => ({
+        start(ctx) { this.ctx = ctx; this.recompute('start'); },
+        onBars() { onBarsN++; this.recompute('onBars'); },
+        recompute(why) {
+            const bars = this.ctx.bars();
+            let acc = 0; const pts = [];
+            for (let i = 0; i < bars.length; i++) {
+                acc += bars[i].close; if (i >= 10) acc -= bars[i - 10].close;
+                pts.push({ time: bars[i].time, value: i >= 9 ? +(acc / 10).toFixed(2) : null });
+            }
+            emitN++;
+            this.ctx.emit({ series: [{ id: 'live-ma10', title: 'LiveMA10', paneId: '', kind: 'line',
+                points: pts, style: { color: '#f5c542', width: 2, lineStyle: 'solid' } }] });
+            if (emitN <= 4 || emitN % 8 === 0) log(`emit#${emitN}(${why}) bars=${bars.length} lastClose=${bars[bars.length-1].close}`);
+        },
+        setInputs() {}, suspend() {}, resume() {}, stop() {},
+    }),
+});
+
+(async () => {
+    try {
+        const feed = new MockWsFeed();
+        const chart = new V.Vela('#chart', { symbol: 'MOCK/USD', timeframe: '1d', theme: 'dark', live: true },
+                                 { dataFeed: feed });
+        await chart.ready();
+        chart.addNativeIndicator('poc-live-ma');
+        log('chart ready + 指标挂载（数据全走自定义 feed）');
+        await new Promise(r => setTimeout(r, 6000));
+        log(`P2 结果：wsTicks=${wsTicks} onBars回调=${onBarsN} emits=${emitN} feedBars=${feed.bars.length}`);
+        log('P2 结论：' + (onBarsN > 3 && emitN > 3
+            ? 'WS→feed.subscribe.onBar→框架→onBars→重算重发 全链路通（后端 WS 集成点确认）'
+            : '链路未通'));
+    } catch (e) { log('P2 ERROR:', e && e.message, (e && e.stack || '').split('\n')[1]); }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,2 @@
+40f39542d99863bda652c225c84e2d28c28d25c1604447111e77b76bfc135e45 package/dist/vela.global.min.js
+757c9272e69fa45e662a1dc70f45bc3641c6de4ce765eb192292d11a5be911b1 package/dist/vela.global.js

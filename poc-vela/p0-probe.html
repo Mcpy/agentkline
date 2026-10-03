@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>P0 probe — window.Vela 全局面</title>
+<style>body{background:#111;color:#ddd;font:12px monospace;margin:0}#out{white-space:pre-wrap;padding:8px}</style>
+</head>
+<body>
+<div id="out">probing…</div>
+<script src="./package/dist/vela.global.min.js"></script>
+<script src="./mock-data.js"></script>
+<script>
+const log = [];
+function dump(obj, prefix, depth) {
+    if (depth > 2) return;
+    for (const k of Object.keys(obj)) {
+        const v = obj[k];
+        const t = typeof v;
+        log.push(prefix + k + ' : ' + t);
+        if (t === 'object' && v && depth < 2) dump(v, prefix + k + '.', depth + 1);
+    }
+}
+log.push('window.Vela type: ' + typeof window.Vela);
+if (window.Vela) dump(window.Vela, '', 0);
+// 关键 API 打勾（P1–P4 所需）
+const NEED = ['Vela','registerNativeIndicator','registerRendererLayer','registerChartType',
+              'registerDrawingType','createDrawing','getNativeIndicator','nativeIndicatorDescriptors'];
+log.push('--- NEED CHECK ---');
+for (const n of NEED) log.push(n + ': ' + typeof (window.Vela || {})[n]);
+document.getElementById('out').textContent = log.join('\n');
+console.log('PROBE\n' + log.join('\n'));
+window.__PROBE = log;
+</script>
+</body>
+</html>

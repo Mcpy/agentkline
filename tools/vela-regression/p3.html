@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>P3 — 画线程序化 + 序列化往返</title>
+<style>
+body{background:#14161a;color:#ddd;font:12px monospace;margin:0}
+#chart{width:100%;height:560px}
+#results{white-space:pre-wrap;padding:8px;border-top:1px solid #333}
+</style></head>
+<body>
+<div id="chart"></div>
+<div id="results">running…</div>
+<pre id="doc" style="display:none"></pre>
+<script src="./package/dist/vela.global.min.js"></script>
+<script src="./mock-data.js"></script>
+<script>
+const R = [];
+const log = (...a) => { R.push(a.join(' ')); document.getElementById('results').textContent = R.join('\n'); console.log(...a); };
+const V = window.Vela;
+const T = (i) => MOCK.ohlcv[i].time;
+const C = (i) => MOCK.ohlcv[i].close;
+
+(async () => {
+    try {
+        const chart = new V.Vela('#chart', { data: MOCK.ohlcv.slice(), symbol: 'MOCK/USD', timeframe: '1d', theme: 'dark' });
+        await chart.ready();
+        const D = chart.drawings;
+        log('chart.drawings supported:', D.supported);
+
+        // 事件探针
+        const fired = [];
+        for (const n of ['drawing:created', 'drawing:updated', 'drawing:removed', 'drawing:selected']) {
+            try { chart.on(n, (e) => fired.push(n)); } catch (e) {}
+        }
+
+        // 程序化创建五类
+        const mk = {};
+        mk.hline = D.add('hline', { anchors: [{ time: T(250), price: C(250) }], style: { color: '#ff7043' } });
+        log('hline:', mk.hline && mk.hline.id);
+        mk.trendline = D.add('trendline', { anchors: [{ time: T(100), price: C(100) }, { time: T(300), price: C(300) }], style: { color: '#42a5f5' } });
+        log('trendline:', mk.trendline && mk.trendline.id);
+        mk.box = D.add('box', { anchors: [{ time: T(150), price: C(150) * 1.05 }, { time: T(250), price: C(250) * 0.95 }], style: { color: '#66bb6a' } });
+        log('box:', mk.box && mk.box.id);
+        mk.text = D.add('text', { anchors: [{ time: T(200), price: C(200) * 1.08 }], text: 'PoC 文本标注' });
+        log('text:', mk.text && mk.text.id);
+        mk.arrow = D.add('arrow', { anchors: [{ time: T(60), price: C(60) * 0.97 }] });
+        log('arrow:', mk.arrow && mk.arrow.id);
+
+        chart.setVisibleRange({ from: T(0), to: T(499) });   // 全范围：锚点段入视野
+        await new Promise(r => setTimeout(r, 600));
+        // CRUD
+        D.update(mk.hline.id, { style: { color: '#ffee58', width: 3 } });
+        D.lock(mk.box.id, true);
+        D.bringToFront(mk.text.id);
+        const tmp = D.add('vline', { anchors: [{ time: T(400), price: C(400) }] });
+        D.remove(tmp.id);
+        log('CRUD：update/lock/bringToFront/remove 调用无异常');
+        log('all() 数量:', D.all().length);
+
+        // 序列化往返
+        const doc = JSON.parse(JSON.stringify(D.toJSON()));   // 深拷贝：防活引用被后续 fromJSON 原地改
+        log('toJSON version:', doc.version, 'drawings:', doc.drawings.length);
+        const before = JSON.stringify(doc.drawings);
+        D.fromJSON({ version: 1, drawings: [] });
+        log('清空后 all():', D.all().length);
+        D.fromJSON(doc);
+        const after = JSON.stringify(D.toJSON().drawings);
+        log('往返无损:', before === after ? 'YES' : 'NO diff!');
+        if (before !== after) {
+            const a = JSON.parse(before), b = JSON.parse(after);
+            log('条数 before/after:', a.length, b.length);
+            for (let i = 0; i < Math.max(a.length, b.length); i++) {
+                if (JSON.stringify(a[i]) !== JSON.stringify(b[i])) {
+                    log(`diff[${i}] before:`, JSON.stringify(a[i]).slice(0, 300));
+                    log(`diff[${i}] after :`, JSON.stringify(b[i]).slice(0, 300));
+                    break;
+                }
+            }
+        }
+        log('样例 doc（首条）:', JSON.stringify(doc.drawings[0]).slice(0, 500));
+        log('事件 fired:', [...new Set(fired)].join(',') || 'none');
+        document.getElementById('doc').textContent = JSON.stringify(doc, null, 1);
+        log('P3 结论：' + (mk.trendline && before === after ? '程序化画线+CRUD+序列化往返 全通' : '有缺，见上'));
+    } catch (e) { log('P3 ERROR:', e && e.message, (e && e.stack || '').split('\n')[1]); }
+})();
+</script>
+</body>
+</html>

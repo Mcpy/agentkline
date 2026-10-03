@@ -107,3 +107,9 @@ See `config.example.yaml`. Highlights:
 ## License
 
 Apache-2.0
+
+## Chart Engine Attribution
+
+Charts rendered by [Vela™](https://velacharts.dev) (LuxAlgo, Apache-2.0 License).
+Vela is a dependency reference (not a fork); see `frontend/vendor/assets/vela.global.min.js.sha256` for the pinned bundle checksum.
+图表渲染由 Vela™（LuxAlgo，Apache-2.0）承担；依赖引用非 fork，bundle 校验和见 frontend/vendor/assets/vela.global.min.js.sha256。
