@@ -160,6 +160,17 @@ def test(port: int, token: str = None):
     check("backfill 前插", r.json().get("prepended", 0) == 100, r.text)
     r = s.post(f"{base}/api/board/bare/timeframe/1d/backfill?limit=7")
     check("backfill query limit 通达（v0.4.4 routes 修）", r.json().get("prepended", 0) == 7, r.text)
+    # P1 修复轮 2 契约：until/limit 计数窗（日历无关）+ 空窗=200 空集 + 截断契约
+    head = s.get(f"{base}/api/kline", params={"board_id": "bare", "timeframe": "1d"}).json()["ohlcv"][0]["timestamp"]
+    r = s.get(f"{base}/api/kline", params={"board_id": "bare", "timeframe": "1d", "until": head, "limit": 7})
+    check("until 空窗=200 空集（genesis 探测非错误）", r.status_code == 200 and r.json().get("ohlcv") == [], r.text[:120])
+    r = s.post(f"{base}/api/board/bare/timeframe/1d/backfill", json={"limit": 20})
+    check("backfill 截断契约 prepended==limit", r.json().get("prepended") == 20, r.text)
+    r = s.get(f"{base}/api/kline", params={"board_id": "bare", "timeframe": "1d", "until": head, "limit": 7})
+    o = r.json().get("ohlcv") or []
+    check("until 窗计数+严格<until+升序", r.status_code == 200 and len(o) == 7
+          and all(b["timestamp"] < head for b in o)
+          and all(o[i]["timestamp"] < o[i + 1]["timestamp"] for i in range(len(o) - 1)), r.text[:120])
     # v0.4.4 建板失败语义：慢源首拉超 cap = 失败+原因，不建空板
     r = s.post(f"{base}/api/scripts", json={"id": "datasource/slowsrc", "code":
                'NAME="慢源"\nCAPS={"backfill": False, "symbols": False, "ticker": False}\nIDENTITY=[]\n'
@@ -279,6 +290,23 @@ def test(port: int, token: str = None):
                                   "shape": "circle", "text": "bad"}]})
     check("markers 越界丢弃+dropped 回报", len(r.json().get("dropped", [])) == 1
           and r.json().get("count") == 1, r.text)
+    # v0.5 乙案：Vela DrawingsDocument 条目透传存储（drawing 参数优先）+ 0.4 兼容形态并存
+    r = s.post(f"{base}/api/drawing", json={"board_id": "bare", "timeframe": "1d",
+               "drawing": {"type": "trendline", "paneId": "price",
+                           "anchors": [{"time": ts0, "price": 1.0}, {"time": ts0 + 86400000, "price": 2.0}],
+                           "style": {"lineColor": "#42a5f5", "lineWidth": 2, "lineStyle": "solid"},
+                           "_schema": "vela1"}})
+    ok = r.status_code == 200 and (r.json().get("drawing") or {}).get("anchors")
+    check("Vela doc 条目透传存储(乙案)", bool(ok), r.text)
+    did = (r.json().get("drawing") or {}).get("id")
+    if did:
+        r2 = s.post(f"{base}/api/drawing/{did}", json={"board_id": "bare", "timeframe": "1d",
+                    "patch": {"style": {"lineColor": "#ffee58", "lineWidth": 3, "lineStyle": "dashed"}}})
+        check("嵌套 patch 浅合并(乙案)", (r2.json().get("drawing") or {}).get("style", {}).get("lineColor") == "#ffee58", r2.text)
+        s.delete(f"{base}/api/drawing/{did}?board_id=bare&timeframe=1d")
+    r = s.post(f"{base}/api/drawing", json={"board_id": "bare", "timeframe": "1d", "type": "hline",
+               "points": [{"price": 1.5}], "color": "#ef5350"})
+    check("0.4 兼容形态仍通(甲案遗留读侧)", r.status_code == 200, r.text)
     r = s.post(f"{base}/api/subplot", json={"name": "p1", "height": 120, "board_id": "bare", "timeframe": "1d"})
     check("subplot 创建", r.status_code == 200, r.text)
     r = s.delete(f"{base}/api/subplot/p1?board_id=bare&timeframe=1d")

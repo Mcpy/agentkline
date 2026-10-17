@@ -30,7 +30,7 @@ async def _lifespan(app: FastAPI):
 
 
 def create_agent_app() -> FastAPI:
-    app = FastAPI(title="AgentKline Agent", version="0.4.4", lifespan=_lifespan)
+    app = FastAPI(title="AgentKline Agent", version="0.5.0", lifespan=_lifespan)
 
     @app.middleware("http")
     async def require_token(request, call_next):
@@ -48,6 +48,12 @@ def create_agent_app() -> FastAPI:
         from .. import mcp_server
         mcp_server.service = service
         mcp_server.mcp.settings.streamable_http_path = "/"
+        # mcp SDK 在 FastMCP host 为 localhost 时自动开启 DNS rebinding 防护，
+        # Host/Origin 白名单仅含 127.0.0.1/localhost；本服务把 /mcp 挂在自建
+        # FastAPI 上且 agent 端口可能监听 0.0.0.0（LAN/容器网关以 IP 访问），
+        # 外部 Host 会被 421 拒绝。agent 端口全量 Bearer 鉴权已覆盖该威胁
+        # （rebinding 攻击拿不到 token），故关闭 SDK 的 Host/Origin 白名单。
+        mcp_server.mcp.settings.transport_security = None
         app.mount("/mcp", mcp_server.mcp.streamable_http_app())
         logger.info("MCP mounted at agent app /mcp")
     except Exception as _e:

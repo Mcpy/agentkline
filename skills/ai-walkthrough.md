@@ -18,7 +18,8 @@ description: AI 引导呈现流程——把分析结论（标记/划线）自动
 ## 1. 标准顺序（先落内容，再切视图，最后聚焦）
 1. `set_markers(board, tf, markers)` —— 落买卖点/事件标记；
    越界 time 会被丢弃并在返回 `dropped` 中回报，可自我纠正。
-2. `add_drawing(board, tf, type, points)` —— 画趋势线/水平线（hline/trend）。
+2. `add_drawing(board, tf, type, points)` —— 画趋势线/水平线（hline/trend）；
+   亦支持原生形态 `add_drawing(board, tf, drawing={type,paneId,anchors:[{time,price}],style:{lineColor,lineWidth,lineStyle}})`（Vela DrawingsDocument 条目透传，74 种画线类型可用）。
 3. `switch_board(board)` / `switch_timeframe(tf)` —— 把前端切到目标板/周期
    （switch 广播窗口化状态≤2000 根，标记/划线随之呈现；更老历史用户左滚按需 backfill）。
 4. `set_view_range(board, tf, from, to)` —— 画面聚焦到目标时间段（如回撤区间）。

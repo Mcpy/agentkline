@@ -1,0 +1,3 @@
+{
+ "#results": "图表与假 UI 组件同页共存 ok（原生 JS + script 标签，零构建链）\n加载→ready 耗时(ms): 77\n覆盖 P1 registerNativeIndicator = function\n覆盖 P1 registerRendererLayer = function\n覆盖 P1 registerChartType = function\n覆盖 P2 MarketDataFeed(deps 注入) = port(类型层)+p2 实测\n覆盖 P3 chart.drawings.add = function\n覆盖 P3 chart.drawings.toJSON = function\n覆盖 P3 chart.drawings.fromJSON = function\n覆盖 P4 chart.marks.add = function\n覆盖 P4 chart.marks.defineGroup = function\n覆盖 P4 mark:click 事件 = p4 实测 fired\n覆盖 视口 setVisibleRange = function\n覆盖 事件总线 chart.on = function\nP5 结论：bundle 覆盖 12/12，全在；体积 min=960K(≤2MB 软线内)；workspace 不在 global bundle（独立 ESM 模块）"
+}

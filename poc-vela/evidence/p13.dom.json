@@ -1,0 +1,3 @@
+{
+ "#results": "chart.onCrosshairMove: undefined\nrenderer ctor: Pi\nrenderer proto 含 crosshair: onCrosshairMove,supportsExternalCrosshair,setExternalCrosshair\nrenderer.renderer: Ys | onCrosshairMove: function\nrenderer.renderer.renderer:  | onCrosshairMove: \nhooked at: renderer\nP13 ready，等待鼠标移动…"
+}

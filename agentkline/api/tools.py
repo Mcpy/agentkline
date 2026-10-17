@@ -98,11 +98,13 @@ def get_state(board_id: Optional[str] = None, timeframe: Optional[str] = None):
 
 @api_tool(group="read", path="/api/kline", err_status=400)
 def get_kline(board_id: Optional[str] = None, timeframe: Optional[str] = None,
-              start: Optional[int] = None, end: Optional[int] = None):
+              start: Optional[int] = None, end: Optional[int] = None,
+              until: Optional[int] = None, limit: Optional[int] = None):
     """获取区间K线（含成交量）。不传start/end=用户当前view窗口。
-    start/end 为毫秒时间戳 epoch_ms（如 1755000000000）；若误传秒（<1e11）会自动×1000。"""
+    start/end 为毫秒时间戳 epoch_ms（如 1755000000000）；若误传秒（<1e11）会自动×1000。
+    until/limit（计数窗口）：取 timestamp<until 的最后 limit 根，与交易日历无关；传入时优先于 start/end。"""
     board_id, timeframe = _resolve(board_id, timeframe)
-    return service.get_kline(board_id, timeframe, start, end)
+    return service.get_kline(board_id, timeframe, start, end, until, limit)
 
 
 @api_tool(group="read", path="/api/indicators", err_status=400)
@@ -182,10 +184,15 @@ def create_empty_board(board_id: str, name: Optional[str] = None, intervals: Opt
 @api_tool(group="user_write", method="POST", path="/api/drawing", err_status=400)
 def add_drawing(board_id: Optional[str] = None, timeframe: Optional[str] = None, type: str = "hline",
                 points: Optional[list] = None, color: str = "#ef5350", line_width: int = 2,
-                line_style: str = "solid", text: str = ""):
-    """画线。type: hline(水平,points=[{price}]) / trend(趋势,points=[{time,price},{time,price}])。
-    time 为毫秒时间戳。"""
+                line_style: str = "solid", text: str = "", drawing: Optional[dict] = None):
+    """画线。两种入参形态：
+    ① 0.4 兼容形态：type: hline(水平,points=[{price}]) / trend(趋势,points=[{time,price},{time,price}])，time 为毫秒时间戳；
+    ② v0.5 原生形态（drawing 参数优先）：完整 Vela DrawingsDocument 条目 dict
+       （{id?,type,paneId,anchors:[{time,price}],style:{lineColor,lineWidth,lineStyle},locked?,visible?,text?}），
+       服务端透传存储（仅补 id），格式版本随 Vela DrawingsDocument 演进。"""
     board_id, timeframe = _resolve(board_id, timeframe)
+    if drawing:
+        return service.add_drawing(board_id, timeframe, dict(drawing))
     return service.add_drawing(board_id, timeframe, {"type": type, "points": points, "color": color,
                                                      "line_width": line_width, "line_style": line_style,
                                                      "text": text})
@@ -195,12 +202,16 @@ def add_drawing(board_id: Optional[str] = None, timeframe: Optional[str] = None,
 def update_drawing(board_id: Optional[str] = None, timeframe: Optional[str] = None, drawing_id: str = "",
                    visible: Optional[bool] = None, color: Optional[str] = None,
                    line_width: Optional[int] = None, line_style: Optional[str] = None,
-                   text: Optional[str] = None):
-    """更新划线：visible(显隐)/color/line_width/line_style(solid|dashed|dotted)/text"""
+                   text: Optional[str] = None, patch: Optional[dict] = None):
+    """更新划线。命名参数：visible(显隐)/color/line_width/line_style(solid|dashed|dotted)/text；
+    或 patch 参数优先：raw dict 浅合并（v0.5 乙案嵌套样式用 patch={"style":{...}} / {"anchors":[...]}）。"""
     board_id, timeframe = _resolve(board_id, timeframe)
+    if patch:
+        return service.update_drawing(board_id, timeframe, drawing_id, dict(patch))
+    named = {"visible": visible, "color": color, "line_width": line_width,
+             "line_style": line_style, "text": text}
     return service.update_drawing(board_id, timeframe, drawing_id,
-                                  {"visible": visible, "color": color, "line_width": line_width,
-                                   "line_style": line_style, "text": text})
+                                  {k: v for k, v in named.items() if v is not None})
 
 
 @api_tool(group="user_write", method="DELETE", path="/api/drawing/{drawing_id}", err_status=404)

@@ -6,6 +6,7 @@ import { log } from './log.js';
 // 指标设置弹窗：显示名 / 参数 / 颜色 / 线宽 / 线型
 // ============================================================
 const LINE_STYLES = [[0, t('set.solid')], [1, t('set.dotted')], [2, t('set.dashed')]];
+import { nativeStyleCaps } from './native_map.js';
 
 function post(name, payload) {
     return fetch(`/api/indicator/${encodeURIComponent(name)}`, {   // v0.4.1: flat body 约定
@@ -97,6 +98,7 @@ export async function openSettings(name) {
 
     // ---- 样式 ----
     const isMulti = Array.isArray(ind.lines) && ind.lines.length > 0;
+    // 初值来源 = 自家 state（用户裁决：state 里是调好的颜色，原生句柄只是执行端）
     const styleInputs = [];  // {getKey, color, width, style}
     panel.appendChild(row(`<div class="set-sec">${t('set.sec_style')}</div>`));
     const mkStyle = (getCur, keyLabel, isHist) => {
@@ -119,11 +121,16 @@ export async function openSettings(name) {
             r.appendChild(auto); r.appendChild(hint(t('set.auto_rg')));
             r.appendChild(hint(t('set.hist_color')));
         } else {
-            width = document.createElement('input');
-            width.type = 'number'; width.min = '1'; width.max = '6'; width.value = cur.lineWidth || 2; width.style.width = '46px';
-            lstyle = document.createElement('select');
-            LINE_STYLES.forEach(([v, t]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; lstyle.appendChild(o); });
-            lstyle.value = String(cur.lineStyle ?? 0);
+            const caps = nativeStyleCaps(ind.script || '');
+            if (caps.width) {
+                width = document.createElement('input');
+                width.type = 'number'; width.min = '1'; width.max = '6'; width.value = cur.lineWidth || 2; width.style.width = '46px';
+            }
+            if (caps.lineStyle) {
+                lstyle = document.createElement('select');
+                LINE_STYLES.forEach(([v, t]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; lstyle.appendChild(o); });
+                lstyle.value = String(cur.lineStyle ?? 0);
+            }
             r.appendChild(hint(t('set.color')));
         }
         r.appendChild(color);
@@ -185,7 +192,11 @@ export async function openSettings(name) {
                     // 柱状图：只发 autoColor + 颜色（保留原 lineWidth）；勾选=自动红绿
                     return { ...base, autoColor: !!(si.auto && si.auto.checked), color: si.color.value };
                 }
-                return { ...base, color: si.color.value, lineWidth: parseInt(si.width.value) || 2, lineStyle: parseInt(si.lstyle.value) || 0 };
+                const caps = nativeStyleCaps(ind.script || '');
+                const out = { ...base, color: si.color.value };
+                if (caps.width && si.width) out.lineWidth = parseInt(si.width.value) || 2;
+                if (caps.lineStyle && si.lstyle) out.lineStyle = parseInt(si.lstyle.value) || 0;
+                return out;
             };
             if (isMulti) {
                 const ls = {};

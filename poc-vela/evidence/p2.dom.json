@@ -1,0 +1,3 @@
+{
+ "#results": "feed.load(MOCK/USD,1d) 历史 500 根\nfeed.subscribe 建立（= WS 连接点）\nchart ready + 指标挂载（数据全走自定义 feed）\nemit#1(start) bars=500 lastClose=49816.63932638757\nemit#2(onBars) bars=500 lastClose=49839.88\nemit#3(onBars) bars=500 lastClose=49819.32\nemit#4(onBars) bars=500 lastClose=49682.06\nemit#8(onBars) bars=500 lastClose=49303.59\nWS 推送新 bar #501 t=2025-05-15\nemit#16(onBars) bars=501 lastClose=49632.74\nP2 结果：wsTicks=15 onBars回调=15 emits=16 feedBars=501\nP2 结论：WS→feed.subscribe.onBar→框架→onBars→重算重发 全链路通（后端 WS 集成点确认）\nWS 推送新 bar #502 t=2025-05-16\nemit#24(onBars) bars=502 lastClose=49709.95\nWS 推送新 bar #503 t=2025-05-17"
+}

@@ -1,0 +1,3 @@
+{
+ "#results": "mock bar time 样本(ms?): 1712707200000 1721347200000\nsetVisibleRange(ms) 后 getVisibleRange = {\"from\":1712707200000,\"to\":1721347200000}\n=> get 单位: ms（对称）\n原样回塞后 getVisibleRange = {\"from\":1712707200000,\"to\":1721347200000}"
+}

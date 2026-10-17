@@ -60,3 +60,10 @@
 | ② viewport:changed | ✅ fired=1（setVisibleRange 触发） | 同上 |
 | ③ market:changed | ✅ setMarket resolve + fired=1（**dataFeed 模式**；offline data 模式 setMarket 会 park 挂起——集成按 R3 走 dataFeed 无此问题） | 同上 |
 | ④ group 可见性开关 | ✅ isGroupVisible 初/关/开 = true/false/true | 同上 |
+
+## 附二：0.5.0 施工决策记录（2026-10-03 实施期，待用户裁决项标 ⚠️）
+1. **映射表落点**（施工单 §11 开放项，实施定案）：映射层在**前端 adapter**（vela_adapter.js 纯函数 _toVelaDrawing/_velaToRest）；
+2. ⚠️ **存储格式偏离施工单 §4**：存 **0.4 结构单格式**（非 Vela doc）——硬约束链：REST /api/drawing schema 锁 0.4 命名参数（type/points/color/line_width/line_style/text 顶层）+ DoD5 后端零改动 + MCP/skill/e2e 契约零改 → Vela doc 入存储三者不可同时成立。Vela doc 的 versioned 收益保留在前端渲染层（toJSON/fromJSON 往返无损已验）；adapter 读侧保留双格式兼容（anchors/points 皆收）作防御；
+3. **新踩坑补遗**（入 §10 注意事项）：⑨ `addNativeIndicator(type,{id})` 的 id 选项 0.8.1 不生效（ctx.id/handle.id=native-N）→ 组映射用闭包捕 type 名；⑩ REST add_drawing 参数顶层非嵌套 {drawing:{}}；⑪ Vela 渲染读 style.lineColor/lineWidth（color/width 并存兼容）；⑫ hline 0.4 points=[{price}] 无 time → anchor 补末 bar 时间；⑬ 服务 log 落点 /tmp/agentkline.log 是 e2e bug10 断言源（启动重定向勿改）；⑭ baseline 降级：0.4 'baseline' 指标类型→Vela line（罕用，记录）；
+4. **实时增量通道**：applyDataUpdate→feed.pushBar(onBar) 形态 = PoC p2 同 port 验证；shift>0 前插=setMarket 重载+视口恢复（feed 无 head-insert 通道）；
+5. **发布**：v0.5.0 = commit e717815 + tag v0.5.0 + Release id 402465883（asset web_dist 305,501B 含 bundle）；e2e 126/126；依赖树 dependencies={} 无 LWC。

@@ -679,8 +679,28 @@ class AgentKlineService:
             i1 = next((i for i in range(n - 1, -1, -1) if ohlcv[i]["timestamp"] <= end), n - 1)
         return ohlcv, i0, i1
 
-    def get_kline(self, board_id, timeframe, start=None, end=None):
-        """纯 K 线（含成交量）区间切片；不传范围=当前 view。"""
+    def get_kline(self, board_id, timeframe, start=None, end=None, until=None, limit=None):
+        """纯 K 线（含成交量）区间切片；不传范围=当前 view。
+        until/limit（P1 修复）：计数型头部窗口——timestamp<until 的 bar 取尾 limit 根；
+        与日历无关（交易日缺口源亦精确），供前端 history loadRange 头部取数。"""
+        if until is not None:
+            until = int(until)
+            until = until * 1000 if until < 1e11 else until
+            limit = int(limit) if limit else None
+            board = self.state.get_board(board_id)
+            tf_state = board.get_tf(timeframe) if board else None
+            if not tf_state:
+                return {"error": "No data"}
+            bars = [b for b in (self.state.get_ohlcv(board_id, timeframe) or []) if b["timestamp"] < until]
+            if limit:
+                bars = bars[-int(limit):]
+            # 空窗=正常 genesis 探测（非错误）：200 + 空集，避免客户端 console 噪声
+            return {
+                "board_id": board_id, "timeframe": timeframe, "symbol": tf_state.symbol,
+                "range": {"from": bars[0]["timestamp"] if bars else None,
+                          "to": bars[-1]["timestamp"] if bars else None},
+                "ohlcv": bars,
+            }
         ohlcv, i0, i1 = self._resolve_range(board_id, timeframe, start, end)
         if not ohlcv:
             return {"error": "No data"}
@@ -931,6 +951,10 @@ class AgentKlineService:
         if not older:
             return {"prepended": 0}
         older.sort(key=lambda b: b["timestamp"])
+        # P1 修复：严格按 limit 契约截断（脚本按日历 span 会超取）；
+        # 保证 prepended == 客户端 until 窗容量 ⇒ 镜像头与 Vela 头恒对齐（左滑阈值依赖该不变量）
+        if limit and len(older) > limit:
+            older = older[-int(limit):]
         new_ohlcv = older + ohlcv
         markers = self.state.get_timeframe_state(board_id, tf).get("markers", [])
         self.state.set_ohlcv(board_id, tf, new_ohlcv, markers)

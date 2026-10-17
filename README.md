@@ -4,7 +4,7 @@
 
 [中文文档 →](README_zh-CN.md)
 
-Built on [lightweight-charts](https://github.com/tradingview/lightweight-charts), with a FastAPI backend,
+Built on [Vela™ by LuxAlgo](https://velacharts.dev) (Apache-2.0), with a FastAPI backend,
 server-side **Python-scriptable indicators**, and first-class **AI-agent access via MCP**.
 
 ---

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>P15 — setMarket({bars}) 是否走 loadRange 增量通道</title>
+<style>body{background:#14161a;color:#ddd;font:12px monospace;margin:0}#chart{height:480px}#results{white-space:pre-wrap;padding:8px}</style></head>
+<body>
+<div id="chart"></div>
+<div id="results">running…</div>
+<script src="./package/dist/vela.global.min.js"></script>
+<script src="./mock-data.js"></script>
+<script>
+const R = [];
+const log = (...a) => { R.push(a.join(' ')); document.getElementById('results').textContent = R.join('\n'); console.log(...a); };
+let ALL = MOCK.ohlcv.slice();
+const feed = {
+    load: async (cfg) => { log('feed.load bars=', ALL.length); return ALL.slice(-400); },   // 首载只给尾 400
+    loadRange: async (cfg, range) => {
+        let out = ALL;
+        if (range && range.to != null) out = out.filter(b => b.time < range.to);
+        if (range && range.limit != null) out = out.slice(-range.limit);
+        log('feed.loadRange', JSON.stringify(range), '->', out.length);
+        return out;
+    },
+    subscribe: (c, cb) => () => {},
+};
+(async () => {
+    const chart = new window.Vela.Vela('#chart', { symbol: 'AK:AAA', timeframe: '1d', theme: 'dark', live: true }, { dataFeed: feed });
+    await chart.ready();
+    await new Promise(r => setTimeout(r, 800));
+    log('--- setMarket({bars: 800}) 同 market ---');
+    await chart.setMarket({ symbol: 'AK:AAA', timeframe: '1d', bars: 800 });
+    await new Promise(r => setTimeout(r, 1200));
+    const vr = chart.getVisibleRange();
+    log('after: visibleRange', JSON.stringify(vr));
+    log('--- setMarket({bars: 800}) 仅 bars（无 symbol/timeframe） ---');
+    await chart.setMarket({ bars: 800 });
+    await new Promise(r => setTimeout(r, 1200));
+    log('P15 done');
+})();
+</script>
+</body>
+</html>

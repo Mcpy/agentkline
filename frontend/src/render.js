@@ -13,7 +13,9 @@ import { showContextMenu } from './menu.js';
 import {
     renderChartCore, applyDataUpdateCore, updateIndicatorSeriesCore,
     syncDrawings as adapterSyncDrawings, setVisibleTimeRangeCore, resizeAllChartsCore,
-    captureSnapshotCore, onViewport, getVisibleTimeRange, readDataWindow,
+    onViewport, getVisibleTimeRange, readDataWindow, onCrosshair, syncSubplotsCore, snapshotAll, syncNativeIndicators,
+    tfMs, extendHistory, setIndicatorVisibleNative, pricePaneIndicatorRows,
+    refreshEmittedGroups,
 } from './vela_adapter.js';
 
 // ============ 活体注册表（resize 用；Vela 单图） ============
@@ -97,7 +99,8 @@ function renderIndicatorBar() {
 function toggleIndicator(name) {
     const nowVisible = state.visibility[name] === false;
     state.visibility[name] = nowVisible;
-    updateIndicatorSeries(name);        // adapter 重 emit（visible 标志随 spec 走）
+    // Phase A：原生指标走 Vela setVisible（句柄通道）；未映射走旧 emit（交互逻辑不变）
+    if (!setIndicatorVisibleNative(name, nowVisible)) updateIndicatorSeries(name);
     renderIndicatorBar();
     log('info', t('ind.toggled', { name, st: nowVisible ? t('ind.shown') : t('ind.hidden') }));
 }
@@ -150,6 +153,10 @@ export function renderChart() {
     if (renderScheduled) return;
     renderScheduled = true;
     requestAnimationFrame(() => { renderScheduled = false; _doRender(); });
+    // OHLC 行预备填充（首载/重建后无十字线事件，需主动取一次读数）
+    [120, 500, 1200, 2500].forEach(ms => setTimeout(() => {
+        try { const rw = readDataWindow(); if (rw && rw.ohlc) _renderOhlc(rw.ohlc); } catch (e) {}
+    }, ms));
 }
 function _doRender() {
     try { _renderInner(); } catch (e) { log('error', t('chart.render_err', { e: e.message })); console.error(e); }
@@ -162,7 +169,6 @@ function _renderInner() {
         guide.style.display = 'block';
         emptyState.style.display = 'none';
         container.innerHTML = '';
-        _clearSubplotDom();
         renderIndicatorBar(); updateDataInfo();
         return;
     }
@@ -170,36 +176,36 @@ function _renderInner() {
     if (!state.ohlcv || state.ohlcv.length === 0) {
         emptyState.style.display = 'block';
         container.innerHTML = '';
-        _clearSubplotDom();
         renderIndicatorBar(); updateDataInfo();
         return;
     }
     emptyState.style.display = 'none';
     state.timeIndex = new Map(state.ohlcv.map((bar, i) => [Math.floor(bar.timestamp / 1000), i]));
     renderChartCore();                 // Vela 建图（adapter）
-    _clearSubplotDom();                // 副图 DOM 标题条退役（Vela pane 原生标题）
+    renderSubplots();                  // 副图实例 diff + 动态总高（adapter；无 subplot DOM）
     renderIndicatorBar();
     updateDataInfo();
-    updateLegends(null);
     reportView();
-}
-function _clearSubplotDom() {
-    const c = document.getElementById('subplots');
-    if (c) c.innerHTML = '';
-    state.subplotDivs = {};
-    state.volDiv = null;
 }
 
 // ============ 增量更新 ============
-export function applyDataUpdate(shift = 0) {
-    applyDataUpdateCore(shift);
+export function applyDataUpdate() {
+    applyDataUpdateCore();
     updateDataInfo();
     reportView();
-    updateLegends(null);
+}
+// P1：prepend（左划回补广播）只同步缓存与视图上报，不动图表——Vela 经 loadRange 自取
+export function applyPrependUpdate() {
+    refreshEmittedGroups();   // P1 修复：prepend 后 vol/legacy 组 emit 与蜡烛对齐
+    updateDataInfo();
+    reportView();
 }
 export function updateIndicatorSeries(instId) { updateIndicatorSeriesCore(instId); }
 export function syncDrawings() { adapterSyncDrawings(); }
-export function renderSubplots() { _clearSubplotDom(); updateLegends(null); }   // pane 由 adapter native 实例管理
+export function renderSubplots() {
+    // 单图表同图 pane 架构：无 subplot DOM div；实例 diff + 动态总高全在 adapter
+    syncSubplotsCore();
+}
 
 // ============ 视口上报（/api/view） ============
 let viewReportTimer = null;
@@ -238,121 +244,78 @@ document.addEventListener('DOMContentLoaded', () => {
     ['wheel', 'pointerdown', 'touchstart'].forEach(ev =>
         container.addEventListener(ev, () => { userTouched = true; }, { passive: true }));
 });
+// bug4：左划补历史 = 阈值触发（本回调）+ feed.loadRange 框架缝双通道（adapter 持有 backfill 单飞门）
 onViewport(() => {
-    if (!userTouched) return;
     const r = getVisibleTimeRange();
+    // bug8：阈值周期感知（2 根 K 而非固定 2 天）——prepend 后旧左缘不再误判命中，断无限链
+    const thr = 2 * tfMs(state.currentTimeframe);
+    const hit = !!(state.ohlcv && state.ohlcv[0] && r && r.from <= state.ohlcv[0].timestamp + thr);
+    if (!userTouched) return;
     if (!r || !state.ohlcv || !state.ohlcv.length) return;
-    if (state.ohlcv[0] && r.from <= state.ohlcv[0].timestamp + 2 * 86400e3) loadMoreHistory();
+    if (hit) extendHistory();   // P1：Vela 原生 extendDepth 单入口；单飞去重在 adapter loadRange
 });
-async function loadMoreHistory() {
-    if (historyLoading || !state.currentBoard || !state.currentTimeframe) return;
-    historyLoading = true;
-    try {
-        const r = await fetch(`/api/board/${state.currentBoard}/timeframe/${state.currentTimeframe}/backfill`,
-            { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ limit: 200 }) });
-        const d = await r.json();
-        if (d.prepended > 0) log('info', t('chart.backfill_ok', { n: d.prepended }));
-    } catch (e) { log('error', t('chart.backfill_fail', { e: e.message })); }
-    finally { historyLoading = false; }
-}
 
-// ============ 图例（自绘 DOM；十字线跟随 = container mousemove → dataWindowReadout 桥） ============
-function fmtP(v) { return (v == null || !isFinite(v)) ? '--' : Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
-function fmtC(v) { if (v == null || !isFinite(v)) return '--'; const a = Math.abs(v);
-    if (a >= 1e8) return (v / 1e8).toFixed(2) + t('fmt.yi'); if (a >= 1e4) return (v / 1e4).toFixed(2) + t('fmt.wan');
-    return Number(v).toLocaleString('en-US', { maximumFractionDigits: 2 }); }
-function boardLabel() {
-    const bd = (state.boards || []).find(b => b.id === state.currentBoard);
-    return localizeBoardName((bd && (bd.name || bd.identity_display)) || state.currentBoard || '');
-}
-function legendIndex(timeSec) {
-    if (timeSec != null && state.timeIndex) { const i = state.timeIndex.get(timeSec); if (i !== undefined) return i; }
-    return (state.ohlcv || []).length - 1;
-}
-function ensureLegendEl(key, host, sub) {
-    if (!host) return null;
-    state.legendEls = state.legendEls || {};
-    let el = state.legendEls[key];
-    if (!el || !el.isConnected) {
+// ============ OHLC 读数行（Phase A-2） ============
+// Vela 原生只把指标值画进 pane legend，OHLC 不在其中（dataWindowOHLC 仅进 aria/readout）
+// → 该行自渲染，数据取官方十字线载荷（原始数值）/读数桥（格式化串），不自造数据。
+export function refreshIndicatorBar() { renderIndicatorBar(); }
+function _fmtOhlc(v) { return (v == null || !isFinite(v)) ? '--' : Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function _ensureOhlcEl() {
+    // 画布外条带（Vela 无 legend 位置配置，原生 legend 恒占画布内第一行）→ 本行置于图表上方=视觉第一行
+    const container = document.querySelector('.chart-container');
+    const host = document.getElementById('main-chart');
+    if (!container || !host) return null;
+    let el = document.getElementById('ohlc-legend');
+    if (!el || !el.isConnected || el.parentElement !== container) {
+        if (el && el.parentElement) el.parentElement.removeChild(el);
         el = document.createElement('div');
-        el.className = 'legend' + (sub ? ' sub' : '');
-        host.appendChild(el);
-        state.legendEls[key] = el;
+        el.id = 'ohlc-legend';
+        container.insertBefore(el, host);
     }
     return el;
 }
-function indLegendHtml(ind, i) {
-    const dot = (c) => `<span class="dot" style="background:${c}"></span>`;
-    if (ind.lines && ind.lines.length) {
-        return ind.lines.map(l => {
-            const c = (l.style && l.style.color) || '#4fc3f7';
-            return `<span class="lg">${dot(c)}${l.name} <b>${fmtP(l.values ? l.values[i] : null)}</b></span>`;
-        }).join('');
-    }
-    const c = (ind.style && ind.style.color) || '#4fc3f7';
-    return `<span class="lg">${dot(c)}${displayName(ind)} <b>${fmtP(ind.values ? ind.values[i] : null)}</b></span>`;
+function _renderOhlc(o) {
+    const el = _ensureOhlcEl();
+    if (!el || !o) return;
+    const O = (o.open !== undefined ? o.open : o.o), H = (o.high !== undefined ? o.high : o.h),
+          L = (o.low !== undefined ? o.low : o.l), C = (o.close !== undefined ? o.close : o.c);
+    const num = (x) => (typeof x === 'string' ? x : _fmtOhlc(x));
+    let chg = null, cls = '';
+    if (typeof O === 'number' && typeof C === 'number') { chg = O ? (C - O) / O * 100 : 0; cls = C >= O ? 'up' : 'down'; }
+    el.innerHTML = `<span>O <b>${num(O)}</b></span><span>H <b>${num(H)}</b></span><span>L <b>${num(L)}</b></span>`
+        + `<span>C <b class="${cls}">${num(C)}</b></span>`
+        + (chg == null ? '' : `<span class="${chg >= 0 ? 'up' : 'down'}">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</span>`);
+    // 避让：原生价格面板 legend 占顶部若干行（每个叠加指标一行）→ 本行下移
+    void pricePaneIndicatorRows;   // 条带化后无需避让偏移
 }
-function setLegend(key, host, sub, rows, maxRows) {
-    const el = ensureLegendEl(key, host, sub);
-    if (!el) return;
-    el.classList.toggle('inline', rows.length > maxRows);
-    el.innerHTML = rows.map(r => `<div class="row">${r}</div>`).join('');
-}
-export function updateLegends(timeSec) {
-    const i = legendIndex(timeSec);
-    const b = (state.ohlcv || [])[i];
-    const mainRows = [];
-    if (b) {
-        const prev = state.ohlcv[i - 1] || b;
-        const chg = prev.close ? (b.close - prev.close) / prev.close * 100 : 0;
-        const cls = b.close >= b.open ? 'up' : 'down';
-        mainRows.push(`<span class="sym">${boardLabel()} · ${state.currentTimeframe || ''}</span>`
-            + `<span>O <b>${fmtP(b.open)}</b></span><span>H <b>${fmtP(b.high)}</b></span>`
-            + `<span>L <b>${fmtP(b.low)}</b></span><span>C <b class="${cls}">${fmtP(b.close)}</b></span>`
-            + `<span class="${chg >= 0 ? 'up' : 'down'}">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</span>`);
-        Object.values(state.indicators || {}).forEach(ind => { if (!ind.subplot) mainRows.push(indLegendHtml(ind, i)); });
-    }
-    setLegend('main', document.getElementById('main-chart'), false, mainRows, 6);
-    // 成交量行
-    setLegend('volume', state.volDiv, true,
-        b ? [`<span class="lg">VOL <b class="${b.close >= b.open ? 'up' : 'down'}">${fmtC(b.volume)}</b></span>`] : [], 1);
-    // 副图行（Vela pane 无自绘 div：图例挂主图容器下缘，sub 样式）
-    Object.keys(state.subplots || {}).forEach(name => {
-        const rows = [];
-        Object.values(state.indicators || {}).forEach(ind => { if (ind.subplot === name) rows.push(indLegendHtml(ind, i)); });
-        setLegend('subplot_' + name, document.getElementById('main-chart'), true, rows, 2);
-    });
-}
-// 十字线跟随桥：mousemove → readDataWindow → 时间反查 idx
-(function bindLegendHover() {
-    document.addEventListener('mousemove', (e) => {
-        const host = document.getElementById('main-chart');
-        if (!host || !host.contains(e.target)) { return; }
+(function bindOhlcRow() {
+    onCrosshair((p) => {
+        const o = p && p.ohlc;
+        if (o) { _renderOhlc(o); return; }
         const rw = readDataWindow();
-        if (!rw || !rw.date) { return; }
-        // readout.date = 'YYYY-MM-DD'（+time）→ 反查 timeIndex（秒键）
-        const sec = Date.parse(rw.date + (rw.time ? 'T' + rw.time : 'T00:00') + 'Z') / 1000;
-        updateLegends(isFinite(sec) ? Math.floor(sec) : null);
-    }, { passive: true });
-    document.addEventListener('mouseleave', () => updateLegends(null));
+        if (rw && rw.ohlc) _renderOhlc(rw.ohlc);
+    });
 })();
 
+// ============ 图例 ============
+// Phase A（Vela 原生体验）：图例全部交给 Vela 原生 pane legend（价格/成交量/副图统一，
+// 十字线天然跟随）。自绘 DOM 图例体系（含时区敏感反查桥）与原生 legend 冲突 → 整体移除。
 // ============ 截图（snapshot_request） ============
 export function captureSnapshot() {
-    const dataUrl = captureSnapshotCore();
-    if (!dataUrl) return;
-    // 图例覆盖层合成（自绘 legend DOM 不在 canvas 内）
-    fetch(dataUrl).then(r => r.blob()).then(blob => createImageBitmap(blob)).then(bmp => {
+    const shots = snapshotAll();
+    if (!shots.length) return;
+    Promise.all(shots.map(sh => fetch(sh.url).then(r => r.blob()).then(bl => createImageBitmap(bl)).then(bmp => ({ key: sh.key, bmp })))).then(items => {
+        const W = Math.max(...items.map(it => it.bmp.width));
+        const H = items.reduce((a, it) => a + it.bmp.height, 0);
         const canvas = document.createElement('canvas');
-        canvas.width = bmp.width; canvas.height = bmp.height;
+        canvas.width = W; canvas.height = H;
         const ctx = canvas.getContext('2d');
-        ctx.drawImage(bmp, 0, 0);
-        const legend = document.querySelector('#main-chart .legend');
-        if (legend) {
-            ctx.font = '12px -apple-system, "Segoe UI", sans-serif';
-            ctx.fillStyle = '#d1d4dc'; ctx.textBaseline = 'top';
-            legend.innerText.split('\n').forEach((line, i) => { if (line.trim()) ctx.fillText(line, 8, 6 + i * 16); });
-        }
+        ctx.fillStyle = '#131722'; ctx.fillRect(0, 0, W, H);
+        let y = 0;
+        items.forEach(it => {
+            ctx.drawImage(it.bmp, 0, y);
+            y += it.bmp.height;
+        });
         return canvas.toDataURL('image/png');
     }).then(image => fetch('/api/snapshot', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },

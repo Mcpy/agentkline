@@ -40,6 +40,8 @@
         <div class="chart-container">
             <div id="main-chart"></div>
             <div id="subplots"></div>
+            <!-- 归因标识（Apache-2.0 NOTICE §4(d) 甲案）：置于图表容器内、pane 栈正下方，随副图增减跟随 -->
+            <div class="vela-attribution">Charts by <a href="https://velacharts.dev" target="_blank" rel="noopener">Vela™</a>（LuxAlgo，Apache-2.0）</div>
             <div class="loading-overlay" id="loading">
                 <div class="loading-text" data-i18n="chart.loading">正在执行脚本...</div>
             </div>
@@ -99,6 +101,5 @@
 
     <script src="/assets/vela.global.min.js"></script>
     <script type="module" src="/src/main.js"></script>
-<footer class="vela-attribution">Charts by <a href="https://velacharts.dev" target="_blank" rel="noopener">Vela™</a>（LuxAlgo，Apache-2.0）</footer>
 </body>
 </html>

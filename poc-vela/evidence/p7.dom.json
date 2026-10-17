@@ -1,0 +1,3 @@
+{
+ "#results": "feed.load AAA/USD\n① chart.renderer.set(\"attribution\",false): 调用无异常（水印目验见截图）\n① chart.renderer 面: renderer\n① renderer 方法: constructor,supports,get,set,setLegendActions,setLegendCallouts,setLegendOverviewAction,openIndicatorSettings,screenshot,screenshotCanvas,getConfig,applyConfig,onConfigChanged,onCrosshairMove,onClick,onAxisLongPress,dataWindowReadout,setSymbolPicker,focus,setExternalCrosshair,closeDialogs,openSettings,setSettingsSections,setSettingsVisibility,listSettingsIds,setLayoutMode,setWallClock\n② viewport:changed fired: 1 | range:changed: 0\nfeed.load BBB/USD\n③ setMarket resolve ok; market:changed fired: 1\n④ isGroupVisible 初/关/开: true false true\nP7 结论：四点补验完成，见上"
+}

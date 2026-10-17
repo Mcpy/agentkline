@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>P12 — setMarket 同参是否 no-op / 翻符号是否真重载</title>
+<style>body{background:#14161a;color:#ddd;font:12px monospace;margin:0}#chart{height:520px}#results{white-space:pre-wrap;padding:8px}</style></head>
+<body>
+<div id="chart"></div>
+<div id="results">running…</div>
+<script src="./package/dist/vela.global.min.js"></script>
+<script src="./mock-data.js"></script>
+<script>
+const R = [];
+const log = (...a) => { R.push(a.join(' ')); document.getElementById('results').textContent = R.join('\n'); console.log(...a); };
+let served = [];
+let BARS = MOCK.ohlcv.slice(100);          // 初始 400 根
+const feed = {
+    load: async (cfg) => { served.push({ sym: cfg && cfg.symbol, n: BARS.length }); return BARS.slice(); },
+    subscribe: (cfg, cb) => () => {},
+};
+(async () => {
+    const chart = new window.Vela.Vela('#chart', { symbol: 'AK:AAA', timeframe: '1d', theme: 'dark', live: true }, { dataFeed: feed });
+    await chart.ready();
+    await new Promise(r => setTimeout(r, 800));
+    log('① 初始 load 次数:', served.length, JSON.stringify(served));
+
+    await chart.setMarket({ symbol: 'AK:AAA', timeframe: '1d' });      // 同参
+    await new Promise(r => setTimeout(r, 800));
+    log('② 同参 setMarket 后 load 次数:', served.length, JSON.stringify(served.slice(-2)));
+
+    BARS = MOCK.ohlcv.slice();                                          // 服务端补到 500 根
+    await chart.setMarket({ symbol: 'AK:RELOAD', timeframe: '1d' });    // 翻符号
+    await new Promise(r => setTimeout(r, 800));
+    log('③ 翻符号后 load 次数:', served.length, JSON.stringify(served.slice(-2)));
+
+    await chart.setMarket({ symbol: 'AK:AAA', timeframe: '1d' });       // 翻回
+    await new Promise(r => setTimeout(r, 800));
+    log('④ 翻回后 load 次数:', served.length, JSON.stringify(served.slice(-2)));
+    chart.setVisibleRange({ from: MOCK.ohlcv[0].time, to: MOCK.ohlcv[120].time });
+    await new Promise(r => setTimeout(r, 600));
+    log('P12 完成：目验截图左缘（翻符号重载后应有 500 根=更早的蜡烛）');
+})();
+</script>
+</body>
+</html>

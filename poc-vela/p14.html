@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>P14 — getVisibleRange / setVisibleRange 单位对称性</title>
+<style>body{background:#14161a;color:#ddd;font:12px monospace;margin:0}#chart{height:480px}#results{white-space:pre-wrap;padding:8px}</style></head>
+<body>
+<div id="chart"></div>
+<div id="results">running…</div>
+<script src="./package/dist/vela.global.min.js"></script>
+<script src="./mock-data.js"></script>
+<script>
+const R = [];
+const log = (...a) => { R.push(a.join(' ')); document.getElementById('results').textContent = R.join('\n'); console.log(...a); };
+const feed = { load: async () => MOCK.ohlcv.slice(), subscribe: (c, cb) => () => {} };
+(async () => {
+    const chart = new window.Vela.Vela('#chart', { symbol: 'AK:AAA', timeframe: '1d', theme: 'dark', live: true }, { dataFeed: feed });
+    await chart.ready();
+    await new Promise(r => setTimeout(r, 600));
+    const T0 = MOCK.ohlcv[100].time, T1 = MOCK.ohlcv[200].time;   // mock 的 time 单位=ms
+    log('mock bar time 样本(ms?):', T0, T1);
+    chart.setVisibleRange({ from: T0, to: T1 });                  // 按 ms 设
+    await new Promise(r => setTimeout(r, 500));
+    const r1 = chart.getVisibleRange();
+    log('setVisibleRange(ms) 后 getVisibleRange =', JSON.stringify(r1));
+    log('=> get 单位:', (r1 && Math.abs(r1.from - T0) < 2e3) ? 'ms（对称）' : (r1 && Math.abs(r1.from - T0/1000) < 2) ? '秒（不对称！）' : '未知 ' + r1.from);
+    // 模拟 bug7：把 get 的返回值原样塞回 set（我的恢复链做法）
+    if (r1) { chart.setVisibleRange(r1); await new Promise(r => setTimeout(r, 500));
+        const r2 = chart.getVisibleRange(); log('原样回塞后 getVisibleRange =', JSON.stringify(r2)); }
+})();
+</script>
+</body>
+</html>

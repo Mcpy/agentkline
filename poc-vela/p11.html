@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>P11 — onBar 老 bar head-merge 语义</title>
+<style>body{background:#14161a;color:#ddd;font:12px monospace;margin:0}#chart{height:420px}#results{white-space:pre-wrap;padding:8px}</style></head>
+<body>
+<div id="chart"></div>
+<div id="results">running…</div>
+<script src="./package/dist/vela.global.min.js"></script>
+<script src="./mock-data.js"></script>
+<script>
+const R = [];
+const log = (...a) => { R.push(a.join(' ')); document.getElementById('results').textContent = R.join('\n'); console.log(...a); };
+(async () => {
+    let onBar = null;
+    const feed = {
+        load: async () => MOCK.ohlcv.slice(100),          // 初始只给后 400 根
+        subscribe: (cfg, cb) => { onBar = cb; return () => {}; },
+    };
+    const chart = new window.Vela.Vela('#chart', { symbol: 'M/U', timeframe: '1d', theme: 'dark', live: true }, { dataFeed: feed });
+    await chart.ready();
+    log('初始 bars（inspect 无 bars 数，用 visibleRange+截图目验）');
+    await new Promise(r => setTimeout(r, 800));
+    // 喂老 bar（head 方向 100 根，从老到新）
+    for (let i = 0; i < 100; i++) onBar(Object.assign({}, MOCK.ohlcv[i]));
+    await new Promise(r => setTimeout(r, 1000));
+    // 视口设到老区域看有没有数据
+    chart.setVisibleRange({ from: MOCK.ohlcv[0].time, to: MOCK.ohlcv[150].time });
+    await new Promise(r => setTimeout(r, 800));
+    log('已喂 100 老 bar 并视口到老区域：目验截图左半有无蜡烛');
+    log('P11 完成');
+})();
+</script>
+</body>
+</html>

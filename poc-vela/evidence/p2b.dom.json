@@ -1,0 +1,3 @@
+{
+ "#results": "chart 方法总数: 21\nALL: addIndicator, addNativeIndicator, availableNativeIndicators, constructor, destroy, getVisibleRange, historyComplete, indicators, inspect, on, panBy, presentNativeIndicators, ready, registerEngine, resize, runIndicator, runScript, setMarket, setTheme, setVisibleRange, setVisibleRangePreset\nTICK/BAR 相关: \nEVENT 相关: on"
+}

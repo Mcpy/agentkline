@@ -1,0 +1,129 @@
+{
+ "version": 1,
+ "drawings": [
+  {
+   "id": "dw-1",
+   "type": "hline",
+   "paneId": "price",
+   "anchors": [
+    {
+     "time": 1725667200000,
+     "price": 33610.1520112661
+    }
+   ],
+   "style": {
+    "lineColor": "#38c0fd",
+    "lineWidth": 2,
+    "lineStyle": "dashed",
+    "color": "#ffee58",
+    "width": 3
+   },
+   "locked": false,
+   "visible": true,
+   "zIndex": -0.5,
+   "createdAt": 1791017573445
+  },
+  {
+   "id": "dw-2",
+   "type": "trendline",
+   "paneId": "price",
+   "anchors": [
+    {
+     "time": 1712707200000,
+     "price": 41886.409402669255
+    },
+    {
+     "time": 1729987200000,
+     "price": 28995.197997536477
+    }
+   ],
+   "style": {
+    "lineColor": "#38c0fd",
+    "lineWidth": 2,
+    "lineStyle": "solid",
+    "color": "#42a5f5"
+   },
+   "locked": false,
+   "visible": true,
+   "zIndex": -0.5,
+   "createdAt": 1791017573445
+  },
+  {
+   "id": "dw-3",
+   "type": "box",
+   "paneId": "price",
+   "anchors": [
+    {
+     "time": 1717027200000,
+     "price": 44458.68515491543
+    },
+    {
+     "time": 1725667200000,
+     "price": 31929.644410702796
+    }
+   ],
+   "style": {
+    "lineColor": "#38c0fd",
+    "lineWidth": 1,
+    "lineStyle": "solid",
+    "fillColor": "#38c0fd26",
+    "color": "#66bb6a"
+   },
+   "locked": true,
+   "visible": true,
+   "zIndex": -0.5,
+   "createdAt": 1791017573446
+  },
+  {
+   "id": "dw-5",
+   "type": "arrow",
+   "paneId": "price",
+   "anchors": [
+    {
+     "time": 1709251200000,
+     "price": 36227.18468790799
+    }
+   ],
+   "style": {
+    "lineColor": "#38c0fd",
+    "lineWidth": 2,
+    "lineStyle": "solid",
+    "arrowRight": true
+   },
+   "locked": false,
+   "visible": true,
+   "zIndex": -0.5,
+   "createdAt": 1791017573447
+  },
+  {
+   "id": "dw-4",
+   "type": "text",
+   "paneId": "price",
+   "anchors": [
+    {
+     "time": 1721347200000,
+     "price": 43909.26020259685
+    }
+   ],
+   "style": {
+    "lineColor": "#38c0fd",
+    "lineWidth": 1,
+    "lineStyle": "solid"
+   },
+   "text": {
+    "0": "P",
+    "1": "o",
+    "2": "C",
+    "3": " ",
+    "4": "文",
+    "5": "本",
+    "6": "标",
+    "7": "注"
+   },
+   "locked": false,
+   "visible": true,
+   "zIndex": 6,
+   "createdAt": 1791017573446
+  }
+ ]
+}

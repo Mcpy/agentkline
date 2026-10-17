@@ -1,0 +1,3 @@
+{
+ "#results": "histogram emit ok\ncolumns emit ok\nline emit ok\ninspect: [{\"t\":\"volume\",\"pane\":\"price\",\"series\":{}},{\"t\":\"p9-histogram\",\"pane\":\"pane-native-2\",\"series\":{\"histogram\":1}},{\"t\":\"p9-columns\",\"pane\":\"pane-native-3\",\"series\":{\"columns\":1}},{\"t\":\"p9-line\",\"pane\":\"pane-native-4\",\"series\":{\"line\":1}}]\nP9 完成（目验三 pane 哪个有柱）"
+}

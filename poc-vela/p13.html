@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>P13 — crosshair 订阅入口内省</title>
+<style>body{background:#14161a;color:#ddd;font:12px monospace;margin:0}#chart{height:480px}#results{white-space:pre-wrap;padding:8px}</style></head>
+<body>
+<div id="chart"></div>
+<div id="results">running…</div>
+<script src="./package/dist/vela.global.min.js"></script>
+<script src="./mock-data.js"></script>
+<script>
+const R = [];
+const log = (...a) => { R.push(a.join(' ')); document.getElementById('results').textContent = R.join('\n'); console.log(...a); };
+const feed = { load: async () => MOCK.ohlcv.slice(), subscribe: (c, cb) => () => {} };
+(async () => {
+    const chart = new window.Vela.Vela('#chart', { symbol: 'AK:AAA', timeframe: '1d', theme: 'dark', live: true }, { dataFeed: feed });
+    await chart.ready();
+    const proto = o => o ? Object.getOwnPropertyNames(Object.getPrototypeOf(o)).concat(Object.keys(o)) : [];
+    log('chart.onCrosshairMove:', typeof chart.onCrosshairMove);
+    log('renderer ctor:', chart.renderer && chart.renderer.constructor && chart.renderer.constructor.name);
+    log('renderer proto 含 crosshair:', proto(chart.renderer).filter(k => /cross/i.test(k)));
+    const inner = chart.renderer && chart.renderer.renderer;
+    log('renderer.renderer:', inner ? inner.constructor.name : null, '| onCrosshairMove:', inner ? typeof inner.onCrosshairMove : null);
+    const inner2 = inner && inner.renderer;
+    log('renderer.renderer.renderer:', inner2 ? inner2.constructor.name : null, '| onCrosshairMove:', inner2 ? typeof inner2.onCrosshairMove : null);
+    // 逐层试订阅
+    let hooked = null;
+    for (const [name, obj] of [['chart', chart], ['renderer', chart.renderer], ['inner', inner], ['inner2', inner2]]) {
+        if (obj && typeof obj.onCrosshairMove === 'function') {
+            try {
+                obj.onCrosshairMove(p => { window.__lastCross = p; });
+                hooked = name; break;
+            } catch (e) { log(name, 'subscribe throw', e.message); }
+        }
+    }
+    log('hooked at:', hooked);
+    await new Promise(r => setTimeout(r, 500));
+    log('P13 ready，等待鼠标移动…');
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>P10 — pane heightWeight 活改 + 动态总高（单图表不压缩主图方案）</title>
+<style>body{background:#14161a;color:#ddd;font:12px monospace;margin:0}#wrap{height:700px;overflow-y:auto}#chart{width:100%}#results{white-space:pre-wrap;padding:8px}</style></head>
+<body>
+<div id="wrap"><div id="chart"></div></div>
+<div id="results">running…</div>
+<script src="./package/dist/vela.global.min.js"></script>
+<script src="./mock-data.js"></script>
+<script>
+const R = [];
+const log = (...a) => { R.push(a.join(' ')); document.getElementById('results').textContent = R.join('\n'); console.log(...a); };
+const V = window.Vela;
+['vol', 'sub1'].forEach((n, i) => V.registerNativeIndicator({
+    type: 'p10-' + n, title: 'P10 ' + n, paneHint: 'new', overlay: false, legend: true, multiInstance: true,
+    inputsSchema: () => [], defaultInputs: () => ({}),
+    create: () => ({
+        start(ctx) {
+            ctx.emit({ series: [{ id: 's-' + n, title: n, paneId: '', kind: 'histogram',
+                points: MOCK.ohlcv.map(b => ({ time: b.time, value: b.volume / (i + 1) })),
+                style: { color: i ? '#ab47bc' : '#26a69a', width: 1, lineStyle: 'solid', base: 0 } }] });
+        },
+        onBars() {}, setInputs() {}, suspend() {}, resume() {}, stop() {},
+    }),
+}));
+(async () => {
+    const MAIN_H = 450, VOL_H = 110, SUB_H = 150;
+    const chart = new V.Vela('#chart', { data: MOCK.ohlcv.slice(), symbol: 'M/U', timeframe: '1d', theme: 'dark' });
+    await chart.ready();
+    chart.addNativeIndicator('p10-vol');
+    chart.addNativeIndicator('p10-sub1');
+    await new Promise(r => setTimeout(r, 800));
+
+    // ① panes.list() 结构（heightWeight 在不在）
+    let pl = chart.panes.list();
+    log('① panes.list():', JSON.stringify(pl).slice(0, 400));
+
+    // ② 活改 heightWeight = 目标像素 + 总高 = Σ 目标 + resize → 看是否精确像素
+    const targets = { };   // paneId → 目标 px
+    pl = chart.panes.list();
+    pl.forEach((p, i) => { targets[p.id] = i === 0 ? MAIN_H : (i === 1 ? VOL_H : SUB_H); });
+    const total = Object.values(targets).reduce((a, b) => a + b, 0);
+    document.getElementById('chart').style.height = total + 'px';
+    pl.forEach(p => { p.heightWeight = targets[p.id]; });
+    chart.resize();
+    await new Promise(r => setTimeout(r, 1000));
+    // 量实测：pane 边界用 inspect 或截图目验；先输出 list 看 weight 是否留住
+    log('② 改后 list():', JSON.stringify(chart.panes.list()).slice(0, 400));
+    log('② 总高设置:', total, 'px（主450+vol110+sub150）');
+
+    // ③ 再加一个 pane 验证"每加一副图总高变高"动态性
+    V.registerNativeIndicator({
+        type: 'p10-sub2', title: 'P10 sub2', paneHint: 'new', overlay: false, legend: true, multiInstance: true,
+        inputsSchema: () => [], defaultInputs: () => ({}),
+        create: () => ({
+            start(ctx) { ctx.emit({ series: [{ id: 's-sub2', title: 'sub2', paneId: '', kind: 'line',
+                points: MOCK.fast, style: { color: '#ffee58', width: 2, lineStyle: 'solid' } }] }); },
+            onBars() {}, setInputs() {}, suspend() {}, resume() {}, stop() {},
+        }),
+    });
+    chart.addNativeIndicator('p10-sub2');
+    await new Promise(r => setTimeout(r, 600));
+    pl = chart.panes.list();
+    const t2 = [MAIN_H, VOL_H, SUB_H, SUB_H];
+    document.getElementById('chart').style.height = t2.reduce((a, b) => a + b, 0) + 'px';
+    pl.forEach((p, i) => { p.heightWeight = t2[i] || SUB_H; });
+    chart.resize();
+    await new Promise(r => setTimeout(r, 800));
+    log('③ 加 pane 后 list():', JSON.stringify(chart.panes.list()).slice(0, 500));
+    log('P10 完成：目验截图 pane 像素比是否 450:110:150:150 且主图未压缩');
+})();
+</script>
+</body>
+</html>

@@ -4,7 +4,7 @@
 
 [English →](README.md)
 
-基于 [lightweight-charts](https://github.com/tradingview/lightweight-charts)，FastAPI 后端，
+基于 [Vela™ by LuxAlgo](https://velacharts.dev)（Apache-2.0），FastAPI 后端，
 服务端 **Python 可脚本化指标**，并通过 **MCP** 为 AI agent 提供一等接入。
 
 > AgentKline 是一个可自托管的交互式 K 线画板：多画板 / 多周期、可插拔数据源、
