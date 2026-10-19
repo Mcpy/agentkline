@@ -1,8 +1,9 @@
 import { t } from './i18n.js';
 import { state, applyState } from './state.js';
+import { applyDrawingUpsert, applyDrawingRemove, applyDrawingsBulk, applyDrawingsRemove } from './vela_adapter.js';
 import { log } from './log.js';
 import { renderBoardTabs, renderTimeframeTabs, switchBoard, switchTimeframe, refreshIntervalOptions } from './ui.js';
-import { renderChart, applyDataUpdate, applyPrependUpdate, updateIndicatorSeries, syncDrawings, renderSubplots, captureSnapshot, setVisibleTimeRange , applyQuoteTick, refreshIndicatorBar } from './render.js';
+import { renderChart, applyDataUpdate, applyPrependUpdate, updateIndicatorSeries, renderSubplots, captureSnapshot, setVisibleTimeRange , applyQuoteTick, refreshIndicatorBar } from './render.js';
 import { refreshSearch } from './search.js';
 // P3：native 双源退役 —— 指标增删改一律走 emit 组差量（syncEmitGroups / updateIndicatorSeries）
 import { groupKeyOfInstance, remountGroupByKey } from './vela_adapter.js';
@@ -121,17 +122,19 @@ import { groupKeyOfInstance, remountGroupByKey } from './vela_adapter.js';
                 break;
             case 'drawing_add':
             case 'drawing_update':
-                if (msg.board_id === state.currentBoard && msg.timeframe === state.currentTimeframe) {
-                    state.drawings[msg.drawing.id] = msg.drawing;
-                    syncDrawings();
-                }
-                log('ws', `${msg.type}: ${msg.drawing.type} (${msg.drawing.id})`);
+                if (msg.board_id === state.currentBoard) applyDrawingUpsert(msg.drawing);
+                log('ws', `${msg.type}: ${msg.drawing?.type} (${msg.drawing?.id})`);
+                break;
+            case 'drawings_add':
+                if (msg.board_id === state.currentBoard) applyDrawingsBulk(msg.drawings);
+                log('ws', `drawings_add: ${msg.drawings?.length || 0}`);
+                break;
+            case 'drawings_remove':
+                if (msg.board_id === state.currentBoard) applyDrawingsRemove(msg.ids);
+                log('ws', `drawings_remove: ${msg.ids?.length || 0}`);
                 break;
             case 'drawing_remove':
-                if (msg.board_id === state.currentBoard && msg.timeframe === state.currentTimeframe) {
-                    delete state.drawings[msg.id];
-                    syncDrawings();
-                }
+                if (msg.board_id === state.currentBoard) applyDrawingRemove(msg.id);
                 log('ws', `drawing_remove: ${msg.id}`);
                 break;
             case 'board_create':

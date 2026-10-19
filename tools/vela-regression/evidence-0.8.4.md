@@ -28,3 +28,18 @@
   - `addNativeIndicator(type, {id, title})` 对 `registerNativeIndicator` 注册的类型**不生效**：`ctx.id` 仍为 `native-N`，`panes.list()` 里 title 仍是 descriptor 标题（内置指标才吃 id/title）⇒ 组键只能落 **type 名**；每指标一个 type + 改名走 `unregisterNativeIndicator` + 重注册 + 重挂载（A1/A2 FAIL 为**预期结论**，非缺陷）。
   - `emit({priceLines})` 挂载 OK（`inspect().totals.priceLines=3`）；`display:{pane:false,legend:false,dataWindow:false}` 的隐藏 anchor series + 三条 zone fill 挂载 OK（`totals.fills=3`，series 计 5=1 值线+4 anchor）⇒ RSI 原生 boundedOscillator 形态可在 emit 口 1:1 复刻（B1/B2 PASS）。
 - 像素级复核（远程 CDP 降级渲染仍可读数）：RSI pane 直方图出现 `30,32,36`/`20,32,33`/`38,24,28` = 中带/超卖区/超买区三色；MACD pane 出现 `8,153,129`/`14,88,77`/`131,38,47`/`242,54,69` = 原生动能四态 + `120,123,134` 零轴。
+
+## 原生画线子系统补验（p10，2026-10-19，dsh）
+- 环境：本机 headless chromium（playwright chromium-headless-shell，`--no-sandbox --disable-gpu`；系统库缺 nspr/nss/X11 系列，已按 Ubuntu 24.04 deb 解包到 `/tmp/syslibs` 以 `LD_LIBRARY_PATH` 运行）。远程 CDP 不可用后首次恢复真机探针能力。
+- p10（`p10.html`）**全绿**：
+  - A 工具栏：`.vela-dtb` 存在、宽 **44px**、7 个分组 cell（Lines/Fibonacci/Patterns/Measurements/Shapes/Text/Icons）+ magnet，容器 `--vela-toolbar-gutter=44px`，canvas 起点 x=44（plot 让位）。
+  - B flyout：真实鼠标悬停/点击组箭头 → `.vela-dtb-flyout` 展开，Lines 组 **17** 项（Trend Line/Horizontal Line/Ray/…）。
+  - C 交互放置：`setTool('trendline')` + 两次真实点击 → 1 条 `anchors=2`，`drawing:created` 到达；id `dw-1`。
+  - D 程序化 add：`add('fibretracement')` → `toJSON()` = `{version:1}`，条目含 `type/anchors/style{lineColor,lineWidth,lineStyle}`。
+  - E 设置：`openSettings(id)` 弹 `.vela-dpop` 快捷条；点 `[data-tip="Settings"]` → `.vela-dsp` 完整面板（Fib：Line/Style/Extend/Levels 24 级/Show on/OK-Cancel），面板矩形 **56,11,362,618** 在视口内不被裁切。
+  - F 撤销/重做：`canUndo()` → undo 减 1 → redo 复原；**`fromJSON()` 会清空撤销栈**（`canUndo` true→false）——据此把「全量 fromJSON」限制在首启/切板。
+  - G 文本：`add('text', text:{value:'P10 文本'})` 中文往返无损。
+- 关键结论（决定 0.5.2 架构）：
+  1. 画线子系统在**核心** `vela.global.min.js` 内（`DrawingStore/DrawingToolbar/IDrawingsRendererPort/79 类型注册表` 均在），不依赖 shell；`drawings` 默认**开启**（toolbar visible）。
+  2. `chart.drawings.add()` **忽略** `init.id`（强制 `store.nextId()` → `dw-N`）⇒ 远端新增要保留服务端 id 只能整份 `fromJSON`；已有 id 的远端修改走 `update()`（保留撤销栈）。
+  3. `DrawingsDocument` 版本 1；`showOn` 周期带 = `s/1/5/15/60/240/D/W/M`（缺省=全周期）；单锚点类型（hline/vline/hray/crossline）只吃 1 个 anchor。

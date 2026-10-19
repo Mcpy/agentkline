@@ -339,6 +339,7 @@ function _layoutPanesNow() {
     const changed = el && el.style.height !== target;
     if (changed) el.style.height = target;   // 仅变化时写：防 ResizeObserver→resize 环（闪烁根因之一）
     if (changed) { try { chart.resize(); } catch (e) {} }
+    syncToolbarSticky();
 }
 let _lastPaneCount = -1;
 function _afterNativeChange() {
@@ -360,8 +361,10 @@ export function renderChartCore() {
         timeframe: state.currentTimeframe || '1d',
         theme: 'dark', live: true, volume: true,   // P2：成交量交原生 volume 指标（独立 pane，store 驱动恒对齐）
         currentPriceLine: true,            // 原生最新价轴标签（替代 0.4 自绘吸附标签）
-        drawings: { toolbar: false },      // 画线工具入口=侧栏桥接（C3）
+        drawings: true,                    // 0.5.2：Vela 原生工具栏（7 组 79 工具，44px 停靠）
     }, { dataFeed: feed });
+    // 探针/控制台把手（e2e 与人工排障；不参与业务逻辑）
+    try { window.__ak = { chart, drawings: () => (chart.drawings ? chart.drawings.all() : []) }; } catch (e) {}
     try { chart.renderer.set('attribution', false); } catch (e) {}   // 归因甲案（R6-2）
     chart.on('viewport:changed', () => _viewportCbs.forEach(cb => cb()));
     chart.on('history:complete', () => { _backfillActive = false; clearTimeout(_backfillActiveT); });
@@ -382,6 +385,8 @@ export function renderChartCore() {
         syncDrawings();
         syncMarks();
         bindDrawingWriteback();
+        bindDrawPrefs();
+        bindToolbarSticky();
     });
 }
 // P3：emit 组差量同步（叠加=每实例一组 ak-ov::<instId>／副图=每组一 pane ak-sub::<name>）+ relayout
@@ -656,35 +661,111 @@ export function readDataWindow() {
 }
 
 // ============================================================================
-// 画线同步（R4 乙案）：state.drawings 双格式读 → Vela doc → drawings.fromJSON（深拷贝）
+// 画线（0.5.2 原生化）—— 运行时真源 = Vela DrawingStore，落盘 = 每板一份 doc
+//   · 装载 loadDrawings：首启/切板 → fromJSON（会清 history/selection，只在这条路径用）
+//   · 远端增量 applyDrawingUpsert/Remove：同 id 同内容 = 本端回显 → 忽略；
+//     已有 id → update（保留撤销栈），新 id → 合并后 fromJSON（Vela add() 不接受外部 id）
+//   · 本地增量 bindDrawingWriteback：created/edited/removed → state 先行 + REST 持久化
 // ============================================================================
-const DRAW_TYPE_MAP = { hline: 'hline', trend: 'trendline', trendline: 'trendline', ray: 'ray', box: 'box' };
-function _toVelaDrawing(d) {
-    const type = DRAW_TYPE_MAP[d.type];
-    if (!type) { console.warn('[ak] drawing type skipped (outside whitelist):', d.type); return null; }
-    let anchors = d.anchors ? clone(d.anchors) : (d.points || []).map(p => ({ time: p.time, price: p.price }));
-    if (!anchors.length) return null;
-    if (type === 'hline') {
-        const last = (state.ohlcv || [])[(state.ohlcv || []).length - 1];
-        anchors = [{ time: (last && last.timestamp) || Date.now(), price: anchors[0].price }];
-    }
-    return {
-        id: d.id, type, paneId: 'price', anchors,
-        style: d.style ? clone(d.style) : {
-            lineColor: d.color || '#ef5350', color: d.color || '#ef5350',
-            lineWidth: d.line_width || d.lineWidth || 2, width: d.line_width || d.lineWidth || 2,
-            lineStyle: LS(d.line_style !== undefined ? d.line_style : d.lineStyle),
-        },
-        locked: !!d.locked, visible: d.visible !== false && d.visible !== null,
-        text: d.text || undefined,
-    };
+function _typeKnown(type) {
+    try { return !!(V.getDrawingType && V.getDrawingType(type)); } catch (e) { return false; }
 }
-export function syncDrawings() {
-    if (!chart || !chart.drawings || !chart.drawings.supported) return;
+// 键序无关深比较：服务端回显把 id 追加到末尾，直接 JSON.stringify 会假阴性
+function _stable(o) {
+    if (Array.isArray(o)) return '[' + o.map(_stable).join(',') + ']';
+    if (o && typeof o === 'object') return '{' + Object.keys(o).sort()
+        .filter(k => o[k] !== undefined)
+        .map(k => JSON.stringify(k) + ':' + _stable(o[k])).join(',') + '}';
+    return JSON.stringify(o === undefined ? null : o);
+}
+function _toVelaDrawing(d) {
+    if (!d || typeof d !== 'object') return null;
+    const type = d.type;
+    if (!type || !_typeKnown(type)) { console.warn('[ak] drawing skipped (unknown type):', d.type); return null; }
+    let anchors = Array.isArray(d.anchors) ? d.anchors : [];
+    anchors = anchors.filter(p => p && p.time != null && p.price != null)
+        .map(p => ({ time: +p.time, price: +p.price }));
+    if (!anchors.length) return null;
+    const out = {
+        id: d.id, type, paneId: d.paneId || 'price', anchors,
+        style: d.style ? { ...d.style } : {},
+        locked: !!d.locked, visible: d.visible !== false && d.visible !== null,
+        text: d.text || undefined, props: d.props || undefined,
+    };
+    if (Number.isFinite(d.zIndex)) out.zIndex = d.zIndex;
+    if (Number.isFinite(d.createdAt)) out.createdAt = d.createdAt;
+    // Vela 的 fib 在 deserialize 时 props 缺 reverse 会默认 true（方向反转）：
+    // 用户手画的 fib 序列化自带 reverse；API/MCP 只给 levels 时补 false，保持 0=高点。
+    if (out.props && type.startsWith('fib') && out.props.reverse === undefined) {
+        out.props = { ...out.props, reverse: false };
+    }
+    if (Array.isArray(d.showOn)) out.showOn = d.showOn;
+    // 单锚点类型只保留第一个锚（防畸形输入让原生 deserialize 失败）
+    if (['hline', 'vline', 'hray', 'crossline'].includes(type) && out.anchors.length > 1) {
+        out.anchors = out.anchors.slice(0, 1);
+    }
+    return out;
+}
+export function drawingsDoc() {
     const doc = { version: 1, drawings: [] };
     Object.values(state.drawings || {}).forEach(d => { const v = _toVelaDrawing(d); if (v) doc.drawings.push(v); });
-    try { chart.drawings.fromJSON(clone(doc)); } catch (e) { console.warn('[ak] drawings.fromJSON:', e.message); }
+    return doc;
 }
+/** 全量装载（首启 / 切板）。fromJSON 清撤销栈与选中——只在整份换源时调用。 */
+export function loadDrawings() {
+    if (!chart || !chart.drawings || !chart.drawings.supported) return;
+    try { chart.drawings.fromJSON(clone(drawingsDoc())); }
+    catch (e) { console.warn('[ak] drawings.fromJSON:', e.message); }
+}
+/** ws 增量：新增/修改。同 id 同内容 = 本端回显 → 忽略。 */
+export function applyDrawingUpsert(raw) {
+    const doc = _toVelaDrawing(raw);
+    if (!doc || !doc.id) return;
+    const cur = state.drawings[doc.id];
+    if (cur && _stable(_toVelaDrawing(cur)) === _stable(doc)) return;   // 自己的回显
+    state.drawings[doc.id] = doc;
+    if (!chart || !chart.drawings) return;
+    if (cur) {
+        try { chart.drawings.update(doc.id, clone(doc)); }
+        catch (e) { console.warn('[ak] drawings.update:', e.message); }
+        return;
+    }
+    loadDrawings();   // 新 id：Vela add() 不接受外部 id，整份替换（远端新增，撤销栈让位）
+}
+/** ws 批量（draw_many）：合并后一次装载。 */
+export function applyDrawingsBulk(list) {
+    if (!Array.isArray(list) || !list.length) return;
+    let changed = false;
+    for (const raw of list) {
+        const doc = _toVelaDrawing(raw);
+        if (!doc || !doc.id) continue;
+        const cur = state.drawings[doc.id];
+        if (cur && _stable(_toVelaDrawing(cur)) === _stable(doc)) continue;
+        state.drawings[doc.id] = doc;
+        changed = true;
+    }
+    if (changed) loadDrawings();
+}
+
+/** ws 批量删除（delete_drawings）：一次 removeMany。 */
+export function applyDrawingsRemove(ids) {
+    if (!Array.isArray(ids) || !ids.length) return;
+    const hit = ids.filter(id => state.drawings[id]);
+    if (!hit.length) return;
+    hit.forEach(id => { delete state.drawings[id]; });
+    if (chart && chart.drawings) {
+        try { chart.drawings.removeMany(hit); }
+        catch (e) { loadDrawings(); }
+    }
+}
+
+/** ws 增量：删除。 */
+export function applyDrawingRemove(id) {
+    if (!id || !state.drawings[id]) return;
+    delete state.drawings[id];
+    if (chart && chart.drawings) { try { chart.drawings.remove(id); } catch (e) {} }
+}
+function syncDrawings() { loadDrawings(); }
 
 // ---- 标记（R4 方案甲：marks lane + panel reason 通道） ----
 let _marksGroupDefined = false;
@@ -706,33 +787,109 @@ export function syncMarks() {
     try { chart.marks.set(marks); } catch (e) { console.warn('[ak] marks.set:', e.message); }
 }
 
-// ---- 画线工具桥 + 写回（乙案透传 _schema:'vela1'） ----
-export function setDrawToolCore(tool) {
-    if (!chart || !chart.drawings) return;
-    const vtype = DRAW_TYPE_MAP[tool] || tool;
-    try { chart.drawings.setTool(chart.drawings.getTool() === vtype ? null : vtype); } catch (e) {}
-}
+// ---- 本地写回：Vela 事件 → state 先行 + REST（服务端广播回来按内容相等丢弃） ----
 let _writebackBound = false;
 export function bindDrawingWriteback() {
     if (_writebackBound || !chart) return;
     _writebackBound = true;
-    const q = `board_id=${encodeURIComponent(state.currentBoard)}&timeframe=${encodeURIComponent(state.currentTimeframe)}`;
+    const find = id => (chart.drawings.all() || []).find(x => x.id === id);
     chart.on('drawing:created', (e) => {
-        const d = (chart.drawings.all() || []).find(x => x.id === (e && e.id));
-        if (d && !state.drawings[d.id]) {
-            fetch('/api/drawing', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ board_id: state.currentBoard, timeframe: state.currentTimeframe, drawing: Object.assign(clone(d), { _schema: 'vela1' }) }) }).catch(() => {});
-        }
+        const d = find(e && e.id); if (!d) return;
+        const doc = _toVelaDrawing(d); if (!doc) return;
+        state.drawings[doc.id] = doc;
+        // 0.5.2 MCP 面：POST /api/drawing 吃 type/anchors/...（不再吃整份 drawing）
+        fetch('/api/drawing', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                board_id: state.currentBoard, type: doc.type, anchors: doc.anchors,
+                style: doc.style, text: doc.text, show_on: doc.showOn,
+                pane_id: doc.paneId, locked: doc.locked, visible: doc.visible, props: doc.props,
+            }) }).catch(() => {});
     });
     chart.on('drawing:edited', (e) => {
-        const d = (chart.drawings.all() || []).find(x => x.id === (e && e.id));
-        if (d) fetch(`/api/drawing/${encodeURIComponent(d.id)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ board_id: state.currentBoard, timeframe: state.currentTimeframe, patch: clone(d) }) }).catch(() => {});
+        const d = find(e && e.id); if (!d) return;
+        const doc = _toVelaDrawing(d); if (!doc) return;
+        const prev = state.drawings[doc.id];
+        if (prev && _stable(prev) === _stable(doc)) return;   // 远端 update 的回放
+        state.drawings[doc.id] = doc;
+        fetch(`/api/drawing/${encodeURIComponent(doc.id)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ board_id: state.currentBoard, patch: clone(doc) }) }).catch(() => {});
     });
     chart.on('drawing:removed', (e) => {
-        const id = e && e.id;
-        if (id && state.drawings[id]) fetch(`/api/drawing/${encodeURIComponent(id)}?${q}`, { method: 'DELETE' }).catch(() => {});
+        const id = e && e.id; if (!id) return;
+        const had = !!state.drawings[id];
+        delete state.drawings[id];
+        if (had) fetch(`/api/drawing/${encodeURIComponent(id)}?board_id=${encodeURIComponent(state.currentBoard || '')}`,
+            { method: 'DELETE' }).catch(() => {});
     });
 }
 
-export function destroyChartCore() { _destroyChart(); }
+// ---- 画线偏好本地持久化（收藏 / 每工具默认样式 / 命名样式；跨刷新保留） ----
+const DRAW_PREF_KEY = 'ak.drawings.prefs.v1';
+function bindDrawPrefs() {
+    if (!chart || !chart.drawings) return;
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(DRAW_PREF_KEY) || 'null'); } catch (e) {}
+    if (saved) {
+        try { if (Array.isArray(saved.favorites)) chart.drawings.setFavorites(saved.favorites); } catch (e) {}
+        try { if (saved.defaults) chart.drawings.setToolDefaults(saved.defaults); } catch (e) {}
+        try { if (saved.templates) chart.drawings.setToolTemplates(saved.templates); } catch (e) {}
+    }
+    const save = () => {
+        try {
+            localStorage.setItem(DRAW_PREF_KEY, JSON.stringify({
+                favorites: chart.drawings.favorites(),
+                defaults: chart.drawings.toolDefaults(),
+                templates: chart.drawings.toolTemplates(),
+            }));
+        } catch (e) {}
+    };
+    chart.on('drawing:favorites', save);
+    chart.on('drawing:defaults', save);
+    chart.on('drawing:templates', save);
+}
+
+export // ---- 画线工具栏滚动吸附 ----
+// 原生条是 Vela 画布内的 absolute 层（height:100%），副图把内容撑高后，页面/容器一滚它就跟着走。
+// 这里按滚动量反补 top 并把高度收进可视区：滚动越过 OHLC 条带后贴容器顶，底部随内容结束。
+let _tbStickyBound = false;
+export function syncToolbarSticky() {
+    const wrap = document.getElementById('main-chart');
+    if (!wrap) return;
+    const cont = wrap.closest('.chart-container');
+    const tb = wrap.querySelector('.vela-dtb');
+    if (!cont || !tb) return;
+    const st = cont.scrollTop;
+    const off = wrap.offsetTop;              // #main-chart 在滚动内容中的起点（OHLC 条带之后）
+    const top = Math.max(0, st - off);       // 越过 OHLC 后固定到容器顶
+    const visible = cont.clientHeight - off + st - top;   // 容器底在 wrapper 坐标系里还剩多少
+    const h = Math.min(wrap.clientHeight - top, visible);
+    const nextTop = top + 'px', nextH = Math.max(120, Math.round(h)) + 'px';
+    if (tb.style.top !== nextTop) tb.style.top = nextTop;
+    if (tb.style.height !== nextH) tb.style.height = nextH;
+}
+function bindToolbarSticky() {
+    const cont = document.querySelector('.chart-container');
+    const wrap = document.getElementById('main-chart');
+    if (!cont || !wrap || _tbStickyBound) return;
+    _tbStickyBound = true;
+    cont.addEventListener('scroll', syncToolbarSticky, { passive: true });
+    if (typeof ResizeObserver !== 'undefined') {
+        const ro = new ResizeObserver(syncToolbarSticky);
+        ro.observe(cont); ro.observe(wrap);
+    }
+    // 把 Vela 写在挂载容器上的工具栏 gutter 镜像到滚动容器，
+    // 供 #ohlc-legend 的 padding-left 与画布内指标图例对齐（折叠时 gutter 变，观察器跟随）。
+    const syncGutter = () => {
+        const g = wrap.style.getPropertyValue('--vela-toolbar-gutter');
+        if (g) cont.style.setProperty('--vela-toolbar-gutter', g);
+    };
+    syncGutter();
+    // 折叠/展开会改 gutter（wrap 的 style 变量）→ 顺带重算吸附高度/位置
+    try {
+        new MutationObserver(() => { syncGutter(); syncToolbarSticky(); })
+            .observe(wrap, { attributes: true, attributeFilter: ['style'] });
+    } catch (e) {}
+    syncToolbarSticky();
+}
+
+function destroyChartCore() { _destroyChart(); }

@@ -1,0 +1,1673 @@
+{
+ "vela": "0.8.4",
+ "source": "tools/vela-regression/package/dist/vela.global.js",
+ "generatedAt": "2026-10-19",
+ "groups": [
+  {
+   "id": "lines",
+   "label": "Lines",
+   "sections": [
+    {
+     "label": "Lines",
+     "tools": [
+      "trendline",
+      "hline",
+      "ray",
+      "extendedline",
+      "vline",
+      "hray",
+      "crossline",
+      "infoline",
+      "trendangle"
+     ]
+    },
+    {
+     "label": "Channels",
+     "tools": [
+      "parallelchannel",
+      "disjointchannel",
+      "flattopbottom",
+      "regressionchannel"
+     ]
+    },
+    {
+     "label": "Pitchforks",
+     "tools": [
+      "pitchfork",
+      "schiffpitchfork",
+      "modifiedschiffpitchfork",
+      "insidepitchfork"
+     ]
+    }
+   ],
+   "tools": [
+    "trendline",
+    "hline",
+    "ray",
+    "extendedline",
+    "vline",
+    "hray",
+    "crossline",
+    "infoline",
+    "trendangle",
+    "parallelchannel",
+    "disjointchannel",
+    "flattopbottom",
+    "regressionchannel",
+    "pitchfork",
+    "schiffpitchfork",
+    "modifiedschiffpitchfork",
+    "insidepitchfork"
+   ]
+  },
+  {
+   "id": "fibonacci",
+   "label": "Fibonacci",
+   "sections": [
+    {
+     "label": "Fibonacci",
+     "tools": [
+      "fibretracement",
+      "fibextension",
+      "fibextensiontrend",
+      "fibfan",
+      "fibtimezones",
+      "fibchannel",
+      "fibspeedfan",
+      "trendfibtime",
+      "fibcircles",
+      "fibarcs",
+      "fibwedge",
+      "fibspiral"
+     ]
+    },
+    {
+     "label": "Price Action",
+     "tools": [
+      "fairvaluegap",
+      "orderblock",
+      "liquidity"
+     ]
+    },
+    {
+     "label": "Gann",
+     "tools": [
+      "gannfan",
+      "gannbox",
+      "gannsquare"
+     ]
+    },
+    {
+     "label": "Geometry",
+     "tools": [
+      "dedekind",
+      "sonic",
+      "supersonic",
+      "goldensonic",
+      "goldensupersonic"
+     ]
+    }
+   ],
+   "tools": [
+    "fibretracement",
+    "fibextension",
+    "fibextensiontrend",
+    "fibfan",
+    "fibtimezones",
+    "fibchannel",
+    "fibspeedfan",
+    "trendfibtime",
+    "fibcircles",
+    "fibarcs",
+    "fibwedge",
+    "fibspiral",
+    "fairvaluegap",
+    "orderblock",
+    "liquidity",
+    "gannfan",
+    "gannbox",
+    "gannsquare",
+    "dedekind",
+    "sonic",
+    "supersonic",
+    "goldensonic",
+    "goldensupersonic"
+   ]
+  },
+  {
+   "id": "patterns",
+   "label": "Patterns",
+   "sections": [
+    {
+     "label": "Patterns",
+     "tools": [
+      "xabcd",
+      "abcd",
+      "headshoulders"
+     ]
+    },
+    {
+     "label": "Elliott Waves",
+     "tools": [
+      "elliottimpulse",
+      "elliottcorrection"
+     ]
+    },
+    {
+     "label": "Harmonics",
+     "tools": [
+      "gartley",
+      "bat",
+      "butterfly",
+      "crab",
+      "shark",
+      "cypher"
+     ]
+    }
+   ],
+   "tools": [
+    "xabcd",
+    "abcd",
+    "headshoulders",
+    "elliottimpulse",
+    "elliottcorrection",
+    "gartley",
+    "bat",
+    "butterfly",
+    "crab",
+    "shark",
+    "cypher"
+   ]
+  },
+  {
+   "id": "measurements",
+   "label": "Measurements",
+   "sections": [
+    {
+     "label": "Measurements",
+     "tools": [
+      "position",
+      "datepricerange",
+      "magnifier"
+     ]
+    },
+    {
+     "label": "Volume",
+     "tools": [
+      "anchoredvwap",
+      "fixedrangevp"
+     ]
+    }
+   ],
+   "tools": [
+    "position",
+    "datepricerange",
+    "magnifier",
+    "anchoredvwap",
+    "fixedrangevp"
+   ]
+  },
+  {
+   "id": "shapes",
+   "label": "Shapes",
+   "sections": [
+    {
+     "label": "Brushes",
+     "tools": [
+      "freehand",
+      "highlighter"
+     ]
+    },
+    {
+     "label": "Arrows",
+     "tools": [
+      "arrow",
+      "arrowmarkup",
+      "arrowmarkdown"
+     ]
+    },
+    {
+     "label": "Shapes",
+     "tools": [
+      "box",
+      "ellipse",
+      "triangle",
+      "polyline",
+      "circle",
+      "rotatedrect",
+      "path",
+      "arc",
+      "curve"
+     ]
+    }
+   ],
+   "tools": [
+    "freehand",
+    "highlighter",
+    "arrow",
+    "arrowmarkup",
+    "arrowmarkdown",
+    "box",
+    "ellipse",
+    "triangle",
+    "polyline",
+    "circle",
+    "rotatedrect",
+    "path",
+    "arc",
+    "curve"
+   ]
+  },
+  {
+   "id": "text",
+   "label": "Text",
+   "sections": [
+    {
+     "label": "Text",
+     "tools": [
+      "text",
+      "callout",
+      "note",
+      "pricenote",
+      "comment",
+      "pricelabel",
+      "signpost"
+     ]
+    }
+   ],
+   "tools": [
+    "text",
+    "callout",
+    "note",
+    "pricenote",
+    "comment",
+    "pricelabel",
+    "signpost"
+   ]
+  },
+  {
+   "id": "icons",
+   "label": "Icons",
+   "sections": [
+    {
+     "label": "Icons",
+     "tools": [
+      "flagmark",
+      "iconstamp"
+     ]
+    }
+   ],
+   "tools": [
+    "flagmark",
+    "iconstamp"
+   ]
+  }
+ ],
+ "tools": [
+  {
+   "type": "trendline",
+   "label": "Trend Line",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "p1",
+     "p2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "lines",
+   "section": "Lines"
+  },
+  {
+   "type": "hline",
+   "label": "Horizontal Line",
+   "anchors": {
+    "min": 1,
+    "max": 1,
+    "slots": [
+     "p"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "lines",
+   "section": "Lines"
+  },
+  {
+   "type": "ray",
+   "label": "Ray",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "p1",
+     "p2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "lines",
+   "section": "Lines"
+  },
+  {
+   "type": "extendedline",
+   "label": "Extended Line",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "p1",
+     "p2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "lines",
+   "section": "Lines"
+  },
+  {
+   "type": "vline",
+   "label": "Vertical Line",
+   "anchors": {
+    "min": 1,
+    "max": 1,
+    "slots": [
+     "p"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "lines",
+   "section": "Lines"
+  },
+  {
+   "type": "hray",
+   "label": "Horizontal Ray",
+   "anchors": {
+    "min": 1,
+    "max": 1,
+    "slots": [
+     "p"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "lines",
+   "section": "Lines"
+  },
+  {
+   "type": "crossline",
+   "label": "Cross Line",
+   "anchors": {
+    "min": 1,
+    "max": 1,
+    "slots": [
+     "p"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "lines",
+   "section": "Lines"
+  },
+  {
+   "type": "infoline",
+   "label": "Info Line",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "p1",
+     "p2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "lines",
+   "section": "Lines"
+  },
+  {
+   "type": "trendangle",
+   "label": "Trend Angle",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "p1",
+     "p2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "lines",
+   "section": "Lines"
+  },
+  {
+   "type": "parallelchannel",
+   "label": "Parallel Channel",
+   "anchors": {
+    "min": 3,
+    "max": 3,
+    "slots": [
+     "p1",
+     "p2",
+     "offset"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "lines",
+   "section": "Channels"
+  },
+  {
+   "type": "disjointchannel",
+   "label": "Disjoint Channel",
+   "anchors": {
+    "min": 4,
+    "max": 4,
+    "slots": [
+     "top1",
+     "top2",
+     "bot1",
+     "bot2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "lines",
+   "section": "Channels"
+  },
+  {
+   "type": "flattopbottom",
+   "label": "Flat Top/Bottom",
+   "anchors": {
+    "min": 3,
+    "max": 3,
+    "slots": [
+     "p1",
+     "p2",
+     "flat"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "lines",
+   "section": "Channels"
+  },
+  {
+   "type": "regressionchannel",
+   "label": "Linear Regression",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "start",
+     "end"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "lines",
+   "section": "Channels"
+  },
+  {
+   "type": "pitchfork",
+   "label": "Pitchfork",
+   "anchors": {
+    "min": 3,
+    "max": 3,
+    "slots": [
+     "pivot",
+     "upper",
+     "lower"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "lines",
+   "section": "Pitchforks"
+  },
+  {
+   "type": "schiffpitchfork",
+   "label": "Schiff Pitchfork",
+   "anchors": {
+    "min": 3,
+    "max": 3,
+    "slots": [
+     "pivot",
+     "upper",
+     "lower"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "lines",
+   "section": "Pitchforks"
+  },
+  {
+   "type": "modifiedschiffpitchfork",
+   "label": "Modified Schiff Pitchfork",
+   "anchors": {
+    "min": 3,
+    "max": 3,
+    "slots": [
+     "pivot",
+     "upper",
+     "lower"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "lines",
+   "section": "Pitchforks"
+  },
+  {
+   "type": "insidepitchfork",
+   "label": "Inside Pitchfork",
+   "anchors": {
+    "min": 3,
+    "max": 3,
+    "slots": [
+     "pivot",
+     "upper",
+     "lower"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "lines",
+   "section": "Pitchforks"
+  },
+  {
+   "type": "fibretracement",
+   "label": "Fib Retracement",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "p1",
+     "p2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Fibonacci"
+  },
+  {
+   "type": "fibextension",
+   "label": "Fib Extension",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "p1",
+     "p2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Fibonacci"
+  },
+  {
+   "type": "fibextensiontrend",
+   "label": "Trend-Based Fib Extension",
+   "anchors": {
+    "min": 3,
+    "max": 3,
+    "slots": [
+     "a",
+     "b",
+     "c"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Fibonacci"
+  },
+  {
+   "type": "fibfan",
+   "label": "Fib Fan",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "p1",
+     "p2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Fibonacci"
+  },
+  {
+   "type": "fibtimezones",
+   "label": "Fib Time Zones",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "p1",
+     "p2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Fibonacci"
+  },
+  {
+   "type": "fibchannel",
+   "label": "Fib Channel",
+   "anchors": {
+    "min": 3,
+    "max": 3,
+    "slots": [
+     "p1",
+     "p2",
+     "offset"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Fibonacci"
+  },
+  {
+   "type": "fibspeedfan",
+   "label": "Fib Speed Resistance Fan",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "p1",
+     "p2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Fibonacci"
+  },
+  {
+   "type": "trendfibtime",
+   "label": "Trend-Based Fib Time",
+   "anchors": {
+    "min": 3,
+    "max": 3,
+    "slots": [
+     "p1",
+     "p2",
+     "p3"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Fibonacci"
+  },
+  {
+   "type": "fibcircles",
+   "label": "Fib Circles",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "p1",
+     "p2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Fibonacci"
+  },
+  {
+   "type": "fibarcs",
+   "label": "Fib Speed Resistance Arcs",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "p1",
+     "p2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Fibonacci"
+  },
+  {
+   "type": "fibwedge",
+   "label": "Fib Wedge",
+   "anchors": {
+    "min": 3,
+    "max": 3,
+    "slots": [
+     "apex",
+     "radius",
+     "angle"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Fibonacci"
+  },
+  {
+   "type": "fibspiral",
+   "label": "Fib Spiral",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "center",
+     "edge"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Fibonacci"
+  },
+  {
+   "type": "fairvaluegap",
+   "label": "Fair Value Gap",
+   "anchors": {
+    "min": 1,
+    "max": 1,
+    "slots": [
+     "candle"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "Click the middle candle of a gap",
+   "group": "fibonacci",
+   "section": "Price Action"
+  },
+  {
+   "type": "orderblock",
+   "label": "Order Block",
+   "anchors": {
+    "min": 1,
+    "max": 1,
+    "slots": [
+     "candle"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "Click the candle that forms the block",
+   "group": "fibonacci",
+   "section": "Price Action"
+  },
+  {
+   "type": "liquidity",
+   "label": "Liquidity",
+   "anchors": {
+    "min": 1,
+    "max": 1,
+    "slots": [
+     "candle"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "Click near a candle's high or low",
+   "group": "fibonacci",
+   "section": "Price Action"
+  },
+  {
+   "type": "gannfan",
+   "label": "Gann Fan",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "p1",
+     "p2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Gann"
+  },
+  {
+   "type": "gannbox",
+   "label": "Gann Box",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "p1",
+     "p2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Gann"
+  },
+  {
+   "type": "gannsquare",
+   "label": "Gann Square",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "p1",
+     "p2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Gann"
+  },
+  {
+   "type": "dedekind",
+   "label": "Dedekind Tessellation",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "c1",
+     "c2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Geometry"
+  },
+  {
+   "type": "sonic",
+   "label": "Sonic",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "d1",
+     "d2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Geometry"
+  },
+  {
+   "type": "supersonic",
+   "label": "Supersonic",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "d1",
+     "d2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Geometry"
+  },
+  {
+   "type": "goldensonic",
+   "label": "Golden Sonic",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "d1",
+     "d2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Geometry"
+  },
+  {
+   "type": "goldensupersonic",
+   "label": "Golden Supersonic",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "d1",
+     "d2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "fibonacci",
+   "section": "Geometry"
+  },
+  {
+   "type": "xabcd",
+   "label": "XABCD Pattern",
+   "anchors": {
+    "min": 5,
+    "max": 5,
+    "slots": [
+     "p0",
+     "p1",
+     "p2",
+     "p3",
+     "p4"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "patterns",
+   "section": "Patterns"
+  },
+  {
+   "type": "abcd",
+   "label": "ABCD Pattern",
+   "anchors": {
+    "min": 4,
+    "max": 4,
+    "slots": [
+     "p0",
+     "p1",
+     "p2",
+     "p3"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "patterns",
+   "section": "Patterns"
+  },
+  {
+   "type": "headshoulders",
+   "label": "Head & Shoulders",
+   "anchors": {
+    "min": 7,
+    "max": 7,
+    "slots": [
+     "p0",
+     "p1",
+     "p2",
+     "p3",
+     "p4",
+     "p5",
+     "p6"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "patterns",
+   "section": "Patterns"
+  },
+  {
+   "type": "elliottimpulse",
+   "label": "Elliott Impulse Wave (1-5)",
+   "anchors": {
+    "min": 5,
+    "max": 5,
+    "slots": [
+     "p0",
+     "p1",
+     "p2",
+     "p3",
+     "p4"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "patterns",
+   "section": "Elliott Waves"
+  },
+  {
+   "type": "elliottcorrection",
+   "label": "Elliott Correction Wave (ABC)",
+   "anchors": {
+    "min": 3,
+    "max": 3,
+    "slots": [
+     "p0",
+     "p1",
+     "p2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "patterns",
+   "section": "Elliott Waves"
+  },
+  {
+   "type": "gartley",
+   "label": "Gartley",
+   "anchors": {
+    "min": 5,
+    "max": 5,
+    "slots": [
+     "p0",
+     "p1",
+     "p2",
+     "p3",
+     "p4"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "patterns",
+   "section": "Harmonics"
+  },
+  {
+   "type": "bat",
+   "label": "Bat",
+   "anchors": {
+    "min": 5,
+    "max": 5,
+    "slots": [
+     "p0",
+     "p1",
+     "p2",
+     "p3",
+     "p4"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "patterns",
+   "section": "Harmonics"
+  },
+  {
+   "type": "butterfly",
+   "label": "Butterfly",
+   "anchors": {
+    "min": 5,
+    "max": 5,
+    "slots": [
+     "p0",
+     "p1",
+     "p2",
+     "p3",
+     "p4"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "patterns",
+   "section": "Harmonics"
+  },
+  {
+   "type": "crab",
+   "label": "Crab",
+   "anchors": {
+    "min": 5,
+    "max": 5,
+    "slots": [
+     "p0",
+     "p1",
+     "p2",
+     "p3",
+     "p4"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "patterns",
+   "section": "Harmonics"
+  },
+  {
+   "type": "shark",
+   "label": "Shark",
+   "anchors": {
+    "min": 5,
+    "max": 5,
+    "slots": [
+     "p0",
+     "p1",
+     "p2",
+     "p3",
+     "p4"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "patterns",
+   "section": "Harmonics"
+  },
+  {
+   "type": "cypher",
+   "label": "Cypher",
+   "anchors": {
+    "min": 5,
+    "max": 5,
+    "slots": [
+     "p0",
+     "p1",
+     "p2",
+     "p3",
+     "p4"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "patterns",
+   "section": "Harmonics"
+  },
+  {
+   "type": "position",
+   "label": "Long/Short Position",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "entry",
+     "stop",
+     "target"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "measurements",
+   "section": "Measurements"
+  },
+  {
+   "type": "datepricerange",
+   "label": "Date & Price Range",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "c1",
+     "c2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "measurements",
+   "section": "Measurements"
+  },
+  {
+   "type": "magnifier",
+   "label": "Magnifier",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "c1",
+     "c2"
+    ]
+   },
+   "placement": "drag",
+   "covers": true,
+   "hint": "Drag an area on the chart to view it at a lower timeframe",
+   "group": "measurements",
+   "section": "Measurements"
+  },
+  {
+   "type": "anchoredvwap",
+   "label": "Anchored VWAP",
+   "anchors": {
+    "min": 1,
+    "max": 1,
+    "slots": [
+     "anchor"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "measurements",
+   "section": "Volume"
+  },
+  {
+   "type": "fixedrangevp",
+   "label": "Fixed Range Volume Profile",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "start",
+     "end"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "measurements",
+   "section": "Volume"
+  },
+  {
+   "type": "freehand",
+   "label": "Brush",
+   "anchors": {
+    "min": 2,
+    "max": 512,
+    "slots": []
+   },
+   "placement": "freehand",
+   "covers": false,
+   "hint": "",
+   "group": "shapes",
+   "section": "Brushes"
+  },
+  {
+   "type": "highlighter",
+   "label": "Highlighter",
+   "anchors": {
+    "min": 2,
+    "max": 512,
+    "slots": []
+   },
+   "placement": "freehand",
+   "covers": false,
+   "hint": "",
+   "group": "shapes",
+   "section": "Brushes"
+  },
+  {
+   "type": "arrow",
+   "label": "Arrow",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "p1",
+     "p2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "shapes",
+   "section": "Arrows"
+  },
+  {
+   "type": "arrowmarkup",
+   "label": "Arrow Mark Up",
+   "anchors": {
+    "min": 1,
+    "max": 1,
+    "slots": [
+     "p"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "shapes",
+   "section": "Arrows"
+  },
+  {
+   "type": "arrowmarkdown",
+   "label": "Arrow Mark Down",
+   "anchors": {
+    "min": 1,
+    "max": 1,
+    "slots": [
+     "p"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "shapes",
+   "section": "Arrows"
+  },
+  {
+   "type": "box",
+   "label": "Rectangle",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "c1",
+     "c2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "shapes",
+   "section": "Shapes"
+  },
+  {
+   "type": "ellipse",
+   "label": "Ellipse",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "c1",
+     "c2"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "shapes",
+   "section": "Shapes"
+  },
+  {
+   "type": "triangle",
+   "label": "Triangle",
+   "anchors": {
+    "min": 3,
+    "max": 3,
+    "slots": [
+     "v1",
+     "v2",
+     "v3"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "shapes",
+   "section": "Shapes"
+  },
+  {
+   "type": "polyline",
+   "label": "Polyline",
+   "anchors": {
+    "min": 2,
+    "max": 512,
+    "slots": []
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "shapes",
+   "section": "Shapes"
+  },
+  {
+   "type": "circle",
+   "label": "Circle",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "center",
+     "edge"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "shapes",
+   "section": "Shapes"
+  },
+  {
+   "type": "rotatedrect",
+   "label": "Rotated Rectangle",
+   "anchors": {
+    "min": 3,
+    "max": 3,
+    "slots": [
+     "p1",
+     "p2",
+     "w"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "shapes",
+   "section": "Shapes"
+  },
+  {
+   "type": "path",
+   "label": "Path",
+   "anchors": {
+    "min": 2,
+    "max": 512,
+    "slots": []
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "shapes",
+   "section": "Shapes"
+  },
+  {
+   "type": "arc",
+   "label": "Arc",
+   "anchors": {
+    "min": 3,
+    "max": 3,
+    "slots": [
+     "p1",
+     "p2",
+     "apex"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "shapes",
+   "section": "Shapes"
+  },
+  {
+   "type": "curve",
+   "label": "Curve",
+   "anchors": {
+    "min": 3,
+    "max": 3,
+    "slots": [
+     "p1",
+     "p2",
+     "control"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "shapes",
+   "section": "Shapes"
+  },
+  {
+   "type": "text",
+   "label": "Text",
+   "anchors": {
+    "min": 1,
+    "max": 1,
+    "slots": [
+     "p"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "text",
+   "section": "Text"
+  },
+  {
+   "type": "callout",
+   "label": "Callout",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "target",
+     "box"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "text",
+   "section": "Text"
+  },
+  {
+   "type": "note",
+   "label": "Note",
+   "anchors": {
+    "min": 1,
+    "max": 1,
+    "slots": [
+     "p"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "text",
+   "section": "Text"
+  },
+  {
+   "type": "pricenote",
+   "label": "Price Note",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "target",
+     "box"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "text",
+   "section": "Text"
+  },
+  {
+   "type": "comment",
+   "label": "Comment",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "target",
+     "box"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "text",
+   "section": "Text"
+  },
+  {
+   "type": "pricelabel",
+   "label": "Price Label",
+   "anchors": {
+    "min": 1,
+    "max": 1,
+    "slots": [
+     "p"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "text",
+   "section": "Text"
+  },
+  {
+   "type": "signpost",
+   "label": "Signpost",
+   "anchors": {
+    "min": 2,
+    "max": 2,
+    "slots": [
+     "target",
+     "box"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "text",
+   "section": "Text"
+  },
+  {
+   "type": "flagmark",
+   "label": "Flag",
+   "anchors": {
+    "min": 1,
+    "max": 1,
+    "slots": [
+     "p"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "icons",
+   "section": "Icons"
+  },
+  {
+   "type": "iconstamp",
+   "label": "Icon",
+   "anchors": {
+    "min": 1,
+    "max": 1,
+    "slots": [
+     "p"
+    ]
+   },
+   "placement": "click",
+   "covers": false,
+   "hint": "",
+   "group": "icons",
+   "section": "Icons"
+  }
+ ]
+}

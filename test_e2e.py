@@ -40,7 +40,10 @@ TOOL_REST_MAP = {
     "get_indicators": ("get", "/api/indicators"),
     "set_markers": ("post", "/api/markers"),
     "get_markers": ("get", "/api/markers"),
-    "add_drawing": ("post", "/api/drawing"),
+    "list_drawing_tools": ("get", "/api/drawing-tools"),
+    "draw_drawing": ("post", "/api/drawing"),
+    "draw_many": ("post", "/api/drawings"),
+    "delete_drawings": ("post", "/api/drawings/delete"),
     "update_drawing": ("post", "/api/drawing/"),
     "delete_drawing": ("delete", "/api/drawing/"),
     "list_drawings": ("get", "/api/drawings"),
@@ -343,23 +346,64 @@ def test(port: int, token: str = None):
                                   "shape": "circle", "text": "bad"}]})
     check("markers 越界丢弃+dropped 回报", len(r.json().get("dropped", [])) == 1
           and r.json().get("count") == 1, r.text)
-    # v0.5 乙案：Vela DrawingsDocument 条目透传存储（drawing 参数优先）+ 0.4 兼容形态并存
-    r = s.post(f"{base}/api/drawing", json={"board_id": "bare", "timeframe": "1d",
-               "drawing": {"type": "trendline", "paneId": "price",
-                           "anchors": [{"time": ts0, "price": 1.0}, {"time": ts0 + 86400000, "price": 2.0}],
-                           "style": {"lineColor": "#42a5f5", "lineWidth": 2, "lineStyle": "solid"},
-                           "_schema": "vela1"}})
+    # v0.5.2 画线 MCP 面：清单 → 画（绝对/语义锚点）→ 改 → 批量 → 校验
+    r = s.get(f"{base}/api/drawing-tools")
+    groups = (r.json() or {}).get("groups") or []
+    check("画线工具目录 7 组/79 种", r.status_code == 200 and len(groups) == 7
+          and sum(g["count"] for g in groups) == 79, r.text[:160])
+    r = s.get(f"{base}/api/drawing-tools", params={"category": "fibonacci", "detail": "true"})
+    fj = r.json() or {}
+    check("按组列工具(含锚点 schema)", fj.get("count") == 23
+          and (fj.get("tools") or [{}])[0].get("anchors", {}).get("slots"), r.text[:200])
+    r = s.post(f"{base}/api/drawing", json={"board_id": "bare", "type": "trendline",
+               "anchors": [{"time": ts0, "price": 1.0}, {"time": ts0 + 86400000, "price": 2.0}],
+               "style": {"lineColor": "#42a5f5", "lineWidth": 2, "lineStyle": "solid"}})
     ok = r.status_code == 200 and (r.json().get("drawing") or {}).get("anchors")
-    check("Vela doc 条目透传存储(乙案)", bool(ok), r.text)
+    check("draw_drawing 绝对锚点", bool(ok), r.text)
     did = (r.json().get("drawing") or {}).get("id")
     if did:
-        r2 = s.post(f"{base}/api/drawing/{did}", json={"board_id": "bare", "timeframe": "1d",
+        r2 = s.post(f"{base}/api/drawing/{did}", json={"board_id": "bare",
                     "patch": {"style": {"lineColor": "#ffee58", "lineWidth": 3, "lineStyle": "dashed"}}})
-        check("嵌套 patch 浅合并(乙案)", (r2.json().get("drawing") or {}).get("style", {}).get("lineColor") == "#ffee58", r2.text)
-        s.delete(f"{base}/api/drawing/{did}?board_id=bare&timeframe=1d")
-    r = s.post(f"{base}/api/drawing", json={"board_id": "bare", "timeframe": "1d", "type": "hline",
-               "points": [{"price": 1.5}], "color": "#ef5350"})
-    check("0.4 兼容形态仍通(甲案遗留读侧)", r.status_code == 200, r.text)
+        check("嵌套 patch 浅合并", (r2.json().get("drawing") or {}).get("style", {}).get("lineColor") == "#ffee58", r2.text)
+        s.delete(f"{base}/api/drawing/{did}?board_id=bare")
+    r = s.post(f"{base}/api/drawing", json={"board_id": "bare", "type": "hline",
+               "anchors": [{"bars_ago": 5, "price": "high"}]})
+    h = (r.json().get("drawing") or {})
+    check("语义锚点 bars_ago+price 角色", r.status_code == 200 and len(h.get("anchors") or []) == 1
+          and h["anchors"][0]["price"] > 0, r.text)
+    if h.get("id"):
+        s.delete(f"{base}/api/drawing/{h['id']}?board_id=bare")
+    r = s.post(f"{base}/api/drawing", json={"board_id": "bare", "type": "hline", "timeframe": "1h",
+               "anchors": [{"price": 1.25}]})
+    d2 = (r.json().get("drawing") or {})
+    check("timeframe 落 showOn 周期带(60)", d2.get("showOn") == ["60"], r.text)
+    if d2.get("id"):
+        ids1h = [x["id"] for x in s.get(f"{base}/api/drawings?board_id=bare&timeframe=1h").json().get("drawings", [])]
+        ids1d = [x["id"] for x in s.get(f"{base}/api/drawings?board_id=bare&timeframe=1d").json().get("drawings", [])]
+        check("list_drawings 按 1h 过滤可见", d2["id"] in ids1h, str(ids1h))
+        check("list_drawings 按 1d 过滤不可见", d2["id"] not in ids1d, str(ids1d))
+        s.delete(f"{base}/api/drawing/{d2['id']}?board_id=bare")
+    r = s.post(f"{base}/api/drawings", json={"board_id": "bare", "items": [
+        {"type": "hline", "anchors": [{"price": 1.1}]},
+        {"type": "trendline", "anchors": [{"bars_ago": 10, "price": "low"}, {"bars_ago": 2, "price": "high"}]}]})
+    bt = r.json() or {}
+    check("draw_many 批量(2 条)", r.status_code == 200 and bt.get("count") == 2, r.text[:160])
+    ids = [d["id"] for d in (bt.get("drawings") or [])]
+    rd = s.post(f"{base}/api/drawings/delete", json={"board_id": "bare", "ids": ids + ["nope"]})
+    check("delete_drawings 批量删除+missing 回报", rd.status_code == 200
+          and len(rd.json().get("deleted") or []) == 2 and rd.json().get("missing") == ["nope"], rd.text[:160])
+    r = s.post(f"{base}/api/drawing", json={"board_id": "bare", "type": "hline", "anchors": [{"price": 1.2}]})
+    st = (r.json().get("drawing") or {}).get("style")
+    check("缺省 style 落库为 {}（Vela fromJSON 必需）", r.status_code == 200 and st == {}, r.text[:160])
+    if (r.json().get("drawing") or {}).get("id"):
+        s.delete(f"{base}/api/drawing/{(r.json().get('drawing') or {}).get('id')}?board_id=bare")
+    r = s.post(f"{base}/api/drawing", json={"board_id": "bare", "type": "nope", "anchors": [{"price": 1}]})
+    check("未知类型 400 UNKNOWN_DRAWING_TYPE", r.status_code == 400 and "UNKNOWN_DRAWING_TYPE" in r.text, r.text)
+    r = s.post(f"{base}/api/drawing", json={"board_id": "bare", "type": "trendline", "anchors": [{"price": 1}]})
+    check("锚点数量校验 400 BAD_ANCHORS", r.status_code == 400 and "BAD_ANCHORS" in r.text, r.text)
+    r = s.post(f"{base}/api/drawing", json={"board_id": "bare", "type": "hline", "pane_id": "ak-sub::RSI",
+               "anchors": [{"price": 1}]})
+    check("副图 pane 暂拒 400 PANE_UNSUPPORTED", r.status_code == 400 and "PANE_UNSUPPORTED" in r.text, r.text)
     r = s.post(f"{base}/api/subplot", json={"name": "p1", "height": 120, "board_id": "bare", "timeframe": "1d"})
     check("subplot 创建", r.status_code == 200, r.text)
     r = s.delete(f"{base}/api/subplot/p1?board_id=bare&timeframe=1d")
@@ -389,7 +433,7 @@ def test(port: int, token: str = None):
     print("🔗 两表面对齐")
     try:
         tools = mcp_tools(base, s)
-        check("MCP 工具数=43", len(tools) == 43, f"got {len(tools)}")
+        check("MCP 工具数=46", len(tools) == 46, f"got {len(tools)}")
         missing = [t for t in tools if t not in TOOL_REST_MAP and t not in MCP_ONLY]
         check("无未映射工具", not missing, str(missing))
         spec = s.get(f"{base}/openapi.json").json()

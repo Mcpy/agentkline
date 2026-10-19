@@ -63,7 +63,14 @@ CSV 入图 = 内置 `datasource/csv` 脚本（path 归操作参数，IDENTITY=[]
 ## 5. 标记 / 划线 / 副图
 
 - `POST /api/markers` `{markers:[...]}`：越界 time 丢弃+`dropped` 回报（不静默）；`GET /api/markers` 读。
-- 划线：`POST /api/drawing`、`POST /api/drawing/{id}`（更新）、`DELETE /api/drawing/{id}`、`GET /api/drawings`（hline/trend）。
+- 画线（v0.5.2 原生化，MCP 三件套）：
+  - `GET /api/drawing-tools?category=&detail=`：79 种 Vela 原生类型 / 7 组清单（type/label/锚点数量/放置方式；`detail=true` 带 slots）。
+  - `POST /api/drawing`：画一条。`type` + `anchors`（绝对 `{time,price}` 或语义 `{bars_ago,price:"high|low|close|open"}`，0=最新一根）+ 可选 `style/text/show_on/pane_id/locked/visible/props`。
+  - `POST /api/drawings`：批量 `items[]`（一次落库、一次广播）。
+  - `POST /api/drawings/delete` `{ids:[...]}`：批量删除（一次广播）；不存在的 id 进 `missing` 回报，幂等。
+  - `POST /api/drawing/{id}`（更新：`visible` 或 `patch` 原生字段，不再收 `timeframe`/`color/line_width/line_style/text`）、`DELETE /api/drawing/{id}?board_id=`（按 id 删，不需 timeframe）、`GET /api/drawings`。
+  画线属**板**不属周期，跨周期可见性由 `showOn`（`s/1/5/15/60/240/D/W/M`，缺省=全周期）控制；
+  `GET /api/drawings?timeframe=1h` 只回该周期实际可见的那些。
 - 副图：`POST /api/subplot`、`PUT /api/subplot/{name}`、`DELETE /api/subplot/{name}`、`GET /api/subplots`；
   删副图连带删除 target 其上的指标实例。
 
@@ -99,7 +106,8 @@ CSV 入图 = 内置 `datasource/csv` 脚本（path 归操作参数，IDENTITY=[]
 | ohlcv_update | **差量**：`{prepended:[bars], appended:[bars], updated:[bars], markers?}`（前端按 ts 合并） |
 | indicator_add / indicator_update | `{inst_id, kind, script, params, scope, subplot, style, lines_style, display_name, values, lines, markers}` |
 | indicator_remove | `{inst_id}` |
-| markers_update / drawing_add / drawing_update / drawing_remove | 同 v0.3 语义 |
+| markers_update | `{markers[]}` |
+| drawing_add / drawing_update / drawing_remove | `{drawing}` / `{drawing}` / `{id}`（画线属板，`timeframe` 字段仅为兼容保留） |
 | board_create / board_remove / board_switch | board_switch 带窗口化 state |
 | **board_locked** | `{source_lock}`（建板即锁/首配锁） |
 | **kline_source_set** | `{script, params, poll_s}` |

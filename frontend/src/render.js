@@ -13,10 +13,10 @@ import { showContextMenu } from './menu.js';
 import { effectiveStyle } from './visual_spec.js';   // V1：芯片色点与图上生效色同源
 import {
     renderChartCore, applyDataUpdateCore, updateIndicatorSeriesCore,
-    syncDrawings as adapterSyncDrawings, setVisibleTimeRangeCore, resizeAllChartsCore,
-    onViewport, getVisibleTimeRange, readDataWindow, onCrosshair, syncSubplotsCore, snapshotAll,
+    setVisibleTimeRangeCore, resizeAllChartsCore,
+    onViewport, getVisibleTimeRange, onCrosshair, syncSubplotsCore, snapshotAll,
     tfMs, extendHistory, remountIndicator,
-    refreshEmittedGroups,
+    refreshEmittedGroups, syncToolbarSticky,
 } from './vela_adapter.js';
 
 // ============ 活体注册表（resize 用；Vela 单图） ============
@@ -168,10 +168,8 @@ export function renderChart() {
     if (renderScheduled) return;
     renderScheduled = true;
     requestAnimationFrame(() => { renderScheduled = false; _doRender(); });
-    // OHLC 行预备填充（首载/重建后无十字线事件，需主动取一次读数）
-    [120, 500, 1200, 2500].forEach(ms => setTimeout(() => {
-        try { const rw = readDataWindow(); if (rw && rw.ohlc) _renderOhlc(rw.ohlc); } catch (e) {}
-    }, ms));
+    // OHLC 行预备填充（首载/重建后无十字线事件）：取最新一根
+    [120, 500, 1200, 2500].forEach(ms => setTimeout(() => { try { _renderOhlcLatest(); } catch (e) {} }, ms));
 }
 function _doRender() {
     try { _renderInner(); } catch (e) { log('error', t('chart.render_err', { e: e.message })); console.error(e); }
@@ -210,6 +208,7 @@ function _renderInner() {
 // ============ 增量更新 ============
 export function applyDataUpdate() {
     applyDataUpdateCore();
+    if (_ohlcHoverTime == null) _renderOhlcLatest();   // 未悬停时条带跟最新价走
     updateDataInfo();
     reportView();
 }
@@ -220,7 +219,6 @@ export function applyPrependUpdate() {
     reportView();
 }
 export function updateIndicatorSeries(instId) { updateIndicatorSeriesCore(instId); }
-export function syncDrawings() { adapterSyncDrawings(); }
 export function renderSubplots() {
     // 单图表同图 pane 架构：无 subplot DOM div；实例 diff + 动态总高全在 adapter
     syncSubplotsCore();
@@ -283,6 +281,7 @@ function _fmtOhlc(v) { return (v == null || !isFinite(v)) ? '--' : Number(v).toL
 function _setOhlcVisible(on) {
     const el = document.getElementById('ohlc-legend');
     if (el) el.style.display = on ? '' : 'none';
+    syncToolbarSticky();   // 条带显隐会改 #main-chart 的 offsetTop（吸附基准）
 }
 function _ensureOhlcEl() {
     // 画布外条带（Vela 无 legend 位置配置，原生 legend 恒占画布内第一行）→ 本行置于图表上方=视觉第一行
@@ -298,24 +297,46 @@ function _ensureOhlcEl() {
     }
     return el;
 }
-function _renderOhlc(o) {
+let _ohlcHoverTime = null;   // 十字线锁定的 bar 时间（ms）；null = 跟随最新
+function _ohlcBarByTime(ms) {
+    const bars = state.ohlcv || [];
+    if (ms != null) {
+        const i = bars.findIndex(b => b.timestamp === ms);
+        if (i >= 0) return { bar: bars[i], prev: bars[i - 1] || null };
+    }
+    const i = bars.length - 1;
+    return i >= 0 ? { bar: bars[i], prev: bars[i - 1] || null } : { bar: null, prev: null };
+}
+function _renderOhlcFromBar(bar, prev) {
     const el = _ensureOhlcEl();
-    if (!el || !o) return;
-    const O = (o.open !== undefined ? o.open : o.o), H = (o.high !== undefined ? o.high : o.h),
-          L = (o.low !== undefined ? o.low : o.l), C = (o.close !== undefined ? o.close : o.c);
-    const num = (x) => (typeof x === 'string' ? x : _fmtOhlc(x));
-    let chg = null, cls = '';
-    if (typeof O === 'number' && typeof C === 'number') { chg = O ? (C - O) / O * 100 : 0; cls = C >= O ? 'up' : 'down'; }
-    el.innerHTML = `<span>O <b>${num(O)}</b></span><span>H <b>${num(H)}</b></span><span>L <b>${num(L)}</b></span>`
-        + `<span>C <b class="${cls}">${num(C)}</b></span>`
-        + (chg == null ? '' : `<span class="${chg >= 0 ? 'up' : 'down'}">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</span>`);
+    if (!el || !bar) return;
+    const pct = prev && prev.close ? (bar.close - prev.close) / prev.close * 100
+        : (bar.open ? (bar.close - bar.open) / bar.open * 100 : 0);
+    const cls = pct >= 0 ? 'up' : 'down';
+    const stamp = formatTimeCN(Math.floor((bar.timestamp || 0) / 1000), isIntraday(state.currentTimeframe));
+    el.innerHTML =
+        `<span class="ohlc-time">${stamp}</span>`
+        + `<span>O <b>${_fmtOhlc(bar.open)}</b></span>`
+        + `<span>H <b>${_fmtOhlc(bar.high)}</b></span>`
+        + `<span>L <b>${_fmtOhlc(bar.low)}</b></span>`
+        + `<span>C <b class="${cls}">${_fmtOhlc(bar.close)}</b></span>`
+        + `<span class="${cls}">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</span>`;
+}
+function _renderOhlcLatest() {
+    const { bar, prev } = _ohlcBarByTime(null);
+    _renderOhlcFromBar(bar, prev);
 }
 (function bindOhlcRow() {
     onCrosshair((p) => {
         const o = p && p.ohlc;
-        if (o) { _renderOhlc(o); return; }
-        const rw = readDataWindow();
-        if (rw && rw.ohlc) _renderOhlc(rw.ohlc);
+        if (o && o.time != null) {
+            _ohlcHoverTime = o.time;
+            const hit = _ohlcBarByTime(o.time);
+            _renderOhlcFromBar(hit.bar || { ...o, timestamp: o.time }, hit.prev);
+            return;
+        }
+        _ohlcHoverTime = null;          // 移出画布：回落到最新一根
+        _renderOhlcLatest();
     });
 })();
 

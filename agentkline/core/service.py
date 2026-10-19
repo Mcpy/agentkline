@@ -28,7 +28,7 @@ def _to_ms(v):
 class AgentKlineService:
     """AgentKline 业务核心"""
 
-    VERSION = "0.5.1"
+    VERSION = "0.5.2"
 
     def __init__(self, scripts_dir: str, limits: dict = None):
         limits = limits or {}
@@ -345,6 +345,8 @@ class AgentKlineService:
     def get_state_windowed(self, board_id, timeframe, window=None):
         """init/switch 携带窗口=最近 N 根（非全树）；左滚历史走 backfill 按需"""
         st = self.state.get_timeframe_state(board_id, timeframe)
+        # 画线属于板：随 init/switch 一并下发（切周期不重新装载，Vela 按 showOn 过滤）
+        st["drawings"] = self.state.list_drawings(board_id)
         w = window or self.init_window
         if st.get("ohlcv") and len(st["ohlcv"]) > w:
             st = {**st, "ohlcv": st["ohlcv"][-w:], "windowed": True}
@@ -642,29 +644,97 @@ class AgentKlineService:
         return {"status": "ok", "inst_id": inst_id,
                 "display_name": inst.get("display_name") or inst.get("auto_label") or inst_id}
 
-    # ============ 划线 drawings ============
+    # ============ 划线 drawings（0.5.2：每板一份，showOn 管跨周期） ============
     def add_drawing(self, board_id, timeframe, drawing):
-        result = self.state.add_drawing(board_id, timeframe, drawing)
+        result = self.state.add_drawing(board_id, drawing, timeframe)
         if not result.get("error"):
-            self._bc({"type": "drawing_add", "board_id": board_id, "timeframe": timeframe,
-                      "drawing": result["drawing"]})
+            self._bc({"type": "drawing_add", "board_id": board_id, "drawing": result["drawing"]})
         return result
 
-    def delete_drawing(self, board_id, timeframe, drawing_id):
-        result = self.state.delete_drawing(board_id, timeframe, drawing_id)
+    def delete_drawing(self, board_id, drawing_id):
+        result = self.state.delete_drawing(board_id, drawing_id)
         if not result.get("error"):
-            self._bc({"type": "drawing_remove", "board_id": board_id, "timeframe": timeframe,
-                      "id": drawing_id})
+            self._bc({"type": "drawing_remove", "board_id": board_id, "id": drawing_id})
         return result
 
-    def update_drawing(self, board_id, timeframe, drawing_id, patch):
-        result = self.state.update_drawing(board_id, timeframe, drawing_id, patch)
-        if not result.get("error"):
-            self._bc({"type": "drawing_update", "board_id": board_id, "timeframe": timeframe,
-                      "drawing": result["drawing"]})
+    def delete_drawings(self, board_id, ids):
+        result = self.state.delete_drawings(board_id, ids)
+        if not result.get("error") and result.get("deleted"):
+            self._bc({"type": "drawings_remove", "board_id": board_id,
+                      "ids": result["deleted"]})
         return result
 
-    def list_drawings(self, board_id, timeframe):
+    def update_drawing(self, board_id, drawing_id, patch):
+        result = self.state.update_drawing(board_id, drawing_id, patch)
+        if not result.get("error"):
+            self._bc({"type": "drawing_update", "board_id": board_id, "drawing": result["drawing"]})
+        return result
+
+    # ---- 画线锚点解析：语义锚点（bars_ago + price 角色）→ 绝对 {time, price} ----
+    _PRICE_ROLES = ("open", "high", "low", "close")
+
+    def resolve_drawing_anchors(self, board_id, timeframe, anchors):
+        """两种锚点写法：
+        · 绝对：{"time": <ms>, "price": <num>}（time/price 缺一由 K 线补）
+        · 语义：{"bars_ago": N, "price": "high"|"low"|"close"|"open"}（0=最新一根）
+        单锚点类型（hline/vline…）可只给 price 或 time，另一维自动补齐。
+        返回 (resolved, error)。"""
+        tf = timeframe or self.state.get_default_timeframe(board_id)
+        bars = self.state.get_ohlcv(board_id, tf) or []
+        by_ts = {int(b["timestamp"]): b for b in bars} if bars else {}
+        out = []
+        for i, a in enumerate(anchors or []):
+            if not isinstance(a, dict):
+                return None, f"BAD_ANCHOR[{i}]: 需为对象 {{time,price}} 或 {{bars_ago,price}}"
+            time = a.get("time")
+            price = a.get("price")
+            ago = a.get("bars_ago")
+            bar = None
+            if ago is not None:
+                try:
+                    ago = int(ago)
+                except (TypeError, ValueError):
+                    return None, f"BAD_ANCHOR[{i}]: bars_ago 需为整数"
+                idx = len(bars) - 1 - ago
+                if idx < 0 or idx >= len(bars):
+                    return None, f"ANCHOR_OUT_OF_RANGE[{i}]: bars_ago={ago}，当前周期仅 {len(bars)} 根"
+                bar = bars[idx]
+            elif time is not None:
+                try:
+                    bar = by_ts.get(int(time))
+                except (TypeError, ValueError):
+                    return None, f"BAD_ANCHOR[{i}]: time 需为毫秒时间戳"
+            elif bars:
+                bar = bars[-1]
+            if isinstance(price, str):
+                role = price.strip().lower()
+                if role not in self._PRICE_ROLES:
+                    return None, (f"BAD_ANCHOR[{i}]: price 角色需为 {'/'.join(self._PRICE_ROLES)}，"
+                                  f"或给数值")
+                if not bar:
+                    return None, f"ANCHOR_NO_BAR[{i}]: 用价格角色时需要该周期的 K 线"
+                price = bar.get(role)
+            if time is None:
+                if bar:
+                    time = bar.get("timestamp")
+                elif ago is None and price is not None and not isinstance(a.get("price"), str):
+                    # 单锚点水平线在无 K 线的周期也能落：时间取当前（hline 只用 price）
+                    import time as _t
+                    time = int(_t.time() * 1000)
+                else:
+                    return None, f"ANCHOR_NO_BAR[{i}]: 该周期无 K 线，请改给绝对 time"
+            if price is None:
+                price = bar.get("close") if bar else 0
+            out.append({"time": int(time), "price": float(price)})
+        return out, ""
+
+    def add_drawings(self, board_id, timeframe, drawings):
+        items = self.state.add_drawings(board_id, drawings, timeframe)
+        if items:
+            self._bc({"type": "drawings_add", "board_id": board_id, "drawings": items})
+        return {"status": "ok", "count": len(items), "drawings": items}
+
+    def list_drawings(self, board_id, timeframe=None):
         return {"drawings": self.state.list_drawings(board_id, timeframe)}
 
     # ============ 区间只读（默认当前 view，秒→毫秒自适应） ============
@@ -789,7 +859,7 @@ class AgentKlineService:
             "indicators": ind_meta,
             "subplots": [s.get("name") for s in tf_state.subplots.values()],
             "markers_count": len(tf_state.markers),
-            "drawings_count": len(tf_state.drawings),
+            "drawings_count": len(board.drawings),
         }
 
     def set_view_range(self, board_id, timeframe, from_time, to_time):

@@ -30,7 +30,7 @@ Since v0.4 the chart is a **scene per symbol** (one symbol, one locked board): t
 - 📈 **Multi-board / multi-timeframe** — switch 1d / 4h / 1h within a board, isolated viewports & indicators
 - 🧩 **Scriptable indicators** — indicators are server-side Python scripts (`scripts/`), sandbox-executed, saved as overlays or subplots
 - 🔌 **Pluggable datasources** — datasources are scripts too (mock, ccxt, …), with optional realtime polling
-- ✏️ **Drawings & markers** — hline / trendline, buy-sell markers, synced to all clients over WebSocket
+- ✏️ **Professional drawing tools (native Vela)** — 79 tools in 7 groups (lines/channels/Fibonacci/Gann/patterns/measurements/text) with magnet, measure ruler, eraser, undo, favorites and style templates; drawings live on the board and use `showOn` for cross-timeframe visibility, synced over WebSocket
 - 📸 **Snapshot** — server-composed screenshots (incl. DOM overlays: last-price label / OHLC / legends) that agents can read directly
 - 🎯 **AI-guided walkthrough** — `switch_board` / `switch_timeframe` / `set_view_range` let the AI bring the user's screen to any board, timeframe and time window (e.g. a backtest drawdown), with its markers & drawings already on it — no manual hunting
 - 🔐 **One symbol, one scene** — boards lock to `(source, symbol)` at creation; switching symbol/source means a new scene; collisions return `SOURCE_LOCKED` with a one-click "create board with this config" suggestion
@@ -81,7 +81,7 @@ cd frontend && npm install && npm run build && cd ..
 ```
 
 Common tools: `overview` / `get_kline` / `get_indicators` / `add_indicator` / `run_script` /
-`add_drawing` / `set_markers` / `set_view_range` / `list_skills` / `load_skill` /
+`draw_drawing` / `draw_many` / `list_drawing_tools` / `set_markers` / `set_view_range` / `list_skills` / `load_skill` /
 `take_snapshot` (returns a standard image block — multimodal models can read the chart directly).
 
 Robustness: out-of-range marker times are dropped and reported in a `dropped` array (never silent);

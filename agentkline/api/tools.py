@@ -15,6 +15,7 @@ from typing import Optional
 
 from .common import service, _resolve, _err, SCRIPTS_DIR
 from ..core import skills as _skills
+from ..core import drawing_spec
 
 REGISTRY = []
 
@@ -143,8 +144,10 @@ def list_subplots(board_id: Optional[str] = None, timeframe: Optional[str] = Non
 
 @api_tool(group="read", path="/api/drawings")
 def list_drawings(board_id: Optional[str] = None, timeframe: Optional[str] = None):
-    """列出画板+周期的所有划线"""
-    board_id, timeframe = _resolve(board_id, timeframe)
+    """列出画板上的全部划线（0.5.2：画线属板不属周期）。
+    给 timeframe 时只返回该周期上可见的（按 drawing.showOn 过滤）。
+    每条是 Vela SerializedDrawing：{id,type,paneId,anchors,style,text?,locked,visible,zIndex,props?,showOn?}。"""
+    board_id = board_id or service.state.current_board_id
     return service.list_drawings(board_id, timeframe)
 
 
@@ -191,45 +194,118 @@ def create_empty_board(board_id: str, name: Optional[str] = None, intervals: Opt
     return service.create_board(board_id, name, intervals)
 
 
+@api_tool(group="read", path="/api/drawing-tools")
+def list_drawing_tools(category: Optional[str] = None, detail: bool = False):
+    """画线工具清单（79 种 Vela 原生类型 / 7 组），先查后画。
+    不带 category=7 组目录（id/label/数量）；带 category（lines/fibonacci/patterns/
+    measurements/shapes/text/icons）=该组工具，每条含 type/label/anchors{min,max}；
+    detail=true 追加 slots/coversSeries/hint。落库用 draw_drawing(type, anchors)。"""
+    return drawing_spec.list_tools(category, detail)
+
+
 @api_tool(group="user_write", method="POST", path="/api/drawing", err_status=400)
-def add_drawing(board_id: Optional[str] = None, timeframe: Optional[str] = None, type: str = "hline",
-                points: Optional[list] = None, color: str = "#ef5350", line_width: int = 2,
-                line_style: str = "solid", text: str = "", drawing: Optional[dict] = None):
-    """画线。type: hline(水平,points=[{price}]) / trend(趋势,points=[{time,price}])，或 drawing=完整原生条目（优先）。
-    两种入参形态：
-    ① 0.4 兼容形态：type: hline(水平,points=[{price}]) / trend(趋势,points=[{time,price},{time,price}])，time 为毫秒时间戳；
-    ② v0.5 原生形态（drawing 参数优先）：完整 Vela DrawingsDocument 条目 dict
-       （{id?,type,paneId,anchors:[{time,price}],style:{lineColor,lineWidth,lineStyle},locked?,visible?,text?}），
-       服务端透传存储（仅补 id），格式版本随 Vela DrawingsDocument 演进。"""
-    board_id, timeframe = _resolve(board_id, timeframe)
-    if drawing:
-        return service.add_drawing(board_id, timeframe, dict(drawing))
-    return service.add_drawing(board_id, timeframe, {"type": type, "points": points, "color": color,
-                                                     "line_width": line_width, "line_style": line_style,
-                                                     "text": text})
+def draw_drawing(board_id: Optional[str] = None, type: str = "hline",
+                 anchors: Optional[list] = None, style: Optional[dict] = None,
+                 text: Optional[dict] = None, show_on: Optional[list] = None,
+                 pane_id: str = "price", locked: bool = False, visible: bool = True,
+                 props: Optional[dict] = None, timeframe: Optional[str] = None):
+    """画一条线（Vela 原生）。先用 list_drawing_tools 查 type 与锚点数量。
+    anchors 两种写法：
+    · 绝对 {"time":<毫秒>,"price":<数值>}
+    · 语义 {"bars_ago":20,"price":"high"|"low"|"close"|"open"}（0=最新一根，由服务端 K 线解析）
+    单锚点类型（hline/vline）可只给 price 或 time，另一维自动补（hline 用最新价/时间，vline 用该根收盘）。
+    style={lineColor,lineWidth,lineStyle,fillColor?,fillOpacity?,extendLeft?,extendRight?}；
+    text={value,color?,size?,hAlign?,vAlign?,bold?,italic?}；
+    show_on=["D","W"]（周期带 s/1/5/15/60/240/D/W/M，缺省=全周期；给 timeframe 且未给 show_on 时钉到该带）；
+    props 为类型专属（Fib 各级、Position 风险参数、VP 行数等）；pane_id 目前仅 price。"""
+    board_id = board_id or service.state.current_board_id
+    if (pane_id or "price") != "price":
+        return {"error": "PANE_UNSUPPORTED: 0.5.2 画线仅支持 price（副图暂未开放）"}
+    tf = timeframe or service.state.get_default_timeframe(board_id)
+    resolved, err = service.resolve_drawing_anchors(board_id, tf, anchors or [])
+    if err:
+        return {"error": err}
+    ok, msg = drawing_spec.validate(type, resolved)
+    if not ok:
+        return {"error": msg}
+    doc = {"type": type, "paneId": pane_id or "price", "anchors": resolved,
+           "locked": bool(locked), "visible": visible is not False}
+    if style:
+        doc["style"] = dict(style)
+    if text:
+        doc["text"] = dict(text)
+    if props:
+        doc["props"] = dict(props)
+    if show_on:
+        doc["showOn"] = list(show_on)
+    return service.add_drawing(board_id, timeframe, doc)
+
+
+@api_tool(group="user_write", method="POST", path="/api/drawings", err_status=400)
+def draw_many(board_id: Optional[str] = None, items: Optional[list] = None,
+              timeframe: Optional[str] = None):
+    """批量画线（一次落库、一次广播，适合策略复盘一次画趋势线+斐波那契+标注）。
+    items 每项字段同 draw_drawing：{type,anchors,style?,text?,show_on?,pane_id?,locked?,visible?,props?}。
+    任一条校验失败即整批拒绝（返回 items[i] 定位）。"""
+    board_id = board_id or service.state.current_board_id
+    tf = timeframe or service.state.get_default_timeframe(board_id)
+    docs = []
+    for i, it in enumerate(items or []):
+        if not isinstance(it, dict):
+            return {"error": f"items[{i}]: 需为对象"}
+        t = it.get("type") or "hline"
+        if (it.get("pane_id") or "price") != "price":
+            return {"error": f"items[{i}]: PANE_UNSUPPORTED: 0.5.2 画线仅支持 price（副图暂未开放）"}
+        resolved, err = service.resolve_drawing_anchors(board_id, tf, it.get("anchors") or [])
+        if err:
+            return {"error": f"items[{i}]: {err}"}
+        ok, msg = drawing_spec.validate(t, resolved)
+        if not ok:
+            return {"error": f"items[{i}]: {msg}"}
+        doc = {"type": t, "paneId": it.get("pane_id") or "price", "anchors": resolved,
+               "locked": bool(it.get("locked")), "visible": it.get("visible") is not False}
+        if it.get("style"):
+            doc["style"] = dict(it["style"])
+        if it.get("text"):
+            doc["text"] = dict(it["text"])
+        if it.get("props"):
+            doc["props"] = dict(it["props"])
+        if it.get("show_on"):
+            doc["showOn"] = list(it["show_on"])
+        docs.append(doc)
+    if not docs:
+        return {"error": "EMPTY_ITEMS: 至少给一条"}
+    return service.add_drawings(board_id, timeframe, docs)
 
 
 @api_tool(group="user_write", method="POST", path="/api/drawing/{drawing_id}", err_status=404)
-def update_drawing(board_id: Optional[str] = None, timeframe: Optional[str] = None, drawing_id: str = "",
-                   visible: Optional[bool] = None, color: Optional[str] = None,
-                   line_width: Optional[int] = None, line_style: Optional[str] = None,
-                   text: Optional[str] = None, patch: Optional[dict] = None):
-    """更新划线。命名参数 visible(显隐)/color/line_width/line_style(solid|dashed|dotted)/text，或 patch=raw dict 浅合并（优先）。
-    patch 说明：v0.5 乙案嵌套样式用 patch={"style":{...}} / {"anchors":[...]}。"""
-    board_id, timeframe = _resolve(board_id, timeframe)
-    if patch:
-        return service.update_drawing(board_id, timeframe, drawing_id, dict(patch))
-    named = {"visible": visible, "color": color, "line_width": line_width,
-             "line_style": line_style, "text": text}
-    return service.update_drawing(board_id, timeframe, drawing_id,
-                                  {k: v for k, v in named.items() if v is not None})
+def update_drawing(board_id: Optional[str] = None, drawing_id: str = "",
+                   visible: Optional[bool] = None, patch: Optional[dict] = None):
+    """更新一条划线（drawing_id 从 list_drawings 取）。
+    visible=显隐；patch=原生字段浅合并（style/anchors/text/showOn/locked/zIndex/props…），
+    例：patch={"style":{"lineColor":"#f23645"}}、patch={"showOn":["D","W"]}、patch={"text":{"value":"..."}}。"""
+    board_id = board_id or service.state.current_board_id
+    body = dict(patch or {})
+    if visible is not None:
+        body.setdefault("visible", visible)
+    return service.update_drawing(board_id, drawing_id, body)
+
+
+@api_tool(group="user_write", method="POST", path="/api/drawings/delete", err_status=400)
+def delete_drawings(board_id: Optional[str] = None, ids: Optional[list] = None):
+    """批量删除划线（一次广播）。ids 从 list_drawings 取；不存在的 id 放进 missing 回报，
+    幂等、不整批失败。单条删除用 delete_drawing。"""
+    if not ids:
+        return {"error": "EMPTY_IDS: 至少给一个 drawing_id"}
+    board_id = board_id or service.state.current_board_id
+    return service.delete_drawings(board_id, [str(x) for x in ids])
 
 
 @api_tool(group="user_write", method="DELETE", path="/api/drawing/{drawing_id}", err_status=404)
-def delete_drawing(board_id: Optional[str] = None, timeframe: Optional[str] = None, drawing_id: str = ""):
-    """删除划线"""
-    board_id, timeframe = _resolve(board_id, timeframe)
-    return service.delete_drawing(board_id, timeframe, drawing_id)
+def delete_drawing(board_id: Optional[str] = None, drawing_id: str = ""):
+    """删除一条划线。drawing_id 从 list_drawings 取（每条画线的 id 字段）；画线属板，不按周期分区。"""
+    board_id = board_id or service.state.current_board_id
+    return service.delete_drawing(board_id, drawing_id)
 
 
 @api_tool(group="user_write", method="POST", path="/api/board/{board_id}/timeframe/{timeframe}/backfill",

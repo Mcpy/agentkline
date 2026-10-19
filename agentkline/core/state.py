@@ -28,12 +28,33 @@ class TimeframeState:
         # 物化缓存（v0.4 指标实例模型）：inst_id -> {values, lines, markers}
         self.ind_cache: dict[str, dict] = {}
         self.subplots: dict[str, dict] = {}    # name -> subplot config
-        self.drawings: dict[str, dict] = {}    # id -> drawing (划线)
         self.symbol: str = ""
         self.last_updated: str = ""
 
 
 _TF_UNIT = {"m": 0, "h": 1, "d": 2, "w": 3, "M": 4}
+
+
+# 周期带（与 Vela TIMEFRAME_BANDS 同刻）：画线 showOn 的键
+_BAND_MS = {"s": 1000, "m": 60_000, "h": 3_600_000, "d": 86_400_000,
+            "w": 604_800_000, "M": 2_419_200_000}
+_BANDS = [(0, "s"), (60_000, "1"), (300_000, "5"), (900_000, "15"),
+          (3_600_000, "60"), (14_400_000, "240"), (86_400_000, "D"),
+          (604_800_000, "W"), (2_419_200_000, "M")]
+
+
+def _band_of(tf: str) -> Optional[str]:
+    """把 1m/4h/1d/1w/1M 映射到 Vela 周期带键（1/240/D/W/M…）"""
+    import re
+    m = re.match(r"^(\d+)([mhdwM])$", tf or "")
+    if not m:
+        return None
+    ms = int(m.group(1)) * _BAND_MS.get(m.group(2), 0)
+    key = None
+    for from_ms, k in _BANDS:
+        if ms >= from_ms:
+            key = k
+    return key
 
 
 def tf_rank(iv: str):
@@ -63,6 +84,9 @@ class Board:
         #             tf, target(副图名|None), style, lines_style, display_name,
         #             custom_label, auto_label, blob}
         self.ind_registry: dict[str, dict] = {}
+        # 画线（0.5.2 原生化）：每板一份文档，drawing.showOn 控制跨周期可见性
+        # id -> SerializedDrawing（Vela 原生条目，原样透传）
+        self.drawings: dict[str, dict] = {}
         # 板锁（v0.4 一标的一板）：None=初始态(未锁定，仅 AI 可建)；
         # 锁定后 = {"script": id, "identity": {IDENTITY键: 值快照}}，不可变
         self.source_lock: Optional[dict] = None
@@ -360,45 +384,82 @@ class StateManager:
             return []
         return list(tf_state.subplots.values())
 
-    # ========== 划线 drawings ==========
+    # ========== 划线 drawings（0.5.2 原生化） ==========
+    # Vela 的做法：画线属于「板」，不属于周期；跨周期可见性由 drawing["showOn"]
+    # （周期带键：s/1/5/15/60/240/D/W/M，缺省=全周期）表达。timeframe 参数仅作
+    # 「agent 显式指定周期」的落带提示，不参与存储分区。
 
-    def add_drawing(self, board_id: str, timeframe: str, drawing: dict) -> dict:
+    def add_drawing(self, board_id: str, drawing: dict, timeframe: str = None) -> dict:
         board = self.boards.get(board_id)
         if not board:
             return {"error": f"Board '{board_id}' not found"}
-        tf_state = board.ensure_tf(timeframe)
-        import uuid
-        did = drawing.get("id") or uuid.uuid4().hex[:8]
-        drawing = {**drawing, "id": did}
-        tf_state.drawings[did] = drawing
-        return {"status": "ok", "id": did, "drawing": drawing}
+        d = self._insert_drawing(board, drawing, timeframe)
+        return {"status": "ok", "id": d["id"], "drawing": d}
 
-    def delete_drawing(self, board_id: str, timeframe: str, drawing_id: str) -> dict:
-        board = self.boards.get(board_id)
-        if not board:
-            return {"error": f"Board '{board_id}' not found"}
-        tf_state = board.get_tf(timeframe)
-        if not tf_state or drawing_id not in tf_state.drawings:
-            return {"error": f"Drawing '{drawing_id}' not found"}
-        del tf_state.drawings[drawing_id]
-        return {"status": "ok"}
-
-    def update_drawing(self, board_id: str, timeframe: str, drawing_id: str, patch: dict) -> dict:
-        board = self.boards.get(board_id)
-        if not board:
-            return {"error": f"Board '{board_id}' not found"}
-        tf_state = board.get_tf(timeframe)
-        if not tf_state or drawing_id not in tf_state.drawings:
-            return {"error": f"Drawing '{drawing_id}' not found"}
-        tf_state.drawings[drawing_id] = {**tf_state.drawings[drawing_id], **patch, "id": drawing_id}
-        return {"status": "ok", "drawing": tf_state.drawings[drawing_id]}
-
-    def list_drawings(self, board_id: str, timeframe: str) -> list[dict]:
+    def add_drawings(self, board_id: str, drawings: list[dict], timeframe: str = None) -> list[dict]:
+        """批量落库（一条 ws 广播，前端一次装载）。"""
         board = self.boards.get(board_id)
         if not board:
             return []
-        tf_state = board.get_tf(timeframe)
-        return list(tf_state.drawings.values()) if tf_state else []
+        return [self._insert_drawing(board, d, timeframe) for d in drawings]
+
+    @staticmethod
+    def _insert_drawing(board, drawing: dict, timeframe: str = None) -> dict:
+        import uuid
+        did = drawing.get("id") or uuid.uuid4().hex[:8]
+        d = {**drawing, "id": did}
+        d.setdefault("style", {})   # Vela fromJSON 要求 style 为对象（缺省用类型默认样式）
+        if timeframe and not d.get("showOn"):
+            band = _band_of(timeframe)
+            if band:
+                d["showOn"] = [band]
+        board.drawings[did] = d
+        return d
+
+    def delete_drawing(self, board_id: str, drawing_id: str) -> dict:
+        board = self.boards.get(board_id)
+        if not board:
+            return {"error": f"Board '{board_id}' not found"}
+        if drawing_id not in board.drawings:
+            return {"error": f"Drawing '{drawing_id}' not found"}
+        del board.drawings[drawing_id]
+        return {"status": "ok"}
+
+    def delete_drawings(self, board_id: str, ids: list[str]) -> dict:
+        """批量删除；不存在的 id 记 missing（幂等，不整批失败）。"""
+        board = self.boards.get(board_id)
+        if not board:
+            return {"error": f"Board '{board_id}' not found"}
+        deleted, missing = [], []
+        for did in ids or []:
+            if did in board.drawings:
+                del board.drawings[did]
+                deleted.append(did)
+            else:
+                missing.append(did)
+        return {"status": "ok", "deleted": deleted, "missing": missing}
+
+    def update_drawing(self, board_id: str, drawing_id: str, patch: dict) -> dict:
+        board = self.boards.get(board_id)
+        if not board:
+            return {"error": f"Board '{board_id}' not found"}
+        if drawing_id not in board.drawings:
+            return {"error": f"Drawing '{drawing_id}' not found"}
+        board.drawings[drawing_id] = {**board.drawings[drawing_id], **patch, "id": drawing_id}
+        return {"status": "ok", "drawing": board.drawings[drawing_id]}
+
+    def list_drawings(self, board_id: str, timeframe: str = None) -> list[dict]:
+        """整板画线；给 timeframe 时按 showOn 过滤（=该周期上实际可见的那些）。"""
+        board = self.boards.get(board_id)
+        if not board:
+            return []
+        items = list(board.drawings.values())
+        if timeframe:
+            band = _band_of(timeframe)
+            if band:
+                items = [d for d in items
+                         if not d.get("showOn") or band in (d.get("showOn") or [])]
+        return items
 
     # ========== 状态导出 ==========
 
@@ -452,7 +513,6 @@ class StateManager:
             "markers": tf_state.markers,
             "indicators": indicators,
             "subplots": list(tf_state.subplots.values()),
-            "drawings": list(tf_state.drawings.values()),
             "symbol": tf_state.symbol,
             "last_updated": tf_state.last_updated
         }

@@ -4,7 +4,6 @@ import { state } from './state.js';
 import { log, toggleLog } from './log.js';
 import { connectWebSocket } from './ws.js';
 import { bindSearch } from './search.js';
-import { initDrawToolbar } from './draw_interact.js';
 import { bindOverlays } from './render.js';
 import { bindWatchlist } from './watchlist.js';
 import { applyStatic, t, lang, setLang, availableLangs } from './i18n.js';
@@ -16,7 +15,6 @@ import { showContextMenu } from './menu.js';
 function init() {
     // 绑定日志面板折叠/展开（原 board.html 中 log-header 的 inline onclick="toggleLog()"）
     document.querySelector('.log-header').addEventListener('click', toggleLog);
-    initDrawToolbar();
     bindSearch();
     bindOverlays();
     bindWatchlist();

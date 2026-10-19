@@ -13,7 +13,7 @@ export const state = {
         subplots: {},
         ws: null,
         visibility: {},  // indicator name -> bool (default true)
-        drawings: {},  // id -> drawing (划线)
+        drawings: {},  // id -> SerializedDrawing（划线，属板不属周期）
         timeIndex: null,  // Map(timeSec -> ohlcv index)
     };
 
@@ -24,7 +24,10 @@ export function applyState(data) {
     // P2-fix：显隐服务端真源 → init/switch 恢复本地 visibility（刷新持久）
     Object.entries(state.indicators).forEach(([id, ind]) => { state.visibility[id] = (ind.visible !== false); });
     state.markers = data.markers || [];
-    state.drawings = data.drawings || [];
+    // 画线属板：服务端下发 list（id -> drawing）
+    state.drawings = Array.isArray(data.drawings)
+        ? Object.fromEntries(data.drawings.filter(d => d && d.id).map(d => [d.id, d]))
+        : {};
     // v0.4.3 bug4：init/switch payload 的 subplots 是 list[{name,...}]，
     // 而 state.subplots 是 dict 语义（subplot_create 广播写 dict、renderSubplots 读 Object.keys）；
     // 原直赋值致 list 覆盖 dict → 任意 init/switch 后副图容器全灭（chips 仍在）

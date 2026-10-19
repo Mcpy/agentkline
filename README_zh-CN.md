@@ -31,7 +31,7 @@ AI 仍然垄断*怎么分析*——叠加、标记、引导呈现都锚定该现
 - 📈 **多画板 / 多周期** — 同一画板内 1d / 4h / 1h 自由切换，独立视口与指标
 - 🧩 **可脚本化指标** — 指标是服务端 Python 脚本（`scripts/`），沙箱执行，可存为主图叠加或副图
 - 🔌 **可插拔数据源** — 数据源同样是脚本（内置 mock、ccxt 等），可轮询实时刷新
-- ✏️ **划线与标记** — 水平线 / 趋势线、买卖标记，WS 实时同步到所有客户端
+- ✏️ **专业画线（Vela 原生）** — 79 种工具分 7 组（趋势/通道/斐波那契/Gann/形态/测量/文字），磁吸、测量尺、橡皮、撤销、收藏与样式模板齐全；画线属板、`showOn` 控跨周期，WS 实时同步
 - 📸 **快照** — 服务端合成截图（含 DOM 覆盖层：最新价标签 / OHLC / 图例），agent 可直接读图
 - 🎯 **AI 引导呈现** — `switch_board` / `switch_timeframe` / `set_view_range` 让 AI 把用户屏幕带到任意画板/周期/时间段（如回测回撤区间），标记与划线已画好，无需人工翻找
 - 🔐 **一标的一板** — 画板建板即锁到 `(源, 标的)` 二元组；换标的/换源=新现场；撞锁返回 `SOURCE_LOCKED` 并附"用此配置新建画板"一键改道
@@ -85,7 +85,7 @@ cd frontend && npm install && npm run build && cd ..
 ```
 
 常用工具：`overview` / `get_kline` / `get_indicators` / `add_indicator` / `run_script` /
-`add_drawing` / `set_markers` / `set_view_range` / `list_skills` / `load_skill` /
+`draw_drawing` / `draw_many` / `list_drawing_tools` / `set_markers` / `set_view_range` / `list_skills` / `load_skill` /
 `take_snapshot`（返回标准 image 块，多模态模型可直接读图）。
 
 健壮性：越界标记时间会被丢弃并在 `dropped` 数组回报（不静默）；指标 `NaN`/`Inf`

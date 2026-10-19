@@ -18,10 +18,13 @@
 | GET | `/api/board/{board_id}/timeframes` | List Timeframes |
 | GET | `/api/boards` | List Boards |
 | GET | `/api/config` | Get Config |
-| POST | `/api/drawing` | Add Drawing |
+| POST | `/api/drawing` | Draw Drawing |
+| GET | `/api/drawing-tools` | List Drawing Tools |
 | POST | `/api/drawing/{drawing_id}` | Update Drawing |
 | DELETE | `/api/drawing/{drawing_id}` | Delete Drawing |
 | GET | `/api/drawings` | List Drawings |
+| POST | `/api/drawings` | Draw Many |
+| POST | `/api/drawings/delete` | Delete Drawings |
 | POST | `/api/indicator` | Add Indicator |
 | POST | `/api/indicator/refresh/{inst_id}` | Refresh Indicator |
 | PUT | `/api/indicator/{inst_id}` | Update Indicator |
@@ -73,12 +76,15 @@
 | `get_markers` | 读取主图标记（买卖点等）。返回标记数组，字段同 set_markers（time/position/color/shape/text）； |
 | `overview` | 轻量结构总览：品种/周期/数据源/指标元信息/副图名/画线与标记计数等， |
 | `list_subplots` | 列出画板+周期的所有副图 |
-| `list_drawings` | 列出画板+周期的所有划线 |
+| `list_drawings` | 列出画板上的全部划线（0.5.2：画线属板不属周期）。 |
 | `get_current_view` | 获取用户当前视图（画板/周期/可见时间窗口），由前端上报 |
 | `create_board` | 新建一个图表画板。两种用法： |
-| `add_drawing` | 画线。type: hline(水平,points=[{price}]) / trend(趋势,points=[{time,price}])，或 drawing=完整原生条目（优先）。 |
-| `update_drawing` | 更新划线。命名参数 visible(显隐)/color/line_width/line_style(solid|dashed|dotted)/text，或 patch=raw dict 浅合并（优先）。 |
-| `delete_drawing` | 删除划线 |
+| `list_drawing_tools` | 画线工具清单（79 种 Vela 原生类型 / 7 组），先查后画。 |
+| `draw_drawing` | 画一条线（Vela 原生）。先用 list_drawing_tools 查 type 与锚点数量。 |
+| `draw_many` | 批量画线（一次落库、一次广播，适合策略复盘一次画趋势线+斐波那契+标注）。 |
+| `update_drawing` | 更新一条划线（drawing_id 从 list_drawings 取）。 |
+| `delete_drawings` | 批量删除划线（一次广播）。ids 从 list_drawings 取；不存在的 id 放进 missing 回报， |
+| `delete_drawing` | 删除一条划线。drawing_id 从 list_drawings 取（每条画线的 id 字段）；画线属板，不按周期分区。 |
 | `backfill` | 向左补拉更早的历史 K 线（看更久远的行情用）。前提：该板数据源支持历史回补（list_scripts 里 caps 含 backfill；csv 类源不支持，返回 prepended=0）。返回本次补拉根数与当前总根数。 |
 | `set_markers` | 在K线主图设置标记（覆盖式，替换该周期已有全部标记；读取用 get_markers）。 |
 | `create_timeframe` | 给画板加一个时间周期（如 '4h'）。实时板的新周期会自动取数出图；加完用 switch_timeframe 切过去看。 |

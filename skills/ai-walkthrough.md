@@ -1,6 +1,6 @@
 ---
 name: ai-walkthrough
-description: AI 引导呈现流程——把分析结论（标记/划线）自动带到用户屏幕：set_markers/add_drawing → switch_board/switch_timeframe → set_view_range；含板锁语义（现场=锁定画板、SOURCE_LOCKED 跟 suggestion 改道）、省 token 读取与 get_current_view。
+description: AI 引导呈现流程——把分析结论（标记/划线）自动带到用户屏幕：set_markers/draw_drawing → switch_board/switch_timeframe → set_view_range；含板锁语义（现场=锁定画板、SOURCE_LOCKED 跟 suggestion 改道）、省 token 读取与 get_current_view。
 ---
 
 # AgentKline AI 引导呈现
@@ -18,8 +18,13 @@ description: AI 引导呈现流程——把分析结论（标记/划线）自动
 ## 1. 标准顺序（先落内容，再切视图，最后聚焦）
 1. `set_markers(board, tf, markers)` —— 落买卖点/事件标记；
    越界 time 会被丢弃并在返回 `dropped` 中回报，可自我纠正。
-2. `add_drawing(board, tf, type, points)` —— 画趋势线/水平线（hline/trend）；
-   亦支持原生形态 `add_drawing(board, tf, drawing={type,paneId,anchors:[{time,price}],style:{lineColor,lineWidth,lineStyle}})`（Vela DrawingsDocument 条目透传，74 种画线类型可用）。
+2. `draw_drawing(board, type, anchors, style?, text?, show_on?, props?)` —— 画一条。
+   先 `list_drawing_tools(category=...)` 查类型与锚点数量（7 组 79 种：lines/fibonacci/patterns/
+   measurements/shapes/text/icons）。`anchors` 两种写法：
+   - 绝对：`[{"time":<ms>,"price":<num>}]`
+   - 语义：`[{"bars_ago":20,"price":"high"}]`（0=最新一根，服务端按当前周期 K 线解析）
+   单锚点类型（hline/vline）可只给 `price` 或 `time`。一次画多条用 `draw_many(items=[...])`。
+   画线属**板**不属周期；`show_on=["D","W"]` 限定周期带（缺省=全周期）。
 3. `switch_board(board)` / `switch_timeframe(tf)` —— 把前端切到目标板/周期
    （switch 广播窗口化状态≤2000 根，标记/划线随之呈现；更老历史用户左滚按需 backfill）。
 4. `set_view_range(board, tf, from, to)` —— 画面聚焦到目标时间段（如回撤区间）。
@@ -68,7 +73,7 @@ description: AI 引导呈现流程——把分析结论（标记/划线）自动
 | 探查图上有什么 | overview → 按需 get_kline / get_indicators |
 | 讲一段行情 | get_kline(区间) ＋ take_snapshot 看图说话 |
 | 多周期对比 | create_board(intervals=[...]) 或 create_timeframe → switch_timeframe 逐档 → get_kline |
-| 回测归因闭环 | 回测工具 → set_markers(亏损点) ＋ add_drawing(趋势线) ＋ set_view_range(聚焦亏损区间，先 switch 后 range) → take_snapshot |
+| 回测归因闭环 | 回测工具 → set_markers(亏损点) ＋ draw_drawing(趋势线) ＋ set_view_range(聚焦亏损区间，先 switch 后 range) → take_snapshot |
 | 雷达盯盘配置 | watchlist_add(group_id 可选) → watchlist_list 核对；组管理 group_add/rename/remove(级联删行)/move |
 | 指标调参 | overview 拿 inst_id → update_indicator(params) → get_indicators 核对 |
 | 历史回溯 | backfill(源需 caps.backfill) → get_kline(早段) |

@@ -194,23 +194,10 @@ div.vela-attribution a { color: var(--text-dim); text-decoration: underline; }
 /* ============ 图表区域 ============ */
 .main-row { flex: 1; display: flex; min-height: 0; }
 
-/* 左侧绘图工具栏（TV 风格） */
-.draw-toolbar {
-    width: 44px; flex: none;
-    background: var(--bg-panel); border-right: 1px solid var(--border);
-    display: flex; flex-direction: column; align-items: center;
-    padding-top: 8px; gap: 6px;
-}
-.draw-toolbar-title {
-    font-size: 11px; color: var(--text-dim); text-align: center;
-    line-height: 1.5; margin-bottom: 8px; user-select: none; letter-spacing: 1px;
-}
-.draw-tool {
-    width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
-    border-radius: 6px; cursor: pointer; color: var(--text-dim); font-size: 15px; user-select: none;
-}
-.draw-tool:hover { background: var(--bg-panel-2); color: var(--text); }
-.draw-tool.active { background: var(--accent); color: #fff; }
+/* 画线工具栏已交 Vela 原生（44px 停靠条在 #main-chart 内，占 --vela-toolbar-gutter） */
+/* 展开/收起按钮固定在同一位置（左上角）：Vela 默认 margin-top:auto 会把按钮压到条底，
+   长图时沉出视口；这里统一置顶，折叠 16px 与展开 44px 都在 y=容器顶 */
+.vela-dtb .vela-dtb-collapse { order: -1; margin-top: 0; width: 16px; padding: 0; align-self: flex-start; }
 
 .chart-container {
     flex: 1;
@@ -221,8 +208,9 @@ div.vela-attribution a { color: var(--text-dim); text-decoration: underline; }
     overflow-x: hidden;
     position: relative;
     background: var(--bg);
-    /* 左右留槽：滚轮落在槽内=页面翻页，落在K线上=时间轴缩放 */
-    padding: 0 24px;
+    /* 右侧留槽：滚轮落在槽内=页面翻页，落在K线上=时间轴缩放；
+       左侧交给 Vela 原生画线工具栏（44px 停靠条），不再留空 */
+    padding: 0 24px 0 0;
 }
 
 /* 划线预览（绘制中） */
@@ -668,9 +656,12 @@ div.vela-attribution a { color: var(--text-dim); text-decoration: underline; }
 /* OHLC 读数行（Phase A-2 自渲染；原生只画指标图例） */
 #ohlc-legend {
     display: flex; gap: 12px; padding: 4px 0 3px; flex: 0 0 auto;
+    /* 与画布内指标图例同起点：工具栏 gutter + Vela LEGEND_LEFT_PX(10) */
+    padding-left: calc(var(--vela-toolbar-gutter, 44px) + 10px);
     font-size: 12px; color: var(--text-dim, #b2b5be); pointer-events: none;
     font-variant-numeric: tabular-nums;
 }
 #ohlc-legend b { color: #d1d4dc; font-weight: 600; }
+#ohlc-legend .ohlc-time { color: var(--text-faint, #787b86); }
 #ohlc-legend .up { color: #26a69a; }
 #ohlc-legend .down { color: #ef5350; }
