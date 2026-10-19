@@ -21,6 +21,8 @@ export const state = {
 export function applyState(data) {
     state.ohlcv = data.ohlcv || [];
     state.indicators = data.indicators || {};
+    // P2-fix：显隐服务端真源 → init/switch 恢复本地 visibility（刷新持久）
+    Object.entries(state.indicators).forEach(([id, ind]) => { state.visibility[id] = (ind.visible !== false); });
     state.markers = data.markers || [];
     state.drawings = data.drawings || [];
     // v0.4.3 bug4：init/switch payload 的 subplots 是 list[{name,...}]，

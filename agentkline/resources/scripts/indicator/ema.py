@@ -2,11 +2,11 @@
 内置指标：EMA 指数均线组（v0.4.3 新增，三线制同 MA）
 """
 
+# 只出计算值：类型/颜色/线宽/填充带/圆点等视觉由前端中间层 visual_spec.js 统一决定（脚本纯值化）。
 NAME = "EMA"
 DESC = "指数移动平均线组（默认 EMA5/EMA10/EMA20 三线）"
 PARAMS = {"periods": [5, 10, 20]}
 
-_COLORS = ["#ffb300", "#29b6f6", "#ce93d8", "#ef5350", "#26a69a", "#ff8a65"]
 
 
 def main(params: dict, ohlcv: list) -> dict:
@@ -26,6 +26,5 @@ def main(params: dict, ohlcv: list) -> dict:
             ema = c if ema is None else c * k + ema * (1 - k)
             if i >= p - 1:
                 vals[i] = round(ema, 2)
-        lines.append({"name": f"EMA{p}", "type": "line", "values": vals,
-                      "style": {"color": _COLORS[idx % len(_COLORS)], "lineWidth": 1}})
+        lines.append({"name": f"EMA{p}", "values": vals})
     return {"lines": lines}

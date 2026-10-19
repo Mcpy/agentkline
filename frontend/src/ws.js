@@ -4,8 +4,8 @@ import { log } from './log.js';
 import { renderBoardTabs, renderTimeframeTabs, switchBoard, switchTimeframe, refreshIntervalOptions } from './ui.js';
 import { renderChart, applyDataUpdate, applyPrependUpdate, updateIndicatorSeries, syncDrawings, renderSubplots, captureSnapshot, setVisibleTimeRange , applyQuoteTick, refreshIndicatorBar } from './render.js';
 import { refreshSearch } from './search.js';
-import { addIndicatorNative, removeIndicatorNative, updateIndicatorNative, legacySeriesCount } from './vela_adapter.js';
-import { nativeTypeOf, isNativeSubplot } from './native_map.js';  // v0.4.2 fix: board_create/board_remove 首行调用，漏 import 曾致 ReferenceError 断 handler（老 bug1 回归真根因）
+// P3：native 双源退役 —— 指标增删改一律走 emit 组差量（syncEmitGroups / updateIndicatorSeries）
+import { groupKeyOfInstance, remountGroupByKey } from './vela_adapter.js';
 
     // ============================================================
     // WebSocket（v0.4 标准信封 {v,type,seq,ts,payload} 硬切）
@@ -84,34 +84,30 @@ import { nativeTypeOf, isNativeSubplot } from './native_map.js';  // v0.4.2 fix:
                     const inst = {
                         inst_id: msg.inst_id, kind: msg.kind, script: msg.script,
                         values: msg.values, lines: msg.lines, markers: msg.markers,
+                        times: msg.times,   // P1 时间戳契约：values 的 bar 时间轴（recipe 有，blob 无）
                         subplot: msg.subplot, style: msg.style, lines_style: msg.lines_style,
                         scope: msg.scope, params: msg.params,
                         display_name: msg.display_name,
                     };
+                    const prevName = (state.indicators[msg.inst_id] || {}).display_name;
                     state.indicators[msg.inst_id] = inst;   // 元数据保留（AI/回退用）
-                    if (msg.type === 'indicator_add') {
-                        // Phase A：命中原生映射 → Vela 内置指标（图内同步计算），否则回退旧通道
-                        addIndicatorNative(inst).then(ok => {
-                            if (!ok) {
-                                const hadSeries = legacySeriesCount(msg.inst_id) > 0;   // P2：emit 注册表取代 seriesMap
-                                if (hadSeries) updateIndicatorSeries(msg.inst_id); else renderChart();
-                            }
-                            refreshIndicatorBar();   // Phase A：原生 add 后立即刷芯片（原本要刷新页面才出）
-                        });
-                    } else if (nativeTypeOf(msg.script)) {
-                        // 原生映射：增量 update，绝不回退 legacy（旧行为=每 tick 整图重建=闪）
-                        if (!updateIndicatorNative(msg.inst_id, msg.params, msg.style, msg.lines_style)) addIndicatorNative(inst);
-                    } else {
-                        const hadSeries = legacySeriesCount(msg.inst_id) > 0;   // P2：emit 注册表取代 seriesMap
-                        if (hadSeries) updateIndicatorSeries(msg.inst_id); else renderChart();
-                    }
+                    // P2-fix：显隐服务端真源 → 同步本地 visibility（刷新/多端一致）
+                    if (msg.visible !== undefined) state.visibility[msg.inst_id] = (msg.visible !== false);
+                    // P3 单源：新增=挂载该实例的 emit 组（零整图重建）；更新=按结构/样式/数值分级重发。
+                    //   隐藏的实例不挂载（组差量按 state.visibility 判定），广播回流幂等。
+                    updateIndicatorSeries(msg.inst_id);
+                    // 新增 / 改名 → 刷芯片（改名不刷 = 芯片留旧名，此前要刷新页面才更新）
+                    if (msg.type === 'indicator_add' || prevName !== inst.display_name) refreshIndicatorBar();
                 }
                 log('ws', `${msg.type}: ${msg.inst_id}`);
                 break;
             case 'indicator_remove':
                 if (msg.board_id === state.currentBoard && msg.timeframe === state.currentTimeframe) {
+                    const gk = groupKeyOfInstance(msg.inst_id);   // 删前取组键（叠加组随实例卸载；副图组需重挂载重绘）
+                    const wasSubplot = !!(state.indicators[msg.inst_id] || {}).subplot;
                     delete state.indicators[msg.inst_id];
-                    if (!removeIndicatorNative(msg.inst_id)) renderChart();   // 原生移除 = 零整图重建
+                    renderSubplots();                             // 组差量：卸载该实例的组 / 删空副图 pane
+                    if (wasSubplot) remountGroupByKey(gk);        // 副图内少一条 → emit 补丁不重绘，重挂载
                     refreshIndicatorBar();
                 }
                 log('ws', `indicator_remove: ${msg.inst_id}`);
@@ -236,14 +232,10 @@ import { nativeTypeOf, isNativeSubplot } from './native_map.js';  // v0.4.2 fix:
                 log('ws', `view_set: ${msg.board_id}/${msg.timeframe} [${msg.from_time},${msg.to_time}]`);
                 break;
             case 'subplot_create':
-                // Phase A：原生指标自带 pane → 其 subplot 名建旧 pane 一律让位
+                // P3：副图一律由 emit 组建 pane（native 自带 pane 的让位逻辑随双源退役删除）
                 if (msg.board_id === state.currentBoard && msg.timeframe === state.currentTimeframe) {
-                    const owned = isNativeSubplot(msg.name) || Object.values(state.indicators || {})
-                        .some(ind => nativeTypeOf(ind.script) && ind.subplot === msg.name);
-                    if (!owned) {
-                        state.subplots[msg.name] = { name: msg.name, height: msg.height, title: msg.title };
-                        renderSubplots();
-                    }
+                    state.subplots[msg.name] = { name: msg.name, height: msg.height, title: msg.title };
+                    renderSubplots();
                 }
                 log('ws', `subplot_create: ${msg.name}`);
                 break;

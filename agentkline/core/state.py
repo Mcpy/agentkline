@@ -275,14 +275,18 @@ class StateManager:
                 or (i["scope"] == "timeframe" and i.get("tf") == timeframe)]
 
     def set_cache(self, board_id: str, timeframe: str, inst_id: str,
-                  values: list = None, lines: list = None, markers: list = None) -> None:
-        """物化缓存写入（NaN/Inf 清洗挂这里，覆盖所有入值路径）"""
+                  values: list = None, lines: list = None, markers: list = None,
+                  times: list = None) -> None:
+        """物化缓存写入（NaN/Inf 清洗挂这里，覆盖所有入值路径）
+        times（P1 时间戳契约）：values 对应的 bar 时间轴（与脚本 feed 同源），int ms，无需清洗。
+        前端据此按时间戳映射，消除 off=bars.len-values.len 索引对齐（prepend/竞态免疫）。
+        blob（冻结值）暂无 times → 前端回退 off 对齐（blob 时间戳迁移留待后续）。"""
         board = self.boards.get(board_id)
         if not board:
             return
         tf = board.ensure_tf(timeframe)
         tf.ind_cache[inst_id] = {"values": _clean(values), "lines": _clean(lines),
-                                 "markers": _clean(markers)}
+                                 "markers": _clean(markers), "times": times}
 
     def get_cache(self, board_id: str, timeframe: str, inst_id: str) -> Optional[dict]:
         board = self.boards.get(board_id)
@@ -438,6 +442,7 @@ class StateManager:
                 "script": inst["script"], "params": inst["params"],
                 "scope": inst["scope"], "subplot": inst["target"],
                 "style": inst["style"], "lines_style": inst["lines_style"],
+                "visible": inst.get("visible", True),   # P2-fix：显隐服务端真源（init/switch 读回 → 刷新持久）
                 "display_name": inst.get("display_name") or inst.get("auto_label")
                                 or inst["inst_id"],
             }

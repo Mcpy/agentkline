@@ -5,6 +5,7 @@ FastAPI 与 MCP server 共用此层，不依赖任何传输协议。
 """
 import csv
 import logging
+from bisect import bisect_left, bisect_right
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable
@@ -27,7 +28,7 @@ def _to_ms(v):
 class AgentKlineService:
     """AgentKline 业务核心"""
 
-    VERSION = "0.5.0"
+    VERSION = "0.5.1"
 
     def __init__(self, scripts_dir: str, limits: dict = None):
         limits = limits or {}
@@ -491,6 +492,7 @@ class AgentKlineService:
                 "params": params or {}, "scope": scope,
                 "tf": None if scope == "board" else timeframe,
                 "target": subplot, "style": style, "lines_style": None,
+                "visible": True,   # P2-fix：显隐服务端真源（刷新持久 + 多端一致）
                 "display_name": display_name, "custom_label": bool(display_name),
                 "auto_label": None,
                 "blob": None if kind == "recipe" else
@@ -521,8 +523,11 @@ class AgentKlineService:
         if result.get("error"):
             logger.warning("recompute %s/%s %s: %s", board_id, tf, inst["inst_id"], result["error"])
             return
+        # P1 时间戳契约：values 时间轴 = feed bar ts（脚本逐 bar 对齐 feed，warmup 补 None 亦天然同长）
+        times = [b["timestamp"] for b in feed]
         self.state.set_cache(board_id, tf, inst["inst_id"],
-                             result.get("values"), result.get("lines"), result.get("markers"))
+                             result.get("values"), result.get("lines"), result.get("markers"),
+                             times=times)
         if not inst.get("custom_label"):
             inst["auto_label"] = self._auto_label(inst, result.get("meta"))
 
@@ -561,7 +566,8 @@ class AgentKlineService:
                           "lines_style": it["lines_style"], "params": it["params"],
                           "scope": it["scope"], "script": it["script"],
                           "values": c.get("values"), "lines": c.get("lines"),
-                          "markers": c.get("markers")})
+                          "markers": c.get("markers"), "times": c.get("times"),
+                          "visible": it.get("visible", True)})
 
     def delete_indicator(self, board_id, timeframe, inst_id):
         inst = self.state.get_instance(board_id, inst_id)
@@ -595,12 +601,15 @@ class AgentKlineService:
         return {"status": "ok", "inst_id": inst_id}
 
     def update_indicator(self, board_id, timeframe, inst_id, params=None, style=None,
-                         lines_style=None, display_name=None, auto_label=None):
-        """统一更新：改参数=重声明配方并重算；改样式=不重算；显示名可覆盖/恢复自动"""
+                         lines_style=None, display_name=None, auto_label=None, visible=None):
+        """统一更新：改参数=重声明配方并重算；改样式=不重算；显示名可覆盖/恢复自动；
+        visible=显隐（服务端真源，刷新持久，不重算）"""
         inst = self.state.get_instance(board_id, inst_id)
         if not inst:
             return {"error": f"Indicator '{inst_id}' not found"}
         patch = {}
+        if visible is not None:
+            patch["visible"] = bool(visible)
         if style is not None:
             patch["style"] = style
         if lines_style is not None:
@@ -714,8 +723,13 @@ class AgentKlineService:
         }
 
     def get_indicators(self, board_id, timeframe, start=None, end=None, instances=None):
-        """指标值区间切片（省 token）；instances= 按 inst_id 过滤"""
+        """指标值区间切片（省 token）；instances= 按 inst_id 过滤。
+        P1：recipe 缓存带 times → 按时间范围（bisect）切片，修正 store>max_window 时
+        feed 尾窗与 store 索引错位（旧 i0:i1 直切在长板上偏移）；同时回带 times，
+        AI 拿到 (ts,value) 对，无需靠索引猜对齐。blob（无 times）回退 store 索引切片。"""
         ohlcv, i0, i1 = self._resolve_range(board_id, timeframe, start, end)
+        t0 = ohlcv[i0]["timestamp"] if ohlcv and 0 <= i0 < len(ohlcv) else None
+        t1 = ohlcv[i1]["timestamp"] if ohlcv and 0 <= i1 < len(ohlcv) else None
         want = set(instances) if instances else None
         out = {}
         for inst in self.state.tf_instances(board_id, timeframe):
@@ -726,17 +740,24 @@ class AgentKlineService:
                      "display_name": inst.get("display_name") or inst.get("auto_label") or inst["inst_id"],
                      "subplot": inst["target"], "params": inst["params"],
                      "scope": inst["scope"], "script": inst["script"]}
+            ctimes = c.get("times")
+            if ctimes and t0 is not None:
+                lo = bisect_left(ctimes, t0)
+                hi = bisect_right(ctimes, t1) if t1 is not None else len(ctimes)
+            else:
+                lo, hi = i0, i1 + 1   # 无 times（blob/legacy）→ store 索引切片（旧行为）
             if c.get("values") is not None:
-                entry["values"] = c["values"][i0:i1 + 1]
+                entry["values"] = c["values"][lo:hi]
+            if ctimes:
+                entry["times"] = ctimes[lo:hi]
             if c.get("lines"):
-                entry["lines"] = [{**ln, "values": (ln.get("values") or [])[i0:i1 + 1]}
+                entry["lines"] = [{**ln, "values": (ln.get("values") or [])[lo:hi]}
                                   for ln in c["lines"]]
             if c.get("markers"):
                 entry["markers"] = c["markers"]
             out[inst["inst_id"]] = entry
         return {"board_id": board_id, "timeframe": timeframe,
-                "range": {"from": ohlcv[i0]["timestamp"] if ohlcv and i0 < len(ohlcv) else None,
-                          "to": ohlcv[i1]["timestamp"] if ohlcv and i1 < len(ohlcv) else None},
+                "range": {"from": t0, "to": t1},
                 "indicators": out}
 
     def get_overview(self, board_id, timeframe):
@@ -753,6 +774,7 @@ class AgentKlineService:
                 "display_name": inst.get("display_name") or inst.get("auto_label") or inst["inst_id"],
                 "params": inst["params"],
                 "dynamic": inst["kind"] == "recipe",
+                "visible": inst.get("visible", True),   # P2-fix：显隐服务端真源（总览可见）
             }
         view = self.current_view if (self.current_view
                                      and self.current_view.get("board_id") == board_id

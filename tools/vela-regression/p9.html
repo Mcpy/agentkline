@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>P9 — 每实例 emit 组（ctx.id/title）+ priceLines + 隐藏 anchor 填充</title>
+<style>
+body{background:#14161a;color:#ddd;font:12px monospace;margin:0}
+#chart{width:100%;height:640px}
+#results{white-space:pre-wrap;padding:8px;border-top:1px solid #333}
+</style></head>
+<body>
+<div id="chart"></div>
+<div id="results">running…</div>
+<script src="./package/dist/vela.global.min.js"></script>
+<script src="./mock-data.js"></script>
+<script>
+const R=[];
+const log=(...a)=>{R.push(a.join(' '));document.getElementById('results').textContent=R.join('\n');console.log(...a);};
+const V=window.Vela;
+const O=MOCK.ohlcv;
+const times=O.map(b=>b.time);
+function pts(vals){return vals.map((v,i)=>({time:times[i],value:v==null?null:+v.toFixed(2)}));}
+function ls(id,title,points,color,kind,width,extra){
+  return Object.assign({id,title,paneId:'',kind:kind||'line',points,
+    style:{color,width:width||2,lineStyle:'solid'}},extra||{});
+}
+// 探针 A：multiInstance 类型，两个实例各自带 {id,title} → ctx.id 是否等于传入 id？
+const ctxIds=[];
+// 探针 B：study pane 里的 RSI 形态（线 + 4 隐藏 anchor + 3 区带填充 + 3 水平线）
+function rsiPayload(ctxId){
+  const vals=O.map((b,i)=> i<14 ? null : 50+40*Math.sin(i/9));
+  const anchor=(id,title,level)=>ls(id,title,times.map(t=>({time:t,value:level})),
+    'rgba(120,123,134,0)','line',1,{display:{pane:false,legend:false,dataWindow:false}});
+  return {
+    series:[
+      ls(ctxId+'-rsi','RSI',pts(vals),'#787b86','line',2),
+      anchor(ctxId+'-a100','Top Anchor',100), anchor(ctxId+'-a70','Overbought Anchor',70),
+      anchor(ctxId+'-a30','Oversold Anchor',30), anchor(ctxId+'-a0','Bottom Anchor',0),
+    ],
+    fills:[
+      {id:ctxId+'-z-ob',paneId:'',fromSeriesId:ctxId+'-a70',toSeriesId:ctxId+'-a100',color:'#f2364514'},
+      {id:ctxId+'-z-os',paneId:'',fromSeriesId:ctxId+'-a30',toSeriesId:ctxId+'-a0',color:'#08998114'},
+      {id:ctxId+'-z-band',paneId:'',fromSeriesId:ctxId+'-a70',toSeriesId:ctxId+'-a30',color:'#787b861a'},
+    ],
+    priceLines:[
+      {id:ctxId+'-pl70',paneId:'',price:70,color:'#787b86',lineStyle:'dashed',title:'Overbought'},
+      {id:ctxId+'-pl50',paneId:'',price:50,color:'#787b86',lineStyle:'dotted',title:'Midline'},
+      {id:ctxId+'-pl30',paneId:'',price:30,color:'#787b86',lineStyle:'dashed',title:'Oversold'},
+    ],
+  };
+}
+
+(async()=>{
+  try{
+    V.registerNativeIndicator({
+      type:'poc-multi',title:'PoC Multi',paneHint:'price',overlay:true,legend:true,multiInstance:true,
+      inputsSchema:()=>[],defaultInputs:()=>({}),
+      create:()=>({start(ctx){
+        ctxIds.push(ctx.id);
+        ctx.emit({series:[ls(ctx.id+'-l','line of '+ctx.id,pts(O.map(b=>b.close)),'#5b9cf6')]});
+        ctx.setStatus('live');
+      },onBars(){},setInputs(){},suspend(){},resume(){},stop(){}})
+    });
+    V.registerNativeIndicator({
+      type:'poc-rsi',title:'PoC RSI',paneHint:'new',overlay:false,legend:true,multiInstance:true,
+      inputsSchema:()=>[],defaultInputs:()=>({}),
+      create:()=>({start(ctx){ ctx.emit(rsiPayload(ctx.id)); ctx.setStatus('live');
+        log('poc-rsi start ctx.id='+ctx.id); },onBars(){},setInputs(){},suspend(){},resume(){},stop(){}})
+    });
+    log('registered poc-multi + poc-rsi');
+    const chart=new V.Vela('#chart',{data:O,symbol:'MOCK/USD',timeframe:'1d',theme:'dark',volume:false});
+    await chart.ready(); log('chart ready');
+
+    // A: 同类型两实例，各带显式 id/title
+    const ha=chart.addNativeIndicator('poc-multi',{id:'inst-a',title:'Alpha'});
+    const hb=chart.addNativeIndicator('poc-multi',{id:'inst-b',title:'Beta'});
+    chart.addNativeIndicator('poc-rsi',{id:'rsi-1',title:'RSI(14)'});
+    await chart.ready(); await new Promise(r=>setTimeout(r,1200));
+
+    log('ctx.id seen by start(): '+JSON.stringify(ctxIds));
+    log('handle.id: '+JSON.stringify([ha&&ha.id,hb&&hb.id]));
+    const panes=chart.panes.list()||[];
+    panes.forEach(p=>log('pane '+p.id+' kind='+p.kind+' inds='+JSON.stringify(p.indicators)));
+    const ins=chart.inspect();
+    log('totals: series='+ins.totals.series+' fills='+ins.totals.fills+
+        ' priceLines='+ins.totals.priceLines+' panes='+ins.totals.panes);
+    (ins.indicators||[]).forEach(i=>log('  ind '+(i.nativeType||i.type)+' id='+i.id+
+        ' series='+JSON.stringify(i.series)+' fills='+(i.fills||0)+' priceLines='+(i.priceLines||0)));
+
+    const pricePane=panes.find(p=>p.id==='price')||{};
+    const idsOk=(pricePane.indicators||[]).some(x=>x.id==='inst-a'&&x.title==='Alpha')&&
+                (pricePane.indicators||[]).some(x=>x.id==='inst-b'&&x.title==='Beta');
+    const ctxOk=ctxIds.includes('inst-a')&&ctxIds.includes('inst-b');
+    const plOk=(ins.totals.priceLines||0)>=3;
+    const fillOk=(ins.totals.fills||0)>=3;
+    log('A1 ctx.id≡传入id: '+(ctxOk?'PASS':'FAIL')+'  A2 pane 列出实例 id/title: '+(idsOk?'PASS':'FAIL'));
+    log('B1 priceLines 挂载: '+(plOk?'PASS':'FAIL')+'  B2 隐藏 anchor 区带填充: '+(fillOk?'PASS':'FAIL'));
+    log('RESULT: '+((ctxOk&&idsOk&&plOk&&fillOk)?'PASS — 每实例 emit 组 + priceLines + anchor 填充全部可用'
+        :'PARTIAL — ctxOk='+ctxOk+' idsOk='+idsOk+' plOk='+plOk+' fillOk='+fillOk));
+  }catch(e){log('P9 ERROR:',e&&e.message,e&&e.stack&&e.stack.split('\n')[1]);}
+})();
+</script>
+</body>
+</html>

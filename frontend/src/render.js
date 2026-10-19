@@ -10,11 +10,12 @@ import { log } from './log.js';
 import { openSettings } from './settings.js';
 import { t, localizeBoardName } from './i18n.js';
 import { showContextMenu } from './menu.js';
+import { effectiveStyle } from './visual_spec.js';   // V1：芯片色点与图上生效色同源
 import {
     renderChartCore, applyDataUpdateCore, updateIndicatorSeriesCore,
     syncDrawings as adapterSyncDrawings, setVisibleTimeRangeCore, resizeAllChartsCore,
-    onViewport, getVisibleTimeRange, readDataWindow, onCrosshair, syncSubplotsCore, snapshotAll, syncNativeIndicators,
-    tfMs, extendHistory, setIndicatorVisibleNative, pricePaneIndicatorRows,
+    onViewport, getVisibleTimeRange, readDataWindow, onCrosshair, syncSubplotsCore, snapshotAll,
+    tfMs, extendHistory, remountIndicator,
     refreshEmittedGroups,
 } from './vela_adapter.js';
 
@@ -29,12 +30,18 @@ function updateDataInfo() {
         `${(state.ohlcv || []).length} bars | ${Object.keys(state.indicators || {}).length} indicators`;
 }
 
+// 芯片色点 = 图上实际生效色（V1：与 effectiveStyle 同源，避免「芯片一个色、图上另一个色」）
+//   多线取首线（bb=上轨、macd=DIF）；逐点色指标（sar）取首个语义槽（涨色）
 function getIndicatorColor(ind) {
-    if (ind.style && ind.style.color) return ind.style.color;
-    if (ind.lines && ind.lines.length > 0 && ind.lines[0].style && ind.lines[0].style.color) {
-        return ind.lines[0].style.color;
+    const script = (ind && ind.script) || '';
+    const lines = (ind && ind.lines) || [];
+    if (lines.length) {
+        const eff = effectiveStyle(script, lines[0].name, lines[0].style,
+            ((ind.lines_style || {})[lines[0].name]), 0, lines[0].type);
+        const ik = Object.keys(eff.inks || {});
+        return (eff.hasInks && ik.length) ? eff.inks[ik[0]] : eff.color;
     }
-    return '#4fc3f7';
+    return effectiveStyle(script, null, ind && ind.style, ind && ind.style, 0).color;
 }
 
 // ============ 指标栏（chip 显隐/设置/删除/内置菜单） ============
@@ -99,9 +106,17 @@ function renderIndicatorBar() {
 function toggleIndicator(name) {
     const nowVisible = state.visibility[name] === false;
     state.visibility[name] = nowVisible;
-    // Phase A：原生指标走 Vela setVisible（句柄通道）；未映射走旧 emit（交互逻辑不变）
-    if (!setIndicatorVisibleNative(name, nowVisible)) updateIndicatorSeries(name);
+    // P3：全指标单源 emit —— 隐藏=卸载该指标的 emit 组（视觉+图例行一起消失），显示=重新挂载。
+    //   重挂载是必要的：emit 补丁只改模型，native 渲染器不重绘（V1 定论）。
+    updateIndicatorSeries(name);
+    remountIndicator(name);
     renderIndicatorBar();
+    // P2-fix：显隐持久化到服务端真源（刷新恢复 + 多端一致）；广播回流幂等重应用。
+    //   PUT 绑定约定=body 扁平（board_id/timeframe 也在 body，query 对 PUT 无效）。
+    fetch(`/api/indicator/${encodeURIComponent(name)}`,
+          { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ board_id: state.currentBoard, timeframe: state.currentTimeframe, visible: nowVisible }) })
+        .catch(e => log('error', 'toggle persist: ' + (e && e.message)));
     log('info', t('ind.toggled', { name, st: nowVisible ? t('ind.shown') : t('ind.hidden') }));
 }
 
@@ -169,6 +184,7 @@ function _renderInner() {
         guide.style.display = 'block';
         emptyState.style.display = 'none';
         container.innerHTML = '';
+        _setOhlcVisible(false);   // 无画板（删光/首次进入）= 引导页：OHLC 条带不该留在画布上方
         renderIndicatorBar(); updateDataInfo();
         return;
     }
@@ -176,10 +192,13 @@ function _renderInner() {
     if (!state.ohlcv || state.ohlcv.length === 0) {
         emptyState.style.display = 'block';
         container.innerHTML = '';
+        _setOhlcVisible(false);   // 有板无数据（未加载/空窗）：同样不留旧读数
         renderIndicatorBar(); updateDataInfo();
         return;
     }
     emptyState.style.display = 'none';
+    _setOhlcVisible(true);        // 有数据才显示（隐藏状态下切回画板即恢复）
+    state.timeIndex = new Map(state.ohlcv.map((bar, i) => [Math.floor(bar.timestamp / 1000), i]));
     state.timeIndex = new Map(state.ohlcv.map((bar, i) => [Math.floor(bar.timestamp / 1000), i]));
     renderChartCore();                 // Vela 建图（adapter）
     renderSubplots();                  // 副图实例 diff + 动态总高（adapter；无 subplot DOM）
@@ -260,6 +279,11 @@ onViewport(() => {
 // → 该行自渲染，数据取官方十字线载荷（原始数值）/读数桥（格式化串），不自造数据。
 export function refreshIndicatorBar() { renderIndicatorBar(); }
 function _fmtOhlc(v) { return (v == null || !isFinite(v)) ? '--' : Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+// 条带显隐（无画板/无数据时隐藏；保留元素与绑定，回来即恢复，不重建）
+function _setOhlcVisible(on) {
+    const el = document.getElementById('ohlc-legend');
+    if (el) el.style.display = on ? '' : 'none';
+}
 function _ensureOhlcEl() {
     // 画布外条带（Vela 无 legend 位置配置，原生 legend 恒占画布内第一行）→ 本行置于图表上方=视觉第一行
     const container = document.querySelector('.chart-container');
@@ -285,8 +309,6 @@ function _renderOhlc(o) {
     el.innerHTML = `<span>O <b>${num(O)}</b></span><span>H <b>${num(H)}</b></span><span>L <b>${num(L)}</b></span>`
         + `<span>C <b class="${cls}">${num(C)}</b></span>`
         + (chg == null ? '' : `<span class="${chg >= 0 ? 'up' : 'down'}">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</span>`);
-    // 避让：原生价格面板 legend 占顶部若干行（每个叠加指标一行）→ 本行下移
-    void pricePaneIndicatorRows;   // 条带化后无需避让偏移
 }
 (function bindOhlcRow() {
     onCrosshair((p) => {

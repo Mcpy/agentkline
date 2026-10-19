@@ -223,6 +223,16 @@ def test(port: int, token: str = None):
     r = s.delete(f"{base}/api/indicator/myblob?board_id=bare&timeframe=1d")
     check("delete inst_id", r.status_code == 200, r.text)
 
+    # === 4b. P2-fix 显隐服务端真源（刷新持久 + 多端一致） ===
+    r = s.put(f"{base}/api/indicator/macd", json={"visible": False, "board_id": "bare", "timeframe": "1d"})
+    check("update visible=false 200", r.status_code == 200, r.text)
+    r = s.get(f"{base}/api/overview?board_id=bare&timeframe=1d")
+    check("overview 回 visible=False（服务端真源，刷新持久）",
+          r.json().get("indicators", {}).get("macd", {}).get("visible") is False, r.text[:120])
+    r = s.put(f"{base}/api/indicator/macd", json={"visible": True, "board_id": "bare", "timeframe": "1d"})
+    r = s.get(f"{base}/api/overview?board_id=bare&timeframe=1d")
+    check("update visible=true 恢复", r.json().get("indicators", {}).get("macd", {}).get("visible") is True, r.text[:120])
+
     # === 5. save_script 校验 + many 压测 ===
     print("🧪 save_script")
     r = s.post(f"{base}/api/scripts", json={"id": "macd", "code": "def main(params, ohlcv):\n    return []\n"})
@@ -239,6 +249,49 @@ def test(port: int, token: str = None):
     r = s.post(f"{base}/api/indicator",
                json={"script": "indicator/tenp", "params": {"p1": 3}, "board_id": "bare", "timeframe": "1d"})
     check("10 参数指标上图", r.json().get("inst_id") == "tenp", r.text)
+
+    # === 5b. P1 时间戳契约：recipe values 带 times，按 ts 对齐（索引对齐免疫） ===
+    print("⏱️ P1 时间戳契约")
+    _HUGE = 9999999999999
+    _bars = (s.get(f"{base}/api/kline", params={"board_id": "bare", "timeframe": "1d",
+                   "start": 1, "end": _HUGE}).json().get("ohlcv") or [])
+    _tenp = (s.get(f"{base}/api/indicators", params={"board_id": "bare", "timeframe": "1d",
+               "instances": "tenp", "start": 1, "end": _HUGE}).json()
+             .get("indicators", {}).get("tenp", {}))
+    _t, _v = _tenp.get("times") or [], _tenp.get("values") or []
+    check("P1 get_indicators 回带 times", len(_t) > 0, str(_tenp)[:120])
+    check("P1 times/values/bars 同长（全覆盖）",
+          len(_t) == len(_v) == len(_bars), f"t={len(_t)} v={len(_v)} bars={len(_bars)}")
+    check("P1 times[i]==bars[i].ts（时间戳对齐，非索引猜测）",
+          all(_t[i] == _bars[i]["timestamp"] for i in range(min(len(_t), len(_bars)))), "")
+    check("P1 tenp values[i]==i（计算值与 ts 同序）",
+          all(_v[i] == float(i) for i in range(len(_v))), str(_v[:5]))
+    if len(_bars) > 21:
+        _p = (s.get(f"{base}/api/indicators", params={"board_id": "bare", "timeframe": "1d",
+                "instances": "tenp", "start": _bars[10]["timestamp"],
+                "end": _bars[20]["timestamp"]}).json().get("indicators", {}).get("tenp", {}))
+        check("P1 部分区间 times==对应 bar ts（bisect 时间范围切片）",
+              (_p.get("times") or []) == [_bars[i]["timestamp"] for i in range(10, 21)],
+              str((_p.get("times") or [])[:3]))
+        check("P1 部分区间 values==[10..20]",
+              (_p.get("values") or []) == [float(i) for i in range(10, 21)], str((_p.get("values") or [])[:3]))
+    _r = s.post(f"{base}/api/board/bare/timeframe/1d/backfill", json={"limit": 30})
+    _prep = _r.json().get("prepended", 0)
+    _bars3 = (s.get(f"{base}/api/kline", params={"board_id": "bare", "timeframe": "1d",
+                 "start": 1, "end": _HUGE}).json().get("ohlcv") or [])
+    _t3 = (s.get(f"{base}/api/indicators", params={"board_id": "bare", "timeframe": "1d",
+             "instances": "tenp", "start": 1, "end": _HUGE}).json()
+           .get("indicators", {}).get("tenp", {}).get("times") or [])
+    _v3 = (s.get(f"{base}/api/indicators", params={"board_id": "bare", "timeframe": "1d",
+             "instances": "tenp", "start": 1, "end": _HUGE}).json()
+           .get("indicators", {}).get("tenp", {}).get("values") or [])
+    check("P1 backfill prepended>0", _prep > 0, _r.text[:120])
+    check("P1 prepend 后 times/values/bars 同长（重算覆盖扩展全集）",
+          len(_t3) == len(_v3) == len(_bars3), f"t={len(_t3)} v={len(_v3)} bars={len(_bars3)}")
+    check("P1 prepend 后 times[i]==bars[i].ts 仍对齐（索引对齐免疫核心）",
+          all(_t3[i] == _bars3[i]["timestamp"] for i in range(min(len(_t3), len(_bars3)))), "")
+    check("P1 prepend 后 tenp values[i]==i（重算全范围）",
+          all(_v3[i] == float(i) for i in range(len(_v3))), str(_v3[:5]))
 
     # === 6. 搜索 ===
     print("🔍 搜索")
@@ -555,6 +608,18 @@ def test(port: int, token: str = None):
     if me2:
         caps2 = me2.get("caps") or {}
         check("美股源三徽章", caps2.get("backfill") and caps2.get("symbols") and caps2.get("ticker"), str(caps2))
+
+    # === 11.36 脚本元数据只读路由（web 端口可读，供设置面板补 PARAMS 默认值） ===
+    r = s.get(f"{base}/api/scripts/meta")
+    check("scripts/meta 200", r.status_code == 200, r.text[:120])
+    ml = r.json().get("scripts", []) if r.status_code == 200 else []
+    check("scripts/meta 含内置指标", any(x.get("id") == "indicator/bb" for x in ml),
+          str([x.get("id") for x in ml][:6]))
+    _bbm = next((x for x in ml if x.get("id") == "indicator/bb"), None) or {}
+    check("scripts/meta 带 PARAMS 默认值", _bbm.get("params") == {"period": 20, "std": 2}, str(_bbm.get("params")))
+    check("scripts/meta 精简面（不含能力/数据源元数据）",
+          all(not ({"caps", "identity", "intervals"} & set(x.keys())) for x in ml),
+          str(sorted(ml[0].keys())) if ml else "empty")
 
     # === 11.4 skills 三卷（v0.4.4 拆分） ===
     print("📚 skills")

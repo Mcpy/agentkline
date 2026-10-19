@@ -25,7 +25,11 @@ CAPS = {"backfill": bool, "symbols": bool, "ticker": bool}   # 指标族通常�
 
 ## indicator 契约
 `main(params, ohlcv) → values | {values, lines, markers}`；与 K 线等长；warmup=None；禁 NaN/Inf。
-lines 项 `{name, type: line|histogram, values, style?}`。可选 `label(params)` 定制显示名。
+lines 项 `{name, values}` 就够——**只出计算值**：类型/颜色/线宽/填充带/圆点/水平线由前端中间层
+（`frontend/src/visual_spec.js`，按 script id + 线名）统一决定，内置指标一律不带 type/style。
+自定义脚本仍可带 `type: line|histogram|columns|circles|cross|area|step` 与
+`style: {color, lineWidth, lineStyle}` 作**兜底**（仅当该 script 未进中间层规格表时生效）。
+可选 `label(params)` 定制显示名。
 重算只喂最近 max_window=5000 根——长记忆参数勿超窗。
 落盘：`add_indicator(script=id, params=...)`=recipe（随 K 线自动重算）；直接给 values/lines=blob
 （钉死单周期，传 scope 报错）。实例名 inst_id：撞名 INST_EXISTS；不传自动 `macd_2` 式。

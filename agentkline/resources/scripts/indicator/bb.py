@@ -3,6 +3,7 @@
 返回 lines 结构，画在主图
 """
 
+# 只出计算值：类型/颜色/线宽/填充带/圆点等视觉由前端中间层 visual_spec.js 统一决定（脚本纯值化）。
 NAME = "BOLL"
 DESC = "布林带：上轨/中轨/下轨"
 PARAMS = {"period": 20, "std": 2}
@@ -32,11 +33,8 @@ def main(params: dict, ohlcv: list) -> dict:
 
     return {
         "lines": [
-            {"name": "BB_UPPER", "type": "line", "values": upper,
-             "style": {"color": "#ffa726", "lineWidth": 1}},
-            {"name": "BB_MID", "type": "line", "values": mid,
-             "style": {"color": "#4fc3f7", "lineWidth": 1}},
-            {"name": "BB_LOWER", "type": "line", "values": lower,
-             "style": {"color": "#ffa726", "lineWidth": 1}},
+            {"name": "BB_UPPER", "values": upper},
+            {"name": "BB_MID", "values": mid},
+            {"name": "BB_LOWER", "values": lower},
         ]
     }

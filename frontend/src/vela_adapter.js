@@ -23,7 +23,8 @@ const ms = (bar) => bar.timestamp;                       // state.ohlcv.timestam
 const LS = (n) => (n === 1 ? 'dotted' : n === 2 ? 'dashed' : 'solid');   // LWC 0/1/2 → Vela
 const clone = (o) => JSON.parse(JSON.stringify(o));       // §10-⑤ 活引用硬约定
 
-import { NATIVE_MAP, nativeMulti, nativeTypeOf, styleInputs, lineStyleInputs, lineColorKey } from './native_map.js';
+// P2：中间层视觉权威（kind/颜色/fills/circles）；V1：原生保真调色 + 逐点色策略
+import { visualSpec, multiVisual, effectiveStyle, effectiveFill, NATIVE_INK } from './visual_spec.js';
 
 // ---- dataFeed（R3）：后端 WS 数据 → Vela MarketDataFeed port；零 provider 注册 ----
 class AkFeed {
@@ -62,75 +63,221 @@ class AkFeed {
 const feed = new AkFeed();
 
 // ============================================================================
-// native indicator 组通道（PoC P1 路径 A，官方 emit port）：legacy 脚本值直喂。
-//   'ak-main' = overlay group; 'ak-sub::<name>' = per-subplot group。
-//   P2：成交量已交原生 volume 指标（store 驱动），不再经本通道。
-//   type name = group name (ctx.id=native-N unreliable, §10-9); multiInstance guards re-add.
+// 指标渲染唯一通道（官方 emit port，PoC P1 路径 A）：Python 引擎算值 → 本层直喂。
+//   P3 起 native 双源退役：**全部**指标（叠加+副图）都走本通道，显示 ≡ AI ≡ Python 单源。
+//   成交量例外：走 Vela 原生 volume 指标（store 驱动，非计算指标）。
+//   type name = group key（ctx.id 为 native-N 不可靠，§10-9 + p9 探针复证）。
 // ============================================================================
 const _emitGroups = {};        // groupKey#ctxId → ctx
-function _groupSeries(groupId) {
+// ============================================================================
+// P3 组模型（单源 emit，native 双源退役）：
+//   叠加指标 = **每实例一个组** `ak-ov::<instId>`（paneHint price / overlay / legend:true）
+//     → 图例按指标出行（搬运算例不再丢原生图例读数）；隐藏 = 卸载整组（图例行同时消失）。
+//   副图 = **每副图一个组** `ak-sub::<name>`（paneHint new / legend:true），容纳该副图全部实例。
+//   旧模型（叠加指标全挤一个 ak-main + legend:false）= 图例读数丢失，故换。
+//   组 type 名即分组键（ctx.id 为 native-N 不可靠，§10-9 / p9 探针复证：
+//   addNativeIndicator(type,{id,title}) 对 registerNativeIndicator 类型**不生效**）。
+// ============================================================================
+const OV = 'ak-ov::';
+const SUB = 'ak-sub::';
+function groupOfInstance(instId, ind) { return (ind && ind.subplot) ? SUB + ind.subplot : OV + instId; }
+function _groupSeries(groupKey) {
     const series = [];
+    const fills = [];   // P2：bb 上下轨填充带（NativeIndicatorOutput.fills）
+    const priceLines = [];   // P3：水平线（rsi 阈值 / macd 零轴）
+    // V1：逐点色策略需要「同 bar 收盘价」（sar 涨/跌判定，与原生 `x < bars[i].close` 同式）。
+    //   懒建 time→close 索引：只有声明了 pointColor 的规格（当前 sar）才会触发。
+    let _closeByTime = null;
+    const closeOf = (t) => {
+        if (_closeByTime == null) {
+            _closeByTime = new Map();
+            (state.ohlcv || []).forEach(b => _closeByTime.set(b.timestamp, b.close));
+        }
+        return _closeByTime.get(t);
+    };
     const pushInd = (ind, instId) => {
-        if (nativeTypeOf(ind.script)) return;   // Phase A：原生指标由内置通道绘制，旧 emit 不重复发
         const vis = state.visibility[instId] !== false;
+        // P2-fix 隐藏：隐藏指标整体不 emit（series+fills 都不发），Vela diff 卸载 → 真隐藏。
+        //   不能靠 visible:false——emit patch 不消费 visible 变化，且 Fill 无 visible 位（锚点 hidden 仍供值，带照画）。
+        //   关键：隐藏也要登记 _emitLines（按应有线数）——否则 ws.js hadSeries=false → 每 tick renderChart 整图重建 → 闪。
+        if (!vis) {
+            _emitLines[instId] = (ind.lines && ind.lines.length) ? ind.lines.length : (ind.values != null ? 1 : 0);
+            return;
+        }
+        const times = ind.times || null;   // P1：时间戳契约（引擎随 values 下发）；blob 无 times → off 回退
+        const spec = visualSpec(ind.script);          // P2：中间层视觉规格（null → 回退脚本自带 style/type）
+        const linesStyle = ind.lines_style || null;   // 实例级线样式覆盖（用户/AI 改色）
         const lines = (ind.lines && ind.lines.length) ? ind.lines : null;
+        const nameToId = {};   // 线名 → series id（fills 解析用）
+        const nameColor = {};  // 线名 → 生效色（fills follow 派生用：用户改轨色，带色跟着走）
         let count = 0;
+        const env = { script: ind.script, params: ind.params || null, closeOf };
         if (lines) {
-            const rank = (l) => (l.type === 'histogram' || l.type === 'bar') ? 0 : 1;
+            const kindOf = (l) => { const lv = spec && spec.lines && spec.lines[l.name]; return (lv && lv.kind) || l.type; };
+            const rank = (l) => { const k = kindOf(l); return (k === 'histogram' || k === 'columns' || k === 'bar') ? 0 : 1; };
             [...lines].sort((a, b) => rank(a) - rank(b)).forEach((line, idx) => {
-                series.push(_lineSpec(`${instId}_${idx}`, line.name || `${instId}_${idx}`, line.values, line.type, line.style, vis));
+                const id = `${instId}_${idx}`;
+                const lname = line.name || `${instId}_${idx}`;
+                nameToId[lname] = id;
+                const lv = (spec && spec.lines && spec.lines[lname])
+                    || (spec && spec.multi ? multiVisual(ind.script, idx) : null);   // 多线型（sma/ema）按调色板
+                const ov = linesStyle ? linesStyle[lname] : null;
+                const s = _lineSpec(id, lname, line.values, line.type, line.style, vis, times, lv, ov, { ...env, idx });
+                series.push(s);
+                nameColor[lname] = s.style.color;
                 count++;
             });
         } else {
-            series.push(_lineSpec(instId, ind.display_name || ind.name || instId, ind.values, ind.type, ind.style, vis));
+            series.push(_lineSpec(instId, ind.display_name || ind.name || instId, ind.values, ind.type, ind.style, vis, times, null, ind.style, env));
             count = 1;
+        }
+        // bb 填充带：规格按线名引用 → 解析到本实例 series id；色 = override > follow 派生 > 规格静态色
+        const sf = spec && spec.fills;
+        if (sf) sf.forEach((f, fi) => {
+            const from = nameToId[f.from], to = nameToId[f.to];
+            if (!from || !to) return;
+            const fov = (linesStyle && f.key) ? linesStyle[f.key] : null;
+            fills.push({
+                id: `${instId}_fill${fi}`, paneId: '', fromSeriesId: from, toSeriesId: to,
+                color: effectiveFill(ind.script, f, nameColor[f.follow || f.from], fov),
+            });
+        });
+        // P3：水平线 + 区带（与原生 boundedOscillator 同构：rsi 70/50/30 + 三区、macd 零轴）
+        //   区带靠「隐藏 anchor series」撑出 pane 值域（display 只关 pane/legend/dataWindow，
+        //   保留 priceScale ⇒ 0..100 进 autoscale，与原生 anchorPlot 逐字同式）。
+        const lvl = {};
+        Object.entries((spec && spec.thresholds) || {}).forEach(([k, d]) => {
+            const pv = (ind.params || {})[k];
+            lvl[k] = Number(typeof d === 'function' ? d(ind.params || {}) : (pv != null ? pv : d));
+        });
+        Object.entries((spec && spec.axis) || {}).forEach(([k, v]) => { lvl[k] = Number(v); });
+        const lvlVal = (x) => (lvl[x] != null ? lvl[x] : Number(x));
+        const timeArr = (times && times.length) ? times : (state.ohlcv || []).map(b => b.timestamp);
+        if (spec && spec.levels) spec.levels.forEach((L, li) => {
+            const price = lvlVal(L.at);
+            if (!Number.isFinite(price)) return;
+            const lov = (linesStyle && L.key) ? linesStyle[L.key] : null;
+            priceLines.push({
+                id: `${instId}_pl${li}`, paneId: '', price, title: L.title || '',
+                color: (lov && lov.color) || L.color || NATIVE_INK.NEUTRAL,
+                lineStyle: L.lineStyle || 'solid', width: 1,
+            });
+        });
+        if (spec && spec.zones) {
+            const anchorId = {};
+            spec.zones.forEach(z => [z.from, z.to].forEach(end => {
+                const key = String(end);
+                if (anchorId[key] !== undefined) return;
+                const val = lvlVal(key);
+                if (!Number.isFinite(val)) { anchorId[key] = null; return; }
+                const aid = `${instId}_anc_${key}`;
+                anchorId[key] = aid;
+                series.push({
+                    id: aid, title: `${key} anchor`, paneId: '', kind: 'line',
+                    points: timeArr.map(tt => ({ time: tt, value: val })),
+                    display: { pane: false, legend: false, dataWindow: false },
+                    style: { color: 'rgba(120,123,134,0)', width: 1, lineStyle: 'solid' },
+                });
+            }));
+            spec.zones.forEach((z, zi) => {
+                const a = anchorId[String(z.from)], b = anchorId[String(z.to)];
+                if (!a || !b) return;
+                fills.push({ id: `${instId}_zone${zi}`, paneId: '', fromSeriesId: a, toSeriesId: b, color: z.color });
+            });
         }
         _emitLines[instId] = count;   // P2：emit 注册表（取代 seriesMap 占位）
     };
+    const isSub = groupKey.startsWith(SUB);
+    const subName = isSub ? groupKey.slice(SUB.length) : null;
+    const onlyId = isSub ? null : groupKey.slice(OV.length);
     Object.entries(state.indicators || {}).forEach(([instId, ind]) => {
-        const wantSub = groupId === 'ak-main' ? !ind.subplot : (ind.subplot === groupId.slice(8));   // 'ak-sub::'.length=8（bug2 off-by-one 修）
-        if (wantSub) pushInd(ind, instId);
+        if (isSub ? (ind.subplot === subName) : (instId === onlyId)) pushInd(ind, instId);
     });
-    return series;
+    return { series, fills, priceLines };
 }
-function _lineSpec(id, title, values, type, style, vis) {
-    style = style || {};
-    const kind = (type === 'histogram' || type === 'bar') ? 'histogram' : type === 'area' ? 'area' : 'line';   // baseline 降级 line（§10-⑭）
-    const color = style.color || '#4fc3f7';
-    // 索引对齐（P2 定性）：后端 values 与服务端 store 索引对齐；P1 不变量「镜像 ≡ 服务端 store」
-    // 使 off = bars.len - values.len 为精确对齐而非启发式；瞬态广播乱序时由 null 点自然降级。
-    const bars = state.ohlcv || [];
-    const off = Math.max(0, bars.length - (values || []).length);
-    const points = (values || []).map((v, i) => {
-        const bar = bars[off + i];
-        const pt = { time: bar ? ms(bar) : i, value: (v == null ? null : v) };
-        if (kind === 'histogram' && v != null && style.autoColor !== false) pt.color = v >= 0 ? '#26a69a' : '#ef5350';
+function _lineSpec(id, title, values, type, style, vis, times, lv, override, env) {
+    style = style || {}; lv = lv || {}; override = override || {}; env = env || {};
+    // V1：生效样式统一由 visual_spec.effectiveStyle 求解（渲染 ≡ 设置弹窗初值，单一优先级链）
+    //   优先级：实例 override(lines_style) > 中间层规格（原生默认色）> 脚本 style > 默认
+    const eff = effectiveStyle(env.script, title, style, override, env.idx, type);
+    // kind：中间层视觉规格 > 脚本 type > 默认 line（P2 视觉层收归；circles=sar 圆点，columns=原生柱）
+    const ksrc = eff.kind;
+    const kind = (ksrc === 'histogram' || ksrc === 'bar') ? 'histogram'
+        : ksrc === 'columns' ? 'columns'
+        : ksrc === 'area' ? 'area' : ksrc === 'circles' ? 'circles'
+        : ksrc === 'cross' ? 'cross'
+        : ksrc === 'step' ? 'step' : 'line';   // baseline 降级 line（§10-⑭）
+    const color = eff.color;
+    const width = eff.lineWidth;
+    const lstyle = LS(eff.lineStyle);
+    const autoColor = eff.autoColor;
+    const vals = values || [];
+    // P1 时间戳契约：优先用引擎随 values 同载荷下发的 times（两者同源恒一致，prepend/竞态免疫）。
+    //   对 times 尾对齐（toff 仅脚本返回短于 feed 时非零；times 权威无竞态，区别于旧 bars.length）。
+    //   无 times（冻结 blob）→ 回退旧 off=bars.len-values.len 索引对齐（blob 时间戳迁移留待后续统一）。
+    let timeAt;
+    if (times && times.length) {
+        const toff = Math.max(0, times.length - vals.length);
+        timeAt = (i) => times[toff + i];
+    } else {
+        const bars = state.ohlcv || [];
+        const off = Math.max(0, bars.length - vals.length);
+        timeAt = (i) => { const b = bars[off + i]; return b ? ms(b) : i; };
+    }
+    // 逐点色（Vela SeriesPoint.color）：规格策略优先（sar 涨跌 / macd 动能四态 / rsi 阈值渐变），
+    //   用户显式挑了单色（eff.flat）则停用策略，尊重用户颜色；柱状无策略时回退原生涨跌二色。
+    const strat = (lv.pointColor && !eff.flat) ? lv.pointColor : null;
+    const points = vals.map((v, i) => {
+        const time = timeAt(i);
+        const pt = { time, value: (v == null ? null : v) };
+        if (v == null) return pt;
+        let c = null;
+        if (strat) {
+            c = strat(v, {
+                i, prev: vals[i - 1], params: env.params, ink: eff.inks, autoColor,
+                close: env.closeOf ? env.closeOf(time) : null,
+            });
+        }
+        if (!c && (kind === 'histogram' || kind === 'columns') && autoColor) {
+            c = v >= 0 ? NATIVE_INK.BULLISH : NATIVE_INK.BEARISH;
+        }
+        if (c) pt.color = c;
         return pt;
     });
     return { id, title, paneId: '', kind, points, visible: vis,
-             style: { color, width: style.lineWidth || 2, lineStyle: LS(style.lineStyle) } };
+             style: { color, width, lineStyle: lstyle } };
 }
-const _registeredTypes = new Set();
+const _registeredTypes = new Map();   // type → 注册时 title（title 变 = 指标改名 → 重注册）
+// 返回 true = 本次发生注册/重注册（调用方据此决定是否需要重挂载该组）
 function _ensureType(type, title, paneHint, overlay, legend) {
-    if (_registeredTypes.has(type)) return;
-    _registeredTypes.add(type);
+    if (_registeredTypes.get(type) === title) return false;
+    if (_registeredTypes.has(type)) { try { V.unregisterNativeIndicator(type); } catch (e) {} }
+    _registeredTypes.set(type, title);
     V.registerNativeIndicator({
         type, title, paneHint, overlay, legend, multiInstance: true,
         inputsSchema: () => [], defaultInputs: () => ({}),
         create: () => ({
-            start(ctx) { _emitGroups[type + '#' + ctx.id] = ctx; ctx.emit({ series: _groupSeries(type) }); ctx.setStatus('live'); },
+            start(ctx) { _emitGroups[type + '#' + ctx.id] = ctx; _emitOne(type, ctx); ctx.setStatus('live'); },
             onBars() {}, setInputs() {}, suspend() {}, resume() {},
             stop() { Object.keys(_emitGroups).forEach(k => { if (k.startsWith(type + '#')) delete _emitGroups[k]; }); },
         }),
     });
+    return true;
 }
-function reEmit(groupId) {
-    Object.entries(_emitGroups).forEach(([k, ctx]) => { if (k.startsWith(groupId + '#')) ctx.emit({ series: _groupSeries(groupId) }); });
+function _emitOne(groupKey, ctx) {
+    const g = _groupSeries(groupKey);
+    ctx.emit({ series: g.series, fills: g.fills, priceLines: g.priceLines });
 }
-// P2：legacy 组（ak-main + ak-sub::*）重发；成交量已交原生 volume，不再经 emit
-function reEmitLegacyGroups() { ['ak-main', ...Object.keys(state.subplots || {}).map(n => 'ak-sub::' + n)].forEach(reEmit); }
-export function refreshEmittedGroups() { reEmitLegacyGroups(); }
+function reEmit(groupKey) {
+    Object.entries(_emitGroups).forEach(([k, ctx]) => { if (k.startsWith(groupKey + '#')) _emitOne(groupKey, ctx); });
+}
+// P3：全部活体组重发（前插/换周期等结构性变化后）；成交量走原生 volume，不在其中
+function reEmitAllGroups() {
+    [...new Set(Object.keys(_emitGroups).map(k => k.slice(0, k.lastIndexOf('#'))))].forEach(reEmit);
+}
+export function refreshEmittedGroups() { reEmitAllGroups(); }
 let _emitLines = {};   // instId -> 已 emit 线数（结构变化判定，取代 state.seriesMap）
+let _styleSig = {};    // V1：instId -> 样式签名（改色/线宽/填充 → 重挂载重绘判定）
 export function legacySeriesCount(instId) { return _emitLines[instId] || 0; }
 
 // ============================================================================
@@ -202,11 +349,9 @@ function _afterNativeChange() {
     setTimeout(() => { if (chart) { try { chart.resize(); } catch (e) {} } }, 40);
 }
 export function renderChartCore() {
-    _nativeInd.clear(); _pendingNative.clear();   // Phase A：整图重建 → 旧原生句柄全部失效
     _emitLines = {};                               // P2：emit 注册表随重建清空
-    const hasLegacyOverlay = Object.values(state.indicators || {}).some(i => !nativeTypeOf(i.script) && !i.subplot);
-    if (hasLegacyOverlay) _ensureType('ak-main', 'Indicators (overlay)', 'price', true, false);
-    _destroyChart();
+    _styleSig = {};                                // V1：样式签名随重建清空（重建后首帧不算「改样式」）
+    _destroyChart();                               // P3：组类型由 syncEmitGroups 按需注册（title 跟随显示名）
     const container = document.getElementById('main-chart');
     if (!container) return;
     container.innerHTML = '';
@@ -225,17 +370,13 @@ export function renderChartCore() {
     chart.ready().then(() => {
         if (!chart) return;
         _chartReady = true;
-        if (Object.values(state.indicators || {}).some(i => !nativeTypeOf(i.script) && !i.subplot)) {
-            try { chart.addNativeIndicator('ak-main'); } catch (e) {}
-        }
         // P2/P3：原生 volume 由构造选项自动挂载（默认 overlay 在 price pane，0.8.4 paneHint:'price'）；
         // 裁决=独立顶位 pane → moveTo({newPane:true}) 官方入口移入自有 pane，再配 0.4 涨跌色。
         try {
             const vh = (chart.indicators() || []).find(h => h.nativeType === 'volume');
             if (vh && vh.setInputs) vh.setInputs({ upColor: VOL_UP, downColor: VOL_DOWN });
         } catch (e) {}
-        syncNativeIndicators().then(() => { _layoutPanes(); });   // 首载/重建后同步原生指标并布局（P3 单路径）
-        syncSubplotsCore();       // 内部含 _layoutPanes
+        syncEmitGroups();         // P3：全部指标（叠加+副图）单源 emit 组挂载 + 布局
         setTimeout(() => _layoutPanes(), 400);   // 补捉晚于 ready 的 volume 自动挂载
         _showLatest(200);
         syncDrawings();
@@ -243,31 +384,59 @@ export function renderChartCore() {
         bindDrawingWriteback();
     });
 }
-// 副图实例 diff 同步（bug2-b：subplot_add/remove 消息序无关）+ relayout
-export function syncSubplotsCore() {
+// P3：emit 组差量同步（叠加=每实例一组 ak-ov::<instId>／副图=每组一 pane ak-sub::<name>）+ relayout
+//   · 隐藏 = 不挂载该组（原生 setVisible 的 emit 等价：视觉与图例行一起消失）
+//   · 改名 = title 只在注册期生效 → 重注册 + 重挂载刷新图例
+//   · 消息序无关（subplot_create 可能先于 indicator_add 到达）
+export function syncEmitGroups() {
     if (!chart || !_chartReady) return;    // pre-ready adds are dropped by the framework (evidence: panes=1); defer to ready.then
-    // live truth = chart.indicators()（同步可靠；自有注册表异步写不可靠）
-    const live = (chart.indicators() || []).map(h => h.nativeType).filter(t => t && t.startsWith('ak-sub::'));
-    // Phase A：原生指标自带 pane（overlay:false 的内置振荡器），其 subplot 名不再建旧 pane
-    const nativeOwned = new Set(Object.values(state.indicators || {})
-        .filter(i => nativeTypeOf(i.script) && i.subplot).map(i => i.subplot));
-    const want = Object.keys(state.subplots || {}).filter(n => !nativeOwned.has(n)).map(n => 'ak-sub::' + n);
-    want.forEach(type => {
-        if (!live.includes(type)) {
-            const name = type.slice(8);
-            _ensureType(type, name, 'new', false, true);    // subplot native legend lives in its own pane (bug3 fix)
-            try { chart.addNativeIndicator(type); } catch (e) {}
-        }
+    const live = (chart.indicators() || []).filter(h => {
+        const t = h.nativeType || '';
+        return t.startsWith(OV) || t.startsWith(SUB);
     });
-    live.forEach(type => {
-        if (!want.includes(type)) {
-            try {
-                (chart.indicators() || []).filter(h => h.nativeType === type).forEach(h => h.remove && h.remove());
-            } catch (e) {}
-            Object.keys(_emitGroups).forEach(k => { if (k.startsWith(type + '#')) delete _emitGroups[k]; });
-        }
+    const liveTypes = live.map(h => h.nativeType);
+    const remounted = [];   // 因改名重注册而重挂载的组键（调用方据此免去重复重挂载）
+    const want = [];
+    Object.entries(state.indicators || {}).forEach(([id, ind]) => {
+        if (ind.subplot) return;
+        if (state.visibility[id] === false) return;   // 隐藏 = 不挂载
+        want.push({ type: OV + id, title: ind.display_name || ind.name || id, paneHint: 'price', overlay: true, legend: true });
+    });
+    Object.entries(state.subplots || {}).forEach(([name, sp]) => {
+        const hosts = Object.entries(state.indicators || {}).filter(([, i]) => i.subplot === name);
+        // 副图内指标全部隐藏 → 不挂载该组（pane 随之消失，与叠加指标「隐藏即不见」一致）；
+        // 空副图（agent 显式建的）仍挂载，保留其语义。
+        if (hosts.length && !hosts.some(([id]) => state.visibility[id] !== false)) return;
+        const title = hosts.length === 1 ? (hosts[0][1].display_name || name) : ((sp && sp.title) || name);
+        want.push({ type: SUB + name, title, paneHint: 'new', overlay: false, legend: true });
+    });
+    // 卸载多余（删除的指标 / 隐藏的叠加指标 / 删掉的副图）
+    live.forEach(h => {
+        const t = h.nativeType;
+        if (want.some(w => w.type === t)) return;
+        try { h.remove && h.remove(); } catch (e) {}
+        Object.keys(_emitGroups).forEach(k => { if (k.startsWith(t + '#')) delete _emitGroups[k]; });
+    });
+    want.forEach(w => {
+        const mounted = liveTypes.includes(w.type);
+        const reregistered = _ensureType(w.type, w.title, w.paneHint, w.overlay, w.legend);
+        if (!mounted) { try { chart.addNativeIndicator(w.type); } catch (e) {} return; }
+        if (reregistered) { remountGroup(w.type); remounted.push(w.type); }
     });
     _layoutPanes();
+    return remounted;
+}
+// 兼容名：render.js 的 renderSubplots() 调用点（副图+叠加组同一入口）
+export function syncSubplotsCore() { syncEmitGroups(); }
+// 重挂载一个组：emit 补丁不触发 native 渲染器重绘（V1 定论）→ remove+add，mount 必然重绘。
+//   remove+add 同一同步帧内完成，Vela 批渲染 ⇒ 无感知闪烁。
+function remountGroup(groupKey) {
+    if (!chart) return;
+    try {
+        (chart.indicators() || []).filter(h => h.nativeType === groupKey).forEach(h => { try { h.remove(); } catch (e) {} });
+        Object.keys(_emitGroups).forEach(k => { if (k.startsWith(groupKey + '#')) delete _emitGroups[k]; });
+        chart.addNativeIndicator(groupKey);   // start() 重发当前 _groupSeries（尊重 visibility）→ 重绘
+    } catch (e) {}
 }
 
 function _showLatest(n) {
@@ -290,179 +459,27 @@ export function applyDataUpdateCore() {
     const bars = state.ohlcv || [];
     if (!bars.length) return;
     feed._push(bars[bars.length - 1]);
-    reEmitLegacyGroups();   // tick 使 legacy 序列末点位移（镜像≡store 不变量下的精确索引对齐）
+    reEmitAllGroups();   // tick 使 emit 序列末点位移（镜像≡store 不变量下的精确索引对齐）
 }
-// ============================================================================
-// 原生指标管理（重构 Phase A）：add/remove/update 走 Vela 内置指标句柄，
-// 零整图重建、零 WS 值推送、零自定义 emit。未映射脚本返回 false → 旧通道回退。
-// ============================================================================
-// 样式真源派生：常规广播把样式嵌在 lines[].style（style 字段为 null）→ 统一成 dict
-function _linesStyleOf(inst) {
-    // 优先级：lines[].style（弹窗显示/用户调好的真源） > lines_style（可能残留旧值）
-    if (!inst) return null;
-    const out = {};
-    if (inst.lines_style) Object.assign(out, inst.lines_style);
-    (inst.lines || []).forEach(l => { if (l && l.style && l.name) out[l.name] = { ...(out[l.name] || {}), ...l.style }; });
-    return Object.keys(out).length ? out : null;
+// V1/P3：显隐与改样式的重绘入口。emit 补丁只更新模型、native 渲染器不重绘
+//   （resize/setTheme/同区间setVisibleRange/同bar _push/epsilon 均 no-op —— V1 定论）。
+//   可靠解 = 组挂载差量（syncEmitGroups：隐藏卸载/显示挂载/改名重注册）+ 必要时重挂载组。
+//   remove+add 同一同步帧内完成，Vela 批渲染 ⇒ 无感知闪烁。
+// ws.js 用：删除指标前取组键（叠加组=该实例独占；副图组=多实例共享）
+export function groupKeyOfInstance(instId) { return groupOfInstance(instId, (state.indicators || {})[instId]); }
+// ws.js 用：按组键强制重挂载（emit 补丁不重绘 → 组内少了一条也要重挂载）
+export function remountGroupByKey(groupKey) { remountGroup(groupKey); }
+export function remountIndicator(instId) {
+    if (!chart) return;
+    const ind = (state.indicators || {})[instId];
+    if (!ind) return;
+    const gk = groupOfInstance(instId, ind);
+    const mountedNow = (chart.indicators() || []).some(h => h.nativeType === gk);
+    syncEmitGroups();   // 差量：新显示=挂载（mount 必然重绘）／隐藏=卸载（remove 亦重绘）
+    const mountedAfter = (chart.indicators() || []).some(h => h.nativeType === gk);
+    // 组一直在（副图内某条隐藏、或纯样式变化）→ 强制重挂载重绘
+    if (mountedNow && mountedAfter) remountGroup(gk);
 }
-function _styleOf(inst) {
-    if (!inst) return null;
-    if (inst.style) return inst.style;
-    const ls = inst.lines || [];
-    if (ls.length === 1 && ls[0].style) return ls[0].style;
-    return null;
-}
-const _nativeInd = new Map();   // ourInstId -> {handle?, handles?, script}
-const _pendingNative = new Set();   // pre-ready 到达的原生指标（ready 后由 syncNativeIndicators 补挂）
-
-export async function addIndicatorNative(inst) {
-    if (!chart || !inst || !inst.script) return false;
-    const map = NATIVE_MAP[inst.script];
-    const multi = nativeMulti(inst.script);
-    if (!map && !multi) return false;                        // 未映射 → 旧通道回退
-    if (_nativeInd.has(inst.inst_id)) return true;   // 幂等：防重复实例（双 pane）
-    if (!_chartReady) { _pendingNative.add(inst.inst_id); return true; }   // pre-ready：认领挂起，ready 后补挂
-    // Vela addNativeIndicator = 同步返回 handle（非 Promise；对 .then 会抛错=此前实例累积/单线根因）
-    try {
-        if (map) {
-            const h = chart.addNativeIndicator(map.type, { id: inst.inst_id, title: inst.display_name });
-            const ls0 = _linesStyleOf(inst), st0 = _styleOf(inst);
-            const in0 = { ...map.inputs(inst.params || {}), ...lineStyleInputs(inst.script, ls0),
-                ...styleInputs(inst.script, st0, ls0) };   // 显式 style 最后胜出（含 lines[].style 派生）
-            if (h && h.setInputs) h.setInputs(in0);
-            _nativeInd.set(inst.inst_id, { handle: h, script: inst.script, lastInputs: JSON.stringify(in0) });
-            _afterNativeChange();
-            return true;
-        }
-        if (multi) {
-            const periods = ((inst.params || {}).periods || [20]).slice();
-            const ids = [];
-            periods.forEach(per => {
-                const id = periods.length > 1 ? `${inst.inst_id}_${per}` : inst.inst_id;
-                const h = chart.addNativeIndicator(multi, { id });
-                if (h && h.setInputs) h.setInputs({ length: per });
-                _nativeInd.set(id, { handle: h, script: inst.script });
-                ids.push(id);
-            });
-            _nativeInd.set(inst.inst_id, { handles: ids, script: inst.script, lastPeriods: periods, multiSig: periods.join(',') });
-            _afterNativeChange();
-            return true;
-        }
-    } catch (e) { console.warn('[ak] addNativeIndicator failed:', inst.script, e && e.message); }
-    return false;
-}
-
-export function removeIndicatorNative(instId) {
-    const rec = _nativeInd.get(instId);
-    if (!rec) return false;
-    if (rec.handles) rec.handles.forEach(id => { const r = _nativeInd.get(id); if (r && r.handle) { try { r.handle.remove(); } catch (e) {} _nativeInd.delete(id); } });
-    else if (rec.handle) { try { rec.handle.remove(); } catch (e) {} }
-    _nativeInd.delete(instId);
-    _afterNativeChange();
-    return true;
-}
-
-export function updateIndicatorNative(instId, params, style, linesStyle) {
-    const rec = _nativeInd.get(instId);
-    if (!rec) return false;
-    const cur = (state.indicators || {})[instId] || {};
-    // 用户裁决：自家 state 是样式真源 → state 派生优先于广播携带（广播可能残留旧值，曾把颜色顶回默认）
-    const dSt = _styleOf(cur), dLs = _linesStyleOf(cur);
-    if (dLs) linesStyle = dLs;
-    if (dSt) style = dSt;
-    const map = NATIVE_MAP[rec.script];
-    if (map && rec.handle) {
-        const next = { ...map.inputs(params || {}), ...lineStyleInputs(rec.script, linesStyle),
-            ...styleInputs(rec.script, style, linesStyle) };   // 显式 style 最后胜出（广播里的 lines_style 不再顶掉）
-        const sig = JSON.stringify(next);
-        if (rec.lastInputs === sig) return true;          // 广播逐 tick 重复 → 参数未变=零重算零重绘（防闪）
-        rec.lastInputs = sig;
-        try { rec.handle.setInputs(next); } catch (e) {}
-        return true;
-    }
-    if (rec.handles || nativeMulti(rec.script)) {         // 多实例（sma/ema）：收敛式同步（不依赖广播内容）
-        const styleSig = JSON.stringify([style || null, linesStyle || null]);
-        const applyStyles = () => {
-            const idsNow = [..._nativeInd.keys()].filter(k => { const r = _nativeInd.get(k); return r && r.script === rec.script && !r.handles; });
-            idsNow.forEach(id => {
-                const r = _nativeInd.get(id); if (!r || !r.handle || !r.handle.setInputs) return;
-                const per = r.handle.inputValues ? (r.handle.inputValues().length ?? null) : null;
-                const inp = {};
-                const lineName = linesStyle ? Object.keys(linesStyle).find(n => String(n).replace(/\D/g, '') === String(per)) : null;
-                const ls = lineName && linesStyle[lineName];
-                if (ls && ls.color) inp.color = ls.color;
-                else if (style && style.color) inp.color = style.color;
-                if (Object.keys(inp).length) { try { r.handle.setInputs(inp); } catch (e) {} }
-            });
-            rec.multiStyleSig = styleSig;
-        };
-        const multi = nativeMulti(rec.script);
-        const p = (params || {});
-        const want = (Array.isArray(p.periods) && p.periods.length) ? p.periods.map(Number)
-            : (rec.lastPeriods || []).length ? rec.lastPeriods : [20];
-        const sig = want.join(',');
-        if (rec.multiSig === sig && rec.multiStyleSig === styleSig) return true;   // 周期与样式都未变 = 纯 no-op
-        if (rec.multiSig === sig) { applyStyles(); return true; }                  // 仅样式变化
-        rec.multiSig = sig; rec.lastPeriods = want;
-        // 现有实例（我们自己的 key 规则：instId 或 instId_per）
-        const existing = [..._nativeInd.entries()].filter(([k, v]) => v.script === rec.script && !v.handles);
-        const wantIds = new Set(want.map(per => want.length > 1 ? `${instId}_${per}` : instId));
-        // 删多余
-        existing.forEach(([k]) => { if (!wantIds.has(k)) { const r = _nativeInd.get(k); if (r && r.handle) { try { r.handle.remove(); } catch (e) {} } _nativeInd.delete(k); } });
-        // 补缺失（同帧并发）
-        const have = new Set(existing.map(([k]) => k));
-        want.filter(per => !have.has(want.length > 1 ? `${instId}_${per}` : instId)).forEach(per => {
-            const id = want.length > 1 ? `${instId}_${per}` : instId;
-            try { const h = chart.addNativeIndicator(multi, { id }); if (h && h.setInputs) h.setInputs({ length: per }); _nativeInd.set(id, { handle: h, script: rec.script }); } catch (e) {}
-        });
-        rec.handles = [...wantIds];
-        applyStyles();
-        _afterNativeChange();
-        return true;
-    }
-    return false;
-}
-
-export function hasNativeIndicator(instId) { return _nativeInd.has(instId); }
-// 弹窗初值：读原生句柄真值（单实例=输入表；多实例=按周期分组）
-export function nativeInputValues(instId) {
-    const rec = _nativeInd.get(instId);
-    if (!rec) return null;
-    if (rec.handle && rec.handle.inputValues) { try { return { single: rec.handle.inputValues() }; } catch (e) { return null; } }
-    if (rec.handles) {
-        const byPeriod = {};
-        rec.handles.forEach(id => { const r = _nativeInd.get(id); if (r && r.handle && r.handle.inputValues) {
-            const v = r.handle.inputValues(); byPeriod[v.length] = v; } });
-        return { byPeriod };
-    }
-    return null;
-}
-export function lineColorKeyOf(script, lineName) { return lineColorKey(script, lineName); }
-export function pricePaneIndicatorRows() {
-    try {
-        const pl = chart.panes.list() || [];
-        const price = pl.find(p => p.id === 'price');
-        const n = price ? (price.indicators || []).length : 0;
-        return Math.max(1, n);   // 原生 legend 占行数（含首行）
-    } catch (e) { return 1; }
-}
-export function setIndicatorVisibleNative(instId, visible) {
-    const rec = _nativeInd.get(instId);
-    if (!rec) return false;
-    const list = rec.handles ? rec.handles.map(id => _nativeInd.get(id)).filter(Boolean) : [rec];
-    list.forEach(r => { if (r && r.handle && r.handle.setVisible) { try { r.handle.setVisible(!!visible); } catch (e) {} } });
-    return true;
-}
-export async function syncNativeIndicators() {
-    const inds = state.indicators || {};
-    for (const [id, ind] of Object.entries(inds)) {
-        if (_nativeInd.has(id)) continue;
-        await addIndicatorNative({ ...ind, inst_id: id });
-        if (state.visibility && state.visibility[id] === false) setIndicatorVisibleNative(id, false);
-    }
-    _pendingNative.clear();
-}
-export function nativeIndicatorIds() { return [..._nativeInd.keys()]; }
 
 window.__akInputs = () => (chart.indicators() || []).map(h => {
     let keys = [];
@@ -478,6 +495,13 @@ window.__akDebug = {
     panes: () => ((chart && chart.panes.list()) || []).map(p => ({ id: p.id, w: p.heightWeight, types: (p.indicators || []).map(i => i.nativeType || i.title) })),
     subs: () => Object.keys(state.subplots || {}),
     inds: () => Object.entries(state.indicators || {}).map(([id, i]) => [id, i.script, i.subplot || null]),
+    // P2 验证钩子：inspect=Vela 实际挂载的 scene（totals.fills / 各指标 series kind 计数）；
+    //   group=本适配层 _groupSeries 产出的 emit 载荷（series kind/色/点数 + fills），验证视觉规格接线。
+    inspect: () => { try { return chart && chart.inspect ? chart.inspect() : null; } catch (e) { return null; } },
+    // 原始 emit 载荷（series/fills/priceLines），排障用；缺省=第一个活体组
+    group: (g) => _groupSeries(g || (Object.keys(_emitGroups)[0] || '').split('#')[0] || (OV + Object.keys(state.indicators || {})[0])),
+    groups: () => [...new Set(Object.keys(_emitGroups).map(k => k.split('#')[0]))],
+    hvis: () => { try { return (chart && chart.indicators ? chart.indicators() : []).map(h => ({ t: h.nativeType || h.title, v: h.visible })); } catch (e) { return []; } },
 };
 // P1：左划提深度 = Vela 原生 extendDepth 单入口（setMarket 同 market + bars）。
 // 目标深度 = 镜像长度 + 200。不变量：镜像 ⊇ Vela BarStore（初载快照同源 + 增量同源），
@@ -506,12 +530,33 @@ function extendHistoryCore() {
             .catch(e => console.warn('[ak] depth extend failed', e));
     } catch (e) { console.warn('[ak] setMarket(bars) depth extend failed', e); }
 }
+// V1/P3：视觉签名（显示名 + 色/线宽/线型/autoColor/inks/填充）——判定「这次广播要不要重挂载」
+//   含 display_name：图例标题只在类型注册期生效 ⇒ 改名必须重注册 + 重挂载。
+function _styleSigOf(ind) {
+    return JSON.stringify([ind.display_name || null, ind.style || null, ind.lines_style || null,
+        (ind.lines || []).map(l => [l.name, l.type, l.style || null])]);
+}
 export function updateIndicatorSeriesCore(instId) {
     const ind = (state.indicators || {})[instId];
-    if (!ind) return;
+    if (!ind || !chart) return;
+    const gk = groupOfInstance(instId, ind);
     const want = (ind.lines && ind.lines.length) ? ind.lines.length : (ind.values ? 1 : 0);
-    if (legacySeriesCount(instId) !== want) { renderChartCore(); return; }   // 结构变化=全量（P2：emit 注册表判定）
-    reEmit(ind.subplot ? 'ak-sub::' + ind.subplot : 'ak-main');
+    // P3：组未挂载（新指标／刚取消隐藏／副图刚建）→ 差量同步即挂载（mount 必然重绘，无需整图重建）
+    const mounted = (chart.indicators() || []).some(h => h.nativeType === gk);
+    if (!mounted) { syncEmitGroups(); return; }
+    // V1/P3：结构变化（线数增减）或样式变化 → 重挂载该组
+    //   （emit 补丁只改模型、native 渲染器不重绘 —— 与隐藏 bug 同根因）
+    const sig = _styleSigOf(ind);
+    const prev = _styleSig[instId];
+    _styleSig[instId] = sig;
+    if (legacySeriesCount(instId) !== want) { remountGroup(gk); return; }   // 结构变化（线数增减）
+    if (prev !== undefined && prev !== sig) {
+        // 视觉签名变化：改名 → 组差量同步（重注册 title 时内部已重挂载）；纯改样式 → 直接重挂载
+        const remounted = syncEmitGroups() || [];
+        if (!remounted.includes(gk)) remountGroup(gk);
+        return;
+    }
+    reEmit(gk);   // 纯数值刷新：数据流本身触发重绘（remount 反而会闪）
 }
 
 // ---- 重构 A+B：provider 式自足 loadRange + 去重/单调守卫合并（借鉴 Vela v2/backfillHistory 校验） ----

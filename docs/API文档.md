@@ -72,6 +72,7 @@ CSV 入图 = 内置 `datasource/csv` 脚本（path 归操作参数，IDENTITY=[]
 | 方法 | 路径 | 端口 | 说明 |
 |---|---|---|---|
 | GET | `/api/scripts` | exec | 双根脚本表 `[{id,kind,source,display,desc,params,caps,identity}]` |
+| GET | `/api/scripts/meta` | read | 脚本元数据精简面 `[{id,kind,source,display,desc,params}]`：web 端口可读（设置面板补 PARAMS 默认值），无 MCP 面 |
 | POST | `/api/scripts` | exec | `save_script`：`{id,code}` 只写 custom，保存即校验（CAPS_MISMATCH/SAVE_SYNTAX/SAVE_NO_MAIN/SAVE_EMPTY） |
 | POST | `/api/run-script` | exec | 窄身 `{script,params}`：只执行返回，图上不留痕 |
 | GET | `/api/search` | read | 标的搜索 `?q=&refresh=`：rows=`[{symbol,source,display,has_board}]`；索引=CAPS.symbols 源首用全量+TTL 日级；搜索不穿透交易所 |

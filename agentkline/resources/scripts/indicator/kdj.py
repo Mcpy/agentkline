@@ -1,5 +1,6 @@
 # KDJ 随机指标
 
+# 只出计算值：类型/颜色/线宽/填充带/圆点等视觉由前端中间层 visual_spec.js 统一决定（脚本纯值化）。
 NAME = "KDJ"
 DESC = "随机指标 K/D/J 三线"
 SUBPLOT = True  # v0.4.3：副图族声明（add_indicator 未显式传 subplot 时自动建/删副图）
@@ -26,7 +27,7 @@ def main(params, ohlcv):
         D[i] = pd
         J[i] = 3 * pk - 2 * pd
     return {"lines": [
-        {"name": "K", "type": "line", "values": K, "style": {"color": "#f5c542", "lineWidth": 1}},
-        {"name": "D", "type": "line", "values": D, "style": {"color": "#4fc3f7", "lineWidth": 1}},
-        {"name": "J", "type": "line", "values": J, "style": {"color": "#b39ddb", "lineWidth": 1}},
+        {"name": "K", "values": K},
+        {"name": "D", "values": D},
+        {"name": "J", "values": J},
     ]}

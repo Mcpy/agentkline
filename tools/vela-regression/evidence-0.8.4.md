@@ -21,3 +21,10 @@
 ## 环境注记
 - 远程 CDP 浏览器 webgl2=false（Vela 走降级渲染路径），故像素级视觉验收保留在用户浏览器进行（惯例）；DOM/API 级回归结论不受影响。
 - 0.8.2–0.8.4 changelog 无 backfill 直接修复；左滑只加载一次的 bug 预期仍在，留待 P1 重写处理。
+
+## P2/P3 指标通道补验（p8–p9，2026-10-18/19，dsh）
+- p8 emit 视觉口：`registerNativeIndicator` + `ctx.emit({series, fills})` 挂 bands（3 线 + 上下轨 fill）与 `kind:'circles'`（sar 圆点）→ RESULT PASS（bands(fill)+circles both mount）。
+- p9 每实例组 + priceLines + 隐藏 anchor：
+  - `addNativeIndicator(type, {id, title})` 对 `registerNativeIndicator` 注册的类型**不生效**：`ctx.id` 仍为 `native-N`，`panes.list()` 里 title 仍是 descriptor 标题（内置指标才吃 id/title）⇒ 组键只能落 **type 名**；每指标一个 type + 改名走 `unregisterNativeIndicator` + 重注册 + 重挂载（A1/A2 FAIL 为**预期结论**，非缺陷）。
+  - `emit({priceLines})` 挂载 OK（`inspect().totals.priceLines=3`）；`display:{pane:false,legend:false,dataWindow:false}` 的隐藏 anchor series + 三条 zone fill 挂载 OK（`totals.fills=3`，series 计 5=1 值线+4 anchor）⇒ RSI 原生 boundedOscillator 形态可在 emit 口 1:1 复刻（B1/B2 PASS）。
+- 像素级复核（远程 CDP 降级渲染仍可读数）：RSI pane 直方图出现 `30,32,36`/`20,32,33`/`38,24,28` = 中带/超卖区/超买区三色；MACD pane 出现 `8,153,129`/`14,88,77`/`131,38,47`/`242,54,69` = 原生动能四态 + `120,123,134` 零轴。

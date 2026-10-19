@@ -35,6 +35,7 @@
 | POST | `/api/run-script` | Run Script |
 | GET | `/api/scripts` | List Scripts |
 | POST | `/api/scripts` | Save Script |
+| GET | `/api/scripts/meta` | List Script Meta |
 | GET | `/api/search` | Search Symbols |
 | GET | `/api/skills` | List Skills |
 | GET | `/api/skills/{name}` | Load Skill |
@@ -75,8 +76,8 @@
 | `list_drawings` | 列出画板+周期的所有划线 |
 | `get_current_view` | 获取用户当前视图（画板/周期/可见时间窗口），由前端上报 |
 | `create_board` | 新建一个图表画板。两种用法： |
-| `add_drawing` | 画线。type: hline(水平,points=[{price}]) / trend(趋势,points=[{time,price},{time,price}])。 |
-| `update_drawing` | 更新划线：visible(显隐)/color/line_width/line_style(solid|dashed|dotted)/text |
+| `add_drawing` | 画线。type: hline(水平,points=[{price}]) / trend(趋势,points=[{time,price}])，或 drawing=完整原生条目（优先）。 |
+| `update_drawing` | 更新划线。命名参数 visible(显隐)/color/line_width/line_style(solid|dashed|dotted)/text，或 patch=raw dict 浅合并（优先）。 |
 | `delete_drawing` | 删除划线 |
 | `backfill` | 向左补拉更早的历史 K 线（看更久远的行情用）。前提：该板数据源支持历史回补（list_scripts 里 caps 含 backfill；csv 类源不支持，返回 prepended=0）。返回本次补拉根数与当前总根数。 |
 | `set_markers` | 在K线主图设置标记（覆盖式，替换该周期已有全部标记；读取用 get_markers）。 |

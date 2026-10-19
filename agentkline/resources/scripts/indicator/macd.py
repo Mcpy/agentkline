@@ -1,6 +1,7 @@
 # MACD 指标脚本（DIF/DEA 线 + 红绿柱）
-# 返回 lines: DIF(黄) / DEA(蓝) / MACD柱(自动红绿)
+# 返回 lines: DIF / DEA / MACD 柱（柱色由中间层按动能四态自动上色）
 
+# 只出计算值：类型/颜色/线宽/填充带/圆点等视觉由前端中间层 visual_spec.js 统一决定（脚本纯值化）。
 NAME = "MACD"
 DESC = "指数平滑异同移动平均：DIF/DEA 线 + 红绿柱"
 SUBPLOT = True  # v0.4.3：副图族声明（add_indicator 未显式传 subplot 时自动建/删副图）
@@ -36,10 +37,8 @@ def main(params, ohlcv):
 
     return {
         "lines": [
-            {"name": "DIF", "type": "line", "values": dif,
-             "style": {"color": "#f5c542", "lineWidth": 1}},
-            {"name": "DEA", "type": "line", "values": dea,
-             "style": {"color": "#4fc3f7", "lineWidth": 1}},
-            {"name": "MACD", "type": "histogram", "values": hist},
+            {"name": "DIF", "values": dif},
+            {"name": "DEA", "values": dea},
+            {"name": "MACD", "values": hist},
         ]
     }

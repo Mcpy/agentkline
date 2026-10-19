@@ -154,6 +154,16 @@ def get_config():
     return {"scripts_dir": str(SCRIPTS_DIR), "version": service.VERSION}
 
 
+@api_tool(group="read", path="/api/scripts/meta", mcp=False)
+def list_script_meta():
+    """脚本元数据（只读，前端设置面板用）：`{scripts: [{id, kind, source, display, desc, params}]}`。
+    面板靠它补参数默认值（实例 params 为空时也有得改）。只出 UI 需要的最小面；
+    完整脚本表（含能力声明与数据源元数据）与写入口 `POST /api/scripts` 仍只在 agent 端口。"""
+    keep = ("id", "kind", "source", "display", "desc", "params")
+    return {"scripts": [{k: sc.get(k) for k in keep}
+                        for sc in service.script_engine.list_scripts()]}
+
+
 @api_tool(group="read", path="/api/view")
 def get_current_view():
     """获取用户当前视图（画板/周期/可见时间窗口），由前端上报"""
@@ -185,7 +195,8 @@ def create_empty_board(board_id: str, name: Optional[str] = None, intervals: Opt
 def add_drawing(board_id: Optional[str] = None, timeframe: Optional[str] = None, type: str = "hline",
                 points: Optional[list] = None, color: str = "#ef5350", line_width: int = 2,
                 line_style: str = "solid", text: str = "", drawing: Optional[dict] = None):
-    """画线。两种入参形态：
+    """画线。type: hline(水平,points=[{price}]) / trend(趋势,points=[{time,price}])，或 drawing=完整原生条目（优先）。
+    两种入参形态：
     ① 0.4 兼容形态：type: hline(水平,points=[{price}]) / trend(趋势,points=[{time,price},{time,price}])，time 为毫秒时间戳；
     ② v0.5 原生形态（drawing 参数优先）：完整 Vela DrawingsDocument 条目 dict
        （{id?,type,paneId,anchors:[{time,price}],style:{lineColor,lineWidth,lineStyle},locked?,visible?,text?}），
@@ -203,8 +214,8 @@ def update_drawing(board_id: Optional[str] = None, timeframe: Optional[str] = No
                    visible: Optional[bool] = None, color: Optional[str] = None,
                    line_width: Optional[int] = None, line_style: Optional[str] = None,
                    text: Optional[str] = None, patch: Optional[dict] = None):
-    """更新划线。命名参数：visible(显隐)/color/line_width/line_style(solid|dashed|dotted)/text；
-    或 patch 参数优先：raw dict 浅合并（v0.5 乙案嵌套样式用 patch={"style":{...}} / {"anchors":[...]}）。"""
+    """更新划线。命名参数 visible(显隐)/color/line_width/line_style(solid|dashed|dotted)/text，或 patch=raw dict 浅合并（优先）。
+    patch 说明：v0.5 乙案嵌套样式用 patch={"style":{...}} / {"anchors":[...]}。"""
     board_id, timeframe = _resolve(board_id, timeframe)
     if patch:
         return service.update_drawing(board_id, timeframe, drawing_id, dict(patch))
@@ -275,13 +286,14 @@ def delete_indicator(board_id: Optional[str] = None, timeframe: Optional[str] = 
 def update_indicator(board_id: Optional[str] = None, timeframe: Optional[str] = None, inst_id: str = "",
                      params: Optional[dict] = None, style: Optional[dict] = None,
                      lines_style: Optional[dict] = None, display_name: Optional[str] = None,
-                     auto_label: Optional[bool] = None):
+                     auto_label: Optional[bool] = None, visible: Optional[bool] = None):
     """改一个已加指标（inst_id 从 overview 的 indicators 列表拿）。
-    params=新参数，改后自动重算（如 MA 周期档、MACD 快慢慢期）；style/lines_style=颜色/线宽/线型；display_name=改显示名。
+    params=新参数，改后自动重算（如 MA 周期档、MACD 快慢慢期）；style/lines_style=颜色/线宽/线型；display_name=改显示名；
+    visible=显示/隐藏（服务端真源，刷新后仍保持，多端一致）。
     要把指标从图上拿走用 delete_indicator。"""
     board_id, timeframe = _resolve(board_id, timeframe)
     return service.update_indicator(board_id, timeframe, inst_id, params, style,
-                                    lines_style, display_name, auto_label)
+                                    lines_style, display_name, auto_label, visible)
 
 
 @api_tool(group="manage", method="DELETE", path="/api/board/{board_id}", err_status=404)

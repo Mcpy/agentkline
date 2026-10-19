@@ -38,6 +38,7 @@ Since v0.4 the chart is a **scene per symbol** (one symbol, one locked board): t
 - ⚡ **Request budget** — visibility-tiered polling (visible slot fast, others 60/120/300s + refetch-on-switch), per-source batched tickers, visible-row quote dedup: ~80% fewer exchange calls
 - 🇨🇳 **A-share built-in source** — `ashare_free`: realtime quotes + full-interval K-lines + adjust factor; multi-vendor fallback chain (Eastmoney primary, Tencent/Sina backup)
 - 📈 **One-click indicators** — traditional-panel toggle menu (MA/EMA 3-line, BOLL, SAR, MACD, KDJ, RSI, OBV); click on, click off
+- 🎨 **Native-faithful indicator visuals** — the 8 built-ins start from Vela's own palette and shapes (BOLL blue bands + orange basis, SAR bull-green/bear-red dots, MACD 4-state momentum columns, RSI threshold ramp with zone bands); the price-pane legend shows **one readout row per indicator**, and the settings dialog edits color/width/line style/band fill/bull-bear inks with immediate repaint
 - 🗂 **Radar groups** — themed watch groups (collapse/rename/drag-move, delete falls rows back to default)
 - 📡 **Radar watchlist** — pin symbols across boards (CAPS.ticker sources); live price/change with three-state dispatch (visible heartbeat / hidden unread badge / watch-only); row click = jump to scene or one-step lock-create
 - ⏱ **Realtime multi-timeframe** — locked boards default to 15m/1h/4h/1d/1w (∩ source `INTERVALS`), all slots auto-configured; the "+" on the timeframe row adds any supported interval, tabs keep short→long order
