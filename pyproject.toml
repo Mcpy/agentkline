@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentkline"
-version = "0.5.3"
+version = "0.5.4"
 description = "AgentKline — a self-hosted, scriptable, agent-ready K-line trading board (Vela chart engine + MCP)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["requests>=2.0.0"]
+dev = ["requests>=2.0.0", "playwright>=1.40"]
 
 [project.scripts]
 # Web 服务（FastAPI + 前端 + /mcp Streamable HTTP）

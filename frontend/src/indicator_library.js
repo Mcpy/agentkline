@@ -9,6 +9,9 @@
 import { state } from './state.js';
 import { t, lang } from './i18n.js';
 import { log } from './log.js';
+import {
+    favoriteScripts, isFavorite, toggleFavorite, recentScripts, recordUse,
+} from './indicator_prefs.js';
 
 let _catalog = null;          // 缓存目录（进程内不变）
 let _nav = 'all';             // all | added | <group id>
@@ -52,6 +55,7 @@ async function addOne(meta) {
         log('error', d.detail || d.error || t('lib.add_fail', { name: meta.title_zh }));
         return false;
     }
+    recordUse(meta.script);   // v0.5.4：最近使用 = 最近一次成功添加
     return true;
 }
 
@@ -150,8 +154,15 @@ export async function openIndicatorLibrary(onChange) {
 
     function renderNav() {
         const groups = catalog.groups || [];
+        const favSet = new Set(favoriteScripts());
+        const recentSet = new Set(recentScripts());
         const items = [
             { id: 'all', label: t('lib.all'), count: catalog.indicators.length },
+            // v0.5.4：个人偏好入口置顶（空时也保留，便于发现）
+            { id: 'favorites', label: t('lib.favorites'),
+              count: catalog.indicators.filter(m => favSet.has(m.script)).length },
+            { id: 'recent', label: t('lib.recent'),
+              count: catalog.indicators.filter(m => recentSet.has(m.script)).length },
             { id: 'added', label: t('lib.added'),
               count: catalog.indicators.filter(m => instsOf(m.script).length).length },
             ...groups.map(g => ({
@@ -170,27 +181,41 @@ export async function openIndicatorLibrary(onChange) {
         });
     }
 
-    function renderGrid() {
+    function renderGrid(keepScroll = false) {
+        const top = grid.scrollTop;
         // 有搜索词时跨分类检索（分类只作浏览过滤，避免「搜不到」）
         const scope = _query ? 'all' : _nav;
-        const list = catalog.indicators.filter(m => {
+        let list = catalog.indicators.filter(m => {
             if (!matches(m)) return false;
             if (scope === 'all') return true;
             if (scope === 'added') return instsOf(m.script).length > 0;
+            if (scope === 'favorites') return isFavorite(m.script);
+            if (scope === 'recent') return recentScripts().includes(m.script);
             return m.group === scope;
         });
+        // 收藏/最近按「加星/使用」倒序展示；其余保持目录序
+        if (scope === 'favorites' || scope === 'recent') {
+            const order = scope === 'favorites' ? favoriteScripts() : recentScripts();
+            const idx = new Map(order.map((s, i) => [s, i]));
+            list = list.slice().sort((a, b) => idx.get(a.script) - idx.get(b.script));
+        }
         grid.innerHTML = '';
         if (!list.length) {
             const empty = document.createElement('div');
             empty.className = 'ind-lib-empty';
-            empty.textContent = scope === 'custom' ? t('lib.custom_empty') : t('lib.empty');
+            empty.textContent = scope === 'favorites' ? t('lib.fav_empty')
+                : scope === 'recent' ? t('lib.recent_empty')
+                : scope === 'custom' ? t('lib.custom_empty')
+                : t('lib.empty');
             grid.appendChild(empty);
+            if (keepScroll) grid.scrollTop = top;
             return;
         }
         list.forEach(meta => {
             const ids = instsOf(meta.script);
             const card = document.createElement('div');
             card.className = `ind-lib-card${ids.length ? ' on' : ''}`;
+            card.dataset.script = meta.script;
             const main = document.createElement('div');
             main.className = 'ind-lib-card-main';
             const isZh = lang() === 'zh';
@@ -210,6 +235,26 @@ export async function openIndicatorLibrary(onChange) {
                 main.appendChild(en);
             }
             card.appendChild(main);
+            // v0.5.4：收藏星标（独立于「已添加」；点星只切换收藏，不加实例）
+            const fav = isFavorite(meta.script);
+            const star = document.createElement('button');
+            star.className = `ind-lib-fav${fav ? ' on' : ''}`;
+            star.type = 'button';
+            star.textContent = fav ? '★' : '☆';
+            star.title = fav ? t('lib.fav_remove') : t('lib.fav_add');
+            star.setAttribute('aria-pressed', fav ? 'true' : 'false');
+            star.onclick = (e) => {
+                e.stopPropagation();
+                const on = toggleFavorite(meta.script);
+                // 就地更新星标（不整格重绘）：深层滚动位置不跳回顶部
+                star.classList.toggle('on', on);
+                star.textContent = on ? '★' : '☆';
+                star.title = on ? t('lib.fav_remove') : t('lib.fav_add');
+                star.setAttribute('aria-pressed', on ? 'true' : 'false');
+                renderNav();
+                if (_nav === 'favorites') renderGrid(true);   // 取消收藏后卡片应消失
+            };
+            card.appendChild(star);
             if (meta.source === 'custom') {
                 const src = document.createElement('span');
                 src.className = 'ind-lib-src';
@@ -229,21 +274,26 @@ export async function openIndicatorLibrary(onChange) {
                 rm.onclick = async (e) => {
                     e.stopPropagation();
                     await removeAll(meta);
-                    renderNav(); renderGrid();
+                    renderNav(); renderGrid(true);
                     if (_onChange) _onChange();
                 };
                 card.appendChild(rm);
             }
             card.onclick = async () => {
                 if (await addOne(meta)) {
-                    card.classList.add('just-added');
-                    setTimeout(() => card.classList.remove('just-added'), 450);
-                    renderNav(); renderGrid();
+                    renderNav(); renderGrid(true);
+                    // 重绘后在新节点上放 pop 动画（旧卡已丢弃，动画才看得见）
+                    const fresh = grid.querySelector(`.ind-lib-card[data-script="${CSS.escape(meta.script)}"]`);
+                    if (fresh) {
+                        fresh.classList.add('just-added');
+                        setTimeout(() => fresh.classList.remove('just-added'), 450);
+                    }
                     if (_onChange) _onChange();
                 }
             };
             grid.appendChild(card);
         });
+        if (keepScroll) grid.scrollTop = top;
     }
 
     renderNav(); renderGrid();

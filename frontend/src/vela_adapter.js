@@ -11,6 +11,7 @@
 // 注意事项锚点：§10-①..⑭ + 附二（深拷贝/事件缺/双格式读/slice(8)/ctx.id 等）。
 // ============================================================================
 import { state } from './state.js';
+import { getLayerPref, setLayerPref, getLayerInputs, setLayerInputs } from './chart_layers_prefs.js';
 
 const V = window.Vela;
 
@@ -357,13 +358,222 @@ export function legacySeriesCount(instId) { return _emitLines[instId] || 0; }
 // ============================================================================
 let chart = null;
 let _chartReady = false;
+let _vpvrOn = false;        // v0.5.4：按板记住的 VPVR 原生图层显隐
+let _vpvrHandle = null;
+let _vpvrLegendObs = null;  // Vela 原生 legend 行（VRVP）隐藏观察器
+
+// ============================================================================
+// v0.5.4 最新价越界贴边
+// 原生 chrome 在最新价超出可见价格区间时直接跳过标签（drawPriceLineAndCountdown 早退）。
+// 这里包一层 chrome 绘制：仍走原生画布/字号/价格色，只在越界时把标签钉在 pane 顶/底并加箭头。
+// 版本锁定 0.8.4 的内部 chrome 接口；缺失/异常时退回原生行为，不影响图表。
+// ============================================================================
+let _lastPricePinState = null;
+
+function _lastPriceDecimals(scale, heightPx) {
+    if (!(scale.max > scale.min)) return 2;
+    const target = Math.max(2, Math.min(16, Math.round(heightPx / 50)));
+    const raw = (scale.max - scale.min) / Math.max(1, target);
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const norm = raw / mag;
+    const step = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
+    const d = Math.max(0, Math.min(8, -Math.floor(Math.log10(step)) + 1));
+    return d === 0 ? 2 : d;
+}
+
+function _lastPriceText(scale, heightPx, value) {
+    // 与 Vela formatPriceLabel 同规则：宽对数轴按量级定小数，常规轴按刻度密度
+    if (scale.log && Math.log10(scale.max) - Math.log10(scale.min) >= 1.1) {
+        const a = Math.abs(value);
+        const d = a >= 100 ? 0 : a >= 1 ? 2 : a >= 0.01 ? 4 : 6;
+        return value.toFixed(d === 0 ? 2 : d);
+    }
+    return value.toFixed(_lastPriceDecimals(scale, heightPx));
+}
+
+// percent/indexed 轴与原生 formatPct/formatIndex 同式；基线缺失时退回价格
+function _lastPriceAxisText(scene, pricePane, scale, heightPx, value) {
+    const mode = pricePane.kind === 'price' ? scene.scaleMode : pricePane.scaleMode;
+    const baseline = pricePane.percentBaseline;
+    if ((mode === 'percent' || mode === 'indexed')
+        && Number.isFinite(baseline) && baseline !== 0) {
+        if (mode === 'indexed') return (value / baseline * 100).toFixed(2);
+        const pct = (value / baseline - 1) * 100;
+        return `${pct >= 0 ? '+' : '-'}${Math.abs(pct).toFixed(2)}%`;
+    }
+    return _lastPriceText(scale, heightPx, value);
+}
+
+// 与 Vela tagTextColor 同式（hex 输入；主题涨跌色都是深色，白字兜底）
+function _lastPriceTextColor(bg) {
+    const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(bg || '');
+    if (!m) return '#ffffff';
+    let hex = m[1];
+    if (hex.length === 3) hex = hex.split('').map(c => c + c).join('');
+    const lin = (v) => {
+        const c = parseInt(v, 16) / 255;
+        return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    };
+    const L = 0.2126 * lin(hex.slice(0, 2)) + 0.7152 * lin(hex.slice(2, 4))
+        + 0.0722 * lin(hex.slice(4, 6));
+    return L >= 0.4 ? '#000000' : '#ffffff';
+}
+
+function _bindLastPricePin() {
+    if (!chart) return;
+    let renderer = null;
+    try { renderer = chart.orchestrator && chart.orchestrator.renderer; } catch (e) { return; }
+    const chrome = renderer && renderer.chrome;
+    if (!chrome || chrome.__akLastPricePin) return;
+    const orig = chrome.drawPriceLineAndCountdown;
+    if (typeof orig !== 'function') return;
+    chrome.drawPriceLineAndCountdown = function (ctx, scene, coords, theme, dataW, pricePane) {
+        orig.call(this, ctx, scene, coords, theme, dataW, pricePane);
+        try { _drawLastPricePin(ctx, scene, coords, theme, dataW, pricePane, this); } catch (e) {}
+    };
+    chrome.__akLastPricePin = true;
+    try { window.__ak.lastPricePin = () => _lastPricePinState; } catch (e) {}
+    try { renderer.scheduler.invalidate(4); } catch (e) {}
+}
+
+function _drawLastPricePin(ctx, scene, coords, theme, dataW, pricePane, chrome) {
+    _lastPricePinState = null;
+    if (!pricePane || !scene || scene.showPriceLabel === false || scene.candlesHidden) return;
+    const bars = scene.bars || [];
+    const last = bars[bars.length - 1];
+    if (!last || !Number.isFinite(last.close)) return;
+    const s = pricePane.scale, b = pricePane.bounds;
+    if (!s || !b || !(s.max > s.min) || !(b.height > 0) || pricePane.collapsed) return;
+    if (s.log && !(s.min > 0)) return;
+    const above = last.close > s.max;
+    const below = last.close < s.min;
+    if (!above && !below) return;
+    const pinTop = s.invert ? below : above;   // 倒置轴时高价在下
+    let color = '';
+    try { color = chrome.priceElementColor(scene, coords, theme, last); } catch (e) {}
+    if (!color) {
+        color = last.close >= last.open
+            ? (theme && theme.upColor) || '#089981'
+            : (theme && theme.downColor) || '#f23645';
+    }
+    const text = `${above ? '▲' : '▼'} ${_lastPriceAxisText(scene, pricePane, s, b.height, last.close)}`;
+    const axisW = ctx.canvas.width / (coords.devicePixelRatio || 1) - dataW;
+    if (!(axisW > 0)) return;
+    ctx.save();
+    const font0 = ctx.font;
+    const m = /(\d+(?:\.\d+)?)px/.exec(font0);
+    let px = m ? parseFloat(m[1]) : 11;
+    let tw = ctx.measureText(text).width;
+    while (tw + 8 > axisW && px > 8) {
+        px -= 0.5;
+        ctx.font = m ? font0.replace(/(\d+(?:\.\d+)?)px/, `${px}px`) : `${px}px sans-serif`;
+        tw = ctx.measureText(text).width;
+    }
+    const w = Math.min(axisW, tw + 8);
+    const top = pinTop ? b.top + 1 : b.top + b.height - 17;
+    ctx.fillStyle = color;
+    ctx.fillRect(dataW + 1, top, w, 16);
+    ctx.fillStyle = _lastPriceTextColor(color);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, dataW + 1 + w / 2, top + 8);
+    ctx.restore();
+    _lastPricePinState = { text, top, width: w, color, above };
+}
 
 function _destroyChart() {
+    _lastPricePinState = null;
+    _vpvrHandle = null;
+    if (_vpvrLegendObs) { try { _vpvrLegendObs.disconnect(); } catch (e) {} _vpvrLegendObs = null; }
     if (chart) { try { chart.destroy(); } catch (e) {} }
     chart = null;
     _chartReady = false;
     _volMoved = false;
     Object.keys(_emitGroups).forEach(k => delete _emitGroups[k]);
+}
+
+// ---- VPVR 原生图层（v0.5.4）：单实例 overlay，随板记住显隐/输入 ----
+export function isVpvrEnabled() { return _vpvrOn; }
+
+// 原生 legend 行隐藏：内置 vpvr descriptor 没开 legend:false，但设置面板要依赖 legend 行，
+// 所以保留 DOM、只把「VRVP」那一行 display:none；chip 的 ⚙ 仍可 openIndicatorSettings。
+function _hideVpvrLegend() {
+    if (!_vpvrOn || !chart) return;
+    const root = document.getElementById('main-chart');
+    if (!root) return;
+    try {
+        const leaf = [...root.querySelectorAll('span')]
+            .find(e => e.children.length === 0 && e.textContent.trim() === 'VRVP');
+        const row = leaf && leaf.closest('div');
+        if (row && row.style.display !== 'none') row.style.display = 'none';
+    } catch (e) {}
+}
+
+function _watchVpvrLegend() {
+    if (_vpvrLegendObs || !chart || !_vpvrOn) return;
+    const root = document.getElementById('main-chart');
+    if (!root) return;
+    try {
+        _vpvrLegendObs = new MutationObserver(() => _hideVpvrLegend());
+        _vpvrLegendObs.observe(root, {
+            childList: true, subtree: true, attributes: true, attributeFilter: ['style'],
+        });
+    } catch (e) { _vpvrLegendObs = null; }
+    _hideVpvrLegend();
+}
+
+export function openVpvrSettings() {
+    if (!chart) return;
+    const open = () => {
+        if (chart && _vpvrHandle) {
+            try { chart.renderer.openIndicatorSettings(_vpvrHandle.id); } catch (e) {}
+        }
+    };
+    if (!_vpvrHandle) {
+        // 关闭态点 ⚙：先开图层，等 legend 行挂载后再进设置（否则 open 是 no-op）
+        setVpvrEnabled(true);
+        requestAnimationFrame(open);
+        return;
+    }
+    open();
+}
+
+function _saveVpvrInputs() {
+    if (!chart || !_vpvrOn) return;
+    try {
+        const h = (chart.indicators() || []).find(x => x.nativeType === 'vpvr');
+        if (h && h.inputValues) setLayerInputs(state.currentBoard, 'vpvr', h.inputValues());
+    } catch (e) {}
+}
+
+export function setVpvrEnabled(on) {
+    _vpvrOn = !!on;
+    setLayerPref(state.currentBoard, 'vpvr', _vpvrOn);
+    _syncVpvrLayer();
+}
+
+function _syncVpvrLayer() {
+    if (!chart || !_chartReady) return;   // 建图完成后 ready 回调里会再同步
+    try {
+        const existing = (chart.indicators() || []).find(h => h.nativeType === 'vpvr');
+        if (_vpvrOn) {
+            if (!existing) {
+                const h = chart.addNativeIndicator('vpvr');
+                _vpvrHandle = h;
+                const saved = getLayerInputs(state.currentBoard, 'vpvr');
+                if (saved) { try { h.setInputs(saved); } catch (e) {} }
+                requestAnimationFrame(_watchVpvrLegend);
+            } else {
+                _vpvrHandle = existing;
+            }
+        } else if (existing) {
+            try { existing.remove(); } catch (e) {}
+            _vpvrHandle = null;
+            if (_vpvrLegendObs) { try { _vpvrLegendObs.disconnect(); } catch (e) {} _vpvrLegendObs = null; }
+        }
+    } catch (e) {
+        console.warn('[ak] VPVR toggle failed:', e && e.message);
+    }
 }
 // ============================================================================
 // P3 单布局路径：pane 顺序/归属由 Vela 管理；高度走官方 heightWeight 旋钮，
@@ -425,6 +635,7 @@ export function renderChartCore() {
     _emitLines = {};                               // P2：emit 注册表随重建清空
     _styleSig = {};                                // V1：样式签名随重建清空（重建后首帧不算「改样式」）
     _destroyChart();                               // P3：组类型由 syncEmitGroups 按需注册（title 跟随显示名）
+    _vpvrOn = getLayerPref(state.currentBoard, 'vpvr');
     const container = document.getElementById('main-chart');
     if (!container) return;
     container.innerHTML = '';
@@ -438,6 +649,8 @@ export function renderChartCore() {
     // 探针/控制台把手（e2e 与人工排障；不参与业务逻辑）
     try { window.__ak = { chart, drawings: () => (chart.drawings ? chart.drawings.all() : []) }; } catch (e) {}
     try { chart.renderer.set('attribution', false); } catch (e) {}   // 归因甲案（R6-2）
+    _bindLastPricePin();   // v0.5.4：越界贴边标签包在原生 chrome 绘制里
+    chart.on('indicator:inputs', () => _saveVpvrInputs());
     chart.on('viewport:changed', () => _viewportCbs.forEach(cb => cb()));
     chart.on('history:complete', () => { _backfillActive = false; clearTimeout(_backfillActiveT); });
     chart.on('history:progress', () => _markBackfillActive());
@@ -452,6 +665,7 @@ export function renderChartCore() {
             if (vh && vh.setInputs) vh.setInputs({ upColor: VOL_UP, downColor: VOL_DOWN });
         } catch (e) {}
         syncEmitGroups();         // P3：全部指标（叠加+副图）单源 emit 组挂载 + 布局
+        _syncVpvrLayer();
         setTimeout(() => _layoutPanes(), 400);   // 补捉晚于 ready 的 volume 自动挂载
         _showLatest(200);
         syncDrawings();
@@ -459,6 +673,7 @@ export function renderChartCore() {
         bindDrawingWriteback();
         bindDrawPrefs();
         bindToolbarSticky();
+        _bindLastPricePin();
     });
 }
 // P3：emit 组差量同步（叠加=每实例一组 ak-ov::<instId>／副图=每组一 pane ak-sub::<name>）+ relayout

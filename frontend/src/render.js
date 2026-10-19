@@ -18,6 +18,7 @@ import {
     onViewport, getVisibleTimeRange, onCrosshair, syncSubplotsCore, snapshotAll,
     tfMs, extendHistory, remountIndicator,
     refreshEmittedGroups, syncToolbarSticky,
+    isVpvrEnabled, setVpvrEnabled, openVpvrSettings,
 } from './vela_adapter.js';
 
 // ============ 活体注册表（resize 用；Vela 单图） ============
@@ -155,6 +156,7 @@ function _renderInner() {
         emptyState.style.display = 'none';
         container.innerHTML = '';
         _setOhlcVisible(false);   // 无画板（删光/首次进入）= 引导页：OHLC 条带不该留在画布上方
+        syncLayerChip();          // 无板时收起 VPVR 开关
         renderIndicatorBar(); updateDataInfo();
         return;
     }
@@ -163,6 +165,7 @@ function _renderInner() {
         emptyState.style.display = 'block';
         container.innerHTML = '';
         _setOhlcVisible(false);   // 有板无数据（未加载/空窗）：同样不留旧读数
+        syncLayerChip();
         renderIndicatorBar(); updateDataInfo();
         return;
     }
@@ -172,6 +175,7 @@ function _renderInner() {
     state.timeIndex = new Map(state.ohlcv.map((bar, i) => [Math.floor(bar.timestamp / 1000), i]));
     renderChartCore();                 // Vela 建图（adapter）
     renderSubplots();                  // 副图实例 diff + 动态总高（adapter；无 subplot DOM）
+    syncLayerChip();                   // VPVR 开关位置/状态跟随建图/切板
     renderIndicatorBar();
     updateDataInfo();
     reportView();
@@ -254,6 +258,54 @@ function _setOhlcVisible(on) {
     const el = document.getElementById('ohlc-legend');
     if (el) el.style.display = on ? '' : 'none';
     syncToolbarSticky();   // 条带显隐会改 #main-chart 的 offsetTop（吸附基准）
+    syncLayerChip();       // VPVR 贴图表左上/右上，OHLC 条带显隐会改它的 top
+}
+
+// ---- v0.5.4 VPVR 图层开关（图表右上方空白区；原生 legend 在左上，不抢位） ----
+function _ensureLayerChip() {
+    const host = _ensureOhlcEl() || document.querySelector('.chart-container');
+    if (!host) return null;
+    let chip = document.getElementById('chart-layer-vpvr');
+    if (!chip || !chip.isConnected || chip.parentElement !== host) {
+        if (chip) chip.remove();
+        chip = document.createElement('button');
+        chip.id = 'chart-layer-vpvr';
+        chip.type = 'button';
+        chip.className = 'chart-layer-chip';
+        chip.innerHTML = '<span class="layer-dot"></span><span>VPVR</span>'
+            + `<span class="layer-gear" title="${t('chart.vpvr_settings')}">⚙</span>`;
+        chip.onclick = () => {
+            const on = !isVpvrEnabled();
+            setVpvrEnabled(on);
+            syncLayerChip();
+            log('info', t(on ? 'chart.vpvr_on' : 'chart.vpvr_off'));
+        };
+        chip.oncontextmenu = (e) => {
+            e.preventDefault();
+            openVpvrSettings();   // 关闭态点齿轮/右键 = 先开启再进设置
+            syncLayerChip();
+        };
+        chip.querySelector('.layer-gear').onclick = (e) => {
+            e.stopPropagation();
+            openVpvrSettings();
+            syncLayerChip();
+        };
+        host.appendChild(chip);
+    }
+    return chip;
+}
+
+function syncLayerChip() {
+    const chip = _ensureLayerChip();
+    if (!chip) return;
+    const hasChart = !!(state.currentBoard && state.ohlcv && state.ohlcv.length);
+    chip.style.display = hasChart ? 'flex' : 'none';
+    const ohlc = document.getElementById('ohlc-legend');
+    if (!hasChart && ohlc) ohlc.style.display = 'none';   // 空态别留一条新建的空条带
+    const on = isVpvrEnabled();
+    chip.classList.toggle('on', on);
+    chip.title = t(on ? 'chart.vpvr_hide' : 'chart.vpvr_show');
+    chip.setAttribute('aria-pressed', on ? 'true' : 'false');
 }
 function _ensureOhlcEl() {
     // 画布外条带（Vela 无 legend 位置配置，原生 legend 恒占画布内第一行）→ 本行置于图表上方=视觉第一行
@@ -286,6 +338,7 @@ function _renderOhlcFromBar(bar, prev) {
         : (bar.open ? (bar.close - bar.open) / bar.open * 100 : 0);
     const cls = pct >= 0 ? 'up' : 'down';
     const stamp = formatTimeCN(Math.floor((bar.timestamp || 0) / 1000), isIntraday(state.currentTimeframe));
+    const chip = document.getElementById('chart-layer-vpvr');
     el.innerHTML =
         `<span class="ohlc-time">${stamp}</span>`
         + `<span>O <b>${_fmtOhlc(bar.open)}</b></span>`
@@ -293,6 +346,7 @@ function _renderOhlcFromBar(bar, prev) {
         + `<span>L <b>${_fmtOhlc(bar.low)}</b></span>`
         + `<span>C <b class="${cls}">${_fmtOhlc(bar.close)}</b></span>`
         + `<span class="${cls}">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</span>`;
+    if (chip) el.appendChild(chip);   // innerHTML 会清掉 chip，原位放回（不重建绑定）
 }
 function _renderOhlcLatest() {
     const { bar, prev } = _ohlcBarByTime(null);
@@ -376,5 +430,5 @@ export function bindOverlays() {
     });
 }
 
-// 最新价标签退役（Vela 原生 currentPriceLine 轴标签承担）；心跳 no-op 保 ws.js 零改
+// 最新价标签：原生 currentPriceLine 轴标签；越界贴边由 vela_adapter 补画（v0.5.4）；心跳 no-op 保 ws.js 零改
 export function applyQuoteTick(_q) { /* 退役：原生轴标签 */ }

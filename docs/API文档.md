@@ -1,6 +1,6 @@
 # AgentKline API 文档
 
-> 版本：v0.4.0 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server
+> 版本：v0.5.4 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server（API 自 v0.4.0 起保持兼容）
 > 破坏性硬切版本：无兼容层。旧路径（/api/ohlcv、/api/load-csv、/history、datasource 端点、indicator/update 杂交路径）一律 404/405。
 > 机器可读附录：`python scripts/gen_api_ref.py` 可从运行中服务生成 REST 路由表 + MCP 工具表（防漂移）。
 
@@ -235,6 +235,8 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
   设置弹窗按 catalog schema 渲染 int/float/bool/enum/source 控件。
 - **自定义分类**：`scripts/indicator/*.py`（source=custom）自动并入目录，固定归 `group=custom`，不参与内置 7 类策展；
   卡片带「自定义」徽标；与内置同 id 的 shadow 脚本复用内置卡片并标 `shadowed`。没有自定义脚本时该分类显示 0 + 写入提示。
+- **VPVR（v0.5.4）**：前端 Vela 原生 layer，**不在** `/api/indicator-catalog`、`get_indicators` 或 MCP 结果中；
+  开关/参数存浏览器 `localStorage['ak.chart.layers.v1']`。agent 需要成交量分布时用 `get_kline` 的 OHLCV 自行计算。
 - **脚本命名**：连字符类型转下划线，如 `bollinger-bands → indicator/bollinger_bands`、
   `parabolic-sar → indicator/parabolic_sar`、`on-balance-volume → indicator/on_balance_volume`；
   旧 `indicator/bb|sar|obv` 已删除（v0.5.2 起不保留兼容别名）。

@@ -322,13 +322,6 @@ div.vela-attribution a { color: var(--text-dim); text-decoration: underline; }
 .set-grid { display: grid; grid-template-columns: 1fr; gap: 6px; }  /* 单列，超出靠面板滚动 */
 .set-grid .set-key { min-width: 48px; }
 
-/* 最新价标签（越界吸附顶/底） */
-.last-price-label {
-    position: absolute; right: 0; width: 80px; text-align: center;
-    font-size: 11px; color: #fff; padding: 2px 0; border-radius: 2px;
-    z-index: 4; transform: translateY(-50%); pointer-events: none;
-}
-
 /* 划线控制点覆盖层 */
 .draw-handles { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
 .draw-handle {
@@ -655,7 +648,7 @@ div.vela-attribution a { color: var(--text-dim); text-decoration: underline; }
 
 /* OHLC 读数行（Phase A-2 自渲染；原生只画指标图例） */
 #ohlc-legend {
-    display: flex; gap: 12px; padding: 4px 0 3px; flex: 0 0 auto;
+    display: flex; align-items: center; gap: 12px; padding: 6px 0; margin-top: 4px; flex: 0 0 auto;
     /* 与画布内指标图例同起点：工具栏 gutter + Vela LEGEND_LEFT_PX(10) */
     padding-left: calc(var(--vela-toolbar-gutter, 44px) + 10px);
     font-size: 12px; color: var(--text-dim, #b2b5be); pointer-events: none;
@@ -665,6 +658,32 @@ div.vela-attribution a { color: var(--text-dim); text-decoration: underline; }
 #ohlc-legend .ohlc-time { color: var(--text-faint, #787b86); }
 #ohlc-legend .up { color: #26a69a; }
 #ohlc-legend .down { color: #ef5350; }
+
+/* v0.5.4 VPVR 图层开关（图表右上方空白区；top 由 render.js 按 OHLC 条带高度夹紧） */
+.chart-layer-chip {
+    position: static; margin-left: auto; margin-right: 8px; flex: 0 0 auto;
+    display: flex; align-items: center; justify-content: center; gap: 5px;
+    width: 80px; height: 22px; padding: 0 8px; box-sizing: border-box;
+    border: 1px solid var(--border-strong); border-radius: 11px;
+    background: rgba(30, 34, 45, .86); color: var(--text-dim);
+    font: inherit; font-size: 11px; letter-spacing: .2px;
+    cursor: pointer; user-select: none; backdrop-filter: blur(4px);
+    pointer-events: auto;
+    transition: color .12s, border-color .12s, background .12s;
+}
+.chart-layer-chip .layer-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--text-faint); transition: background .12s;
+}
+.chart-layer-chip:hover { color: var(--text); border-color: var(--accent); }
+.chart-layer-chip.on {
+    color: #fff; border-color: var(--accent);
+    background: rgba(41, 98, 255, .22);
+}
+.chart-layer-chip.on .layer-dot { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.chart-layer-chip .layer-gear { font-size: 11px; opacity: .42; padding: 0 1px; }
+.chart-layer-chip.on .layer-gear { opacity: .65; }
+.chart-layer-chip .layer-gear:hover { opacity: 1; }
 
 /* ============ v0.5.3 指标库面板（搜索 + 分类 + 多列） ============ */
 .ind-lib-modal {
@@ -742,6 +761,15 @@ div.vela-attribution a { color: var(--text-dim); text-decoration: underline; }
 }
 .ind-lib-card:hover .ind-lib-rm, .ind-lib-rm:focus { opacity: 1; }
 .ind-lib-rm:hover { background: rgba(239, 83, 80, .18); color: var(--down); }
+/* v0.5.4 收藏星标：未收藏半透明，已收藏常亮 accent */
+.ind-lib-fav {
+    flex: none; width: 20px; height: 20px; padding: 0; border: none; border-radius: 50%;
+    background: transparent; color: var(--text-dim); cursor: pointer;
+    font-size: 14px; line-height: 20px; text-align: center; opacity: .75;
+}
+.ind-lib-card:hover .ind-lib-fav, .ind-lib-fav:focus { opacity: 1; }
+.ind-lib-fav:hover { background: var(--bg-hover); }
+.ind-lib-fav.on { color: var(--accent); opacity: 1; }
 .ind-lib-empty { grid-column: 1 / -1; padding: 40px 0; text-align: center; color: var(--text-faint); font-size: 12px; }
 .ind-lib-foot {
     flex: none; padding: 8px 16px; border-top: 1px solid var(--border);
