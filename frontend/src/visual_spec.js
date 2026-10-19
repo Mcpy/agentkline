@@ -1,38 +1,31 @@
 // ============================================================================
-// 中间层视觉权威（P2 视觉层收归 + V1 原生保真调色）
+// 中间层视觉权威（P2 视觉层收归 + V1 原生保真调色 + v0.5.3 全量指标）
 // ----------------------------------------------------------------------------
 // 原则：指标脚本只出「纯计算值 + 语义线名」，一切视觉（kind/颜色/线宽/填充带/圆点）
 // 由本表定义。未列入的脚本（custom 自定义）回退到其自带 lines[].style/type。
 //
-// 用户裁决（2026-10-18）：搬运原生指标时，**初始颜色配置 = Vela 原生默认**；
-// 用户仍可在指标设置面板改（实例 override 优先级最高）。
-// 原生默认逐条核对自 tools/vela-regression/package/dist/vela.global.js：
-//   bb    bollingerBands  basis=WARNING，上下轨=INFO，fill=transp(INFO,92)
-//   sar   parabolicSar    kind=cross，涨=BULLISH/跌=BEARISH，逐点按 value<close 判涨跌
-//   macd  macd            MACD线=INFO，信号线=WARNING，柱=columns + momentumColumnColors 四态
-//   rsi   rsi             width=2，NEUTRAL 中值向 BULLISH/BEARISH 渐变（rampColors）
-//   obv   obv             INFO
-//   sma/ema fixedAverage  原生每实例都是 INFO（无多实例调色板）；本产品需多线可区分，
-//                         故保留调色板，但色值改用 Vela 自家语义色（首线=INFO≡原生）
-//   kdj   无原生对应      按原生 stochastic 对齐：%K=INFO、%D=WARNING；J 取 Vela JAW 紫
-// 线宽：原生 plot 未显式给 width 时按 1 渲染（vela.global.js:43981 `width: plot.width ?? 1`）。
+// 结构：
+//   GENERATED_SPEC（indicator_visuals.js，tools/gen_indicator_visuals.mjs 生成）
+//     = 74 个 Vela 经典研究的原生默认：线色/线宽/kind/填充带/水平线/区带/
+//       以及从原生逐点色反推出的 colorRule（sign/slope/close/mid/momentum/absSlope）。
+//   MANUAL（本文件）= 需要手写策略的特例（rsi 渐变、macd 动能四态、sar 圆点、kdj 扩展）。
+//   合并规则：MANUAL 覆盖 GENERATED 的同名字段；lines 按线名逐条覆盖。
 //
 // 字段：
-//   lines[线名] = { kind, color, width, lineStyle, autoColor, inks, pointColor }
+//   lines[线名] = { kind, color, width, lineStyle, autoColor, inks, pointColor, colorRule }
 //     kind: 'line'|'area'|'histogram'|'columns'|'circles'|'cross'|'step'（缺省 line）
 //     inks: {槽名: 色}  多色语义槽（sar 涨跌 / macd 柱四态 / rsi 渐变三段）
 //     pointColor(v, ctx) → 色|null   逐点色策略；ctx={i,prev,close,params,ink,autoColor}
-//     autoColor: 柱状自动涨跌色开关（缺省 true）
+//     colorRule: 生成规则名（_colorRuleInk 解释），pointColor 缺席时生效
 //   fills = [{ key, from:线名, to:线名, color, follow:线名, transparency }]
-//     follow+transparency = 跟随某线色派生透明填充（用户改轨色，带色跟着走）
-//   axis = { top, bottom }                       副图值域（靠隐藏 anchor series 撑出，原生同法）
+//   axis = { top, bottom }                       副图值域（隐藏 anchor series 撑出）
 //   thresholds = { 名: 默认值 | (params)=>值 }    语义阈值（rsi 超买/超卖/中值）
 //   levels = [{ key, at, color, lineStyle, title }]  水平线 → NativeIndicatorOutput.priceLines
-//   zones  = [{ key, from, to, color }]              区带填充（from/to=阈值名或数值）→ 隐藏 anchor + fill
+//   zones  = [{ key, from, to, color }]              区带填充（from/to=阈值名或数值）
 //
 // 优先级（_lineSpec / effectiveStyle 内）：实例 override(lines_style) > 本规格 > 脚本 style > 默认。
-// schema 依据：Vela NativeIndicatorOutput（series + fills），SeriesPoint.color 支持逐点色。
 // ============================================================================
+import { GENERATED_SPEC } from './indicator_visuals.js';
 
 // Vela 原生语义色（vela.global.js src/core/palette.ts 常量，逐字核对）
 export const NATIVE_INK = {
@@ -81,52 +74,12 @@ function rampInk(v, low, mid, high, ink) {
     return v <= mid ? gradient(v, low, mid, ink.low, ink.mid) : gradient(v, mid, high, ink.mid, ink.high);
 }
 
-// 多线（sma/ema）调色板：Vela 自家语义色，首色 = 原生单实例默认 INFO
-const MA_PALETTE = [N.INFO, N.WARNING, N.BULLISH, N.BEARISH, N.JAW, N.ACCENT];
-
-export const VISUAL_SPEC = {
-    // 布林带：上/中/下三线 + 上下轨填充带（主图叠加）——原生 basis 橙、上下轨蓝、填充蓝 8%
-    'indicator/bb': {
-        lines: {
-            BB_UPPER: { kind: 'line', color: N.INFO, width: 1 },
-            BB_MID:   { kind: 'line', color: N.WARNING, width: 1 },
-            BB_LOWER: { kind: 'line', color: N.INFO, width: 1 },
-        },
-        fills: [{
-            key: 'fillColor', from: 'BB_UPPER', to: 'BB_LOWER',
-            follow: 'BB_UPPER', transparency: 92, color: transp(N.INFO, 92),
-        }],
-    },
-    // 抛物转向：圆点画在蜡烛上下（主图叠加）——原生逐点涨绿/跌红（value<close 为涨）
-    // 形态偏差（已记录）：原生 kind='cross'（小十字），本产品沿用 P2 验证过的 circles 圆点。
-    'indicator/sar': {
-        lines: {
-            SAR: {
-                kind: 'circles', width: 2, color: N.BULLISH,
-                inks: { bull: N.BULLISH, bear: N.BEARISH },
-                pointColor: (v, ctx) => (ctx.close == null ? null : (v < ctx.close ? ctx.ink.bull : ctx.ink.bear)),
-            },
-        },
-    },
-    // MACD：DIF/DEA 线 + 动能四态柱（副图）——原生 MACD线=INFO、信号线=WARNING、柱=columns、零轴虚线
-    'indicator/macd': {
-        lines: {
-            DIF:  { kind: 'line', color: N.INFO, width: 1 },
-            DEA:  { kind: 'line', color: N.WARNING, width: 1 },
-            MACD: {
-                kind: 'columns', color: N.BULLISH, autoColor: true,
-                inks: {
-                    growAbove: N.BULLISH, fallAbove: transp(N.BULLISH, 50),
-                    growBelow: transp(N.BEARISH, 50), fallBelow: N.BEARISH,
-                },
-                pointColor: (v, ctx) => (ctx.autoColor ? momentumInk(v, ctx.prev, ctx.ink) : null),
-            },
-        },
-        levels: [{ key: 'zero', at: 0, color: N.NEUTRAL, lineStyle: 'dashed', title: 'Zero Line' }],
-    },
+// ---------------------------------------------------------------------------
+// 手写特例（覆盖生成基线）
+// ---------------------------------------------------------------------------
+const MANUAL = {
     // RSI：单线（副图）——原生宽 2，中值 NEUTRAL 向超卖 BULLISH / 超买 BEARISH 渐变；
-    //   并补齐原生 boundedOscillator 的全套视觉：70/50/30 三条水平线 + 超买/超卖区带 + 中带填充，
-    //   值域 0..100 由隐藏 anchor series 撑出（display 只关 pane/legend/dataWindow，保留 priceScale）。
+    //   70/50/30 水平线 + 超买/超卖区带 + 中带，值域 0..100（原生 boundedOscillator 同构）。
     'indicator/rsi': {
         lines: {
             RSI: {
@@ -157,9 +110,82 @@ export const VISUAL_SPEC = {
             { key: 'band', from: 'overbought', to: 'oversold', color: transp(N.NEUTRAL, 90) },
         ],
     },
-    // OBV：单线（副图）——原生 INFO
-    'indicator/obv': { lines: { OBV: { kind: 'line', color: N.INFO, width: 1 } } },
-    // KDJ：K/D/J 三线（副图）——对齐原生 stochastic（%K=INFO、%D=WARNING），J 取 JAW 紫
+    // MACD：DIF/DEA 线 + 动能四态柱（副图）——MACD线=INFO、信号线=WARNING、柱=columns、零轴虚线
+    'indicator/macd': {
+        lines: {
+            Histogram: {
+                kind: 'columns', color: N.BULLISH, autoColor: true,
+                inks: {
+                    growAbove: N.BULLISH, fallAbove: transp(N.BULLISH, 50),
+                    growBelow: transp(N.BEARISH, 50), fallBelow: N.BEARISH,
+                },
+                pointColor: (v, ctx) => (ctx.autoColor ? momentumInk(v, ctx.prev, ctx.ink) : null),
+            },
+            MACD: { kind: 'line', color: N.INFO, width: 1 },
+            Signal: { kind: 'line', color: N.WARNING, width: 1 },
+        },
+        levels: [{ key: 'zero', at: 0, color: N.NEUTRAL, lineStyle: 'dashed', title: 'Zero Line' }],
+    },
+    // 抛物线转向：圆点画在蜡烛上下——原生逐点 close>=SAR 为涨绿、否则跌红
+    'indicator/parabolic_sar': {
+        lines: {
+            SAR: {
+                kind: 'circles', width: 2, color: N.BULLISH,
+                inks: { bull: N.BULLISH, bear: N.BEARISH },
+                pointColor: (v, ctx) => (ctx.close == null ? null : (ctx.close >= v ? ctx.ink.bull : ctx.ink.bear)),
+            },
+        },
+    },
+    // 线性回归：原生按拟合斜率给曲线红/绿（Curve 的逐 bar 差分∝斜率）；Slope 模式同色
+    'indicator/linear_regression': {
+        lines: {
+            Curve: {
+                kind: 'line', color: N.NEUTRAL, width: 2,
+                inks: { up: N.BULLISH, down: N.BEARISH },
+                pointColor: (v, ctx) => (ctx.prev == null ? null
+                    : v > ctx.prev ? ctx.ink.up : v < ctx.prev ? ctx.ink.down : null),
+            },
+            Slope: {
+                kind: 'line', color: N.NEUTRAL, width: 2,
+                inks: { up: N.BULLISH, down: N.BEARISH },
+                pointColor: (v, ctx) => (ctx.prev == null ? null
+                    : v > ctx.prev ? ctx.ink.up : v < ctx.prev ? ctx.ink.down : null),
+            },
+        },
+        levels: [{ key: 'zero', at: 0, color: N.NEUTRAL, lineStyle: 'dashed', title: 'Zero Line' }],
+    },
+    // PPO：柱=动能四态（原生 momentumColumnColors），PPO 线按零轴红绿（生成规则已覆盖）
+    'indicator/ppo': {
+        lines: {
+            Histogram: {
+                kind: 'columns', color: N.BULLISH, autoColor: true,
+                inks: {
+                    growAbove: N.BULLISH, fallAbove: transp(N.BULLISH, 70),
+                    growBelow: transp(N.BEARISH, 70), fallBelow: N.BEARISH,
+                },
+                pointColor: (v, ctx) => (ctx.autoColor ? momentumInk(v, ctx.prev, ctx.ink) : null),
+            },
+        },
+    },
+    // TTM 挤压：Momentum 柱=动能四态；Squeeze State 有挤压=橙、无=灰
+    'indicator/ttm_squeeze': {
+        lines: {
+            Momentum: {
+                kind: 'columns', color: N.BULLISH, autoColor: true,
+                inks: {
+                    growAbove: transp(N.BULLISH, 60), fallAbove: transp(N.BULLISH, 60),
+                    growBelow: transp(N.BEARISH, 60), fallBelow: transp(N.BEARISH, 60),
+                },
+                pointColor: (v, ctx) => (ctx.autoColor ? momentumInk(v, ctx.prev, ctx.ink) : null),
+            },
+            'Squeeze State': {
+                kind: 'circles', color: N.NEUTRAL, width: 2,
+                inks: { on: N.WARNING, off: N.NEUTRAL },
+                pointColor: (v, ctx) => (v > 0 ? ctx.ink.on : ctx.ink.off),
+            },
+        },
+    },
+    // KDJ（产品扩展，无 Vela 原生）：对齐原生 stochastic（%K=INFO、%D=WARNING），J 取 JAW 紫
     'indicator/kdj': {
         lines: {
             K: { kind: 'line', color: N.INFO, width: 1 },
@@ -167,23 +193,26 @@ export const VISUAL_SPEC = {
             J: { kind: 'line', color: N.JAW, width: 1 },
         },
     },
-    // MA 均线组 / EMA：多线（主图叠加），按 Vela 语义色调色板循环（线名动态 MA5/MA10/…）
-    'indicator/sma': { multi: true, kind: 'line', palette: MA_PALETTE, width: 1 },
-    'indicator/ema': { multi: true, kind: 'line', palette: MA_PALETTE, width: 1 },
 };
 
-// 单线视觉规格查找（按线名）；multi 型（sma/ema）走 paletteByIndex
+function mergeSpec(base, over) {
+    if (!over) return base || {};
+    const out = { ...base, ...over };
+    if (base && base.lines) out.lines = { ...base.lines, ...(over.lines || {}) };
+    if (over.fills === undefined && base && base.fills) out.fills = base.fills;
+    return out;
+}
+
+export const VISUAL_SPEC = {};
+for (const key of new Set([...Object.keys(GENERATED_SPEC), ...Object.keys(MANUAL)])) {
+    VISUAL_SPEC[key] = mergeSpec(GENERATED_SPEC[key], MANUAL[key]);
+}
+
+// 单线视觉规格查找（按线名）
 export function visualSpec(script) { return VISUAL_SPEC[script] || null; }
 export function lineVisual(script, lineName) {
     const s = VISUAL_SPEC[script];
     return (s && s.lines && s.lines[lineName]) || null;
-}
-// 多线型（sma/ema）：按线索引取调色板色 + 统一 kind/width
-export function multiVisual(script, idx) {
-    const s = VISUAL_SPEC[script];
-    if (!s || !s.multi) return null;
-    const pal = s.palette || MA_PALETTE;
-    return { kind: s.kind || 'line', color: pal[idx % pal.length], width: s.width || 1 };
 }
 export function specFills(script) {
     const s = VISUAL_SPEC[script];
@@ -198,9 +227,8 @@ export function isMultiSpec(script) {
 // 优先级：实例 override(lines_style) > 视觉规格 > 脚本 style > 默认
 export function effectiveStyle(script, lineName, scriptStyle, override, idx, scriptType) {
     const spec = VISUAL_SPEC[script];
-    const lv = (spec && spec.lines && spec.lines[lineName])
-        || (spec && spec.multi ? multiVisual(script, idx || 0) : null)
-        || {};
+    const lv = (spec && spec.lines
+        && (spec.lines[lineName] || spec.lines[Object.keys(spec.lines)[0]])) || {};
     const sc = scriptStyle || {}, ov = override || {};
     // kind：中间层规格 > 脚本 line.type（blob/自定义的 histogram 等）> line.style.type > line
     const kind = lv.kind || scriptType || sc.type || 'line';

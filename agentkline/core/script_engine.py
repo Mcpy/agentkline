@@ -270,6 +270,10 @@ class ScriptEngine:
                     out["lines"] = result["lines"]
                 if "markers" in result:
                     out["markers"] = result["markers"]
+                if "levels" in result:
+                    out["levels"] = result["levels"]
+                if "polylines" in result:
+                    out["polylines"] = result["polylines"]
             else:
                 out = {"values": [result]}
             out["meta"] = meta

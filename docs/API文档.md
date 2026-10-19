@@ -56,7 +56,7 @@ CSV 入图 = 内置 `datasource/csv` 脚本（path 归操作参数，IDENTITY=[]
 | PUT | `/api/indicator/{inst_id}` | 统一更新：params=重声明配方重算；style/lines_style=不重算；display_name 覆盖／auto_label 恢复 |
 | POST | `/api/indicator/refresh/{inst_id}` | recipe 手动重算 |
 | DELETE | `/api/indicator/{inst_id}` | 登记处+各周期物化一次删净 |
-| GET | `/api/indicators` | 值区间切片；`instances=` 逗号分隔按 inst_id 过滤；默认当前 view 窗口 |
+| GET | `/api/indicators` | 值区间切片；`instances=` 逗号分隔按 inst_id 过滤；默认当前 view 窗口。每条含 `lines`/`markers`/`levels`/`polylines`（v0.5.3：参数阈值线与 zigzag 腿透传；`levels/polylines` 暂不随区间切片） |
 
 实例两血统：recipe（锚配方，随 K 线重算，scope=board|timeframe）／blob（冻结值，钉死单周期；backfill 前插自动头部补 None 保对齐）。
 
@@ -80,6 +80,7 @@ CSV 入图 = 内置 `datasource/csv` 脚本（path 归操作参数，IDENTITY=[]
 |---|---|---|---|
 | GET | `/api/scripts` | exec | 双根脚本表 `[{id,kind,source,display,desc,params,caps,identity}]` |
 | GET | `/api/scripts/meta` | read | 脚本元数据精简面 `[{id,kind,source,display,desc,params}]`：web 端口可读（设置面板补 PARAMS 默认值），无 MCP 面 |
+| GET | `/api/indicator-catalog` | read | 指标目录（内置 75 项 = 74 Vela 经典 + KDJ，并合并自定义脚本）：`{vela, groups[], indicators[], custom_count}`；每项含 type/script/title/short/title_zh/group/overlay/inputs（参数 schema，颜色已剔除）与 source（builtin/custom）。自定义脚本归 group=custom，与内置同 id 时标 shadowed=true，不重复出卡。指标库面板与设置面板共用，无 MCP 面 |
 | POST | `/api/scripts` | exec | `save_script`：`{id,code}` 只写 custom，保存即校验（CAPS_MISMATCH/SAVE_SYNTAX/SAVE_NO_MAIN/SAVE_EMPTY） |
 | POST | `/api/run-script` | exec | 窄身 `{script,params}`：只执行返回，图上不留痕 |
 | GET | `/api/search` | read | 标的搜索 `?q=&refresh=`：rows=`[{symbol,source,display,has_board}]`；索引=CAPS.symbols 源首用全量+TTL 日级；搜索不穿透交易所 |
@@ -219,12 +220,24 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
   调用方自行判断可用性；MCP 返回的 TextContent 同样透传两字段。
 
 
-## 16. 内置指标集与开关（v0.4.3）
+## 16. 内置指标库（v0.5.3 全量移植）
 
-- 内置 8 枚：`indicator/sma`(MA 三线)/`ema`(三线)/`bb`/`sar`（主图族）+ `macd`/`kdj`/`rsi`/`obv`（副图族）；
-- 前端指标栏"＋指标"菜单 = 传统面板式开关：点未加项=add_indicator（默认参数 recipe），
-  点 ✓ 项=删该 script 全部实例；MCP 面无新工具（add/delete/list 现成）；
-- MA/EMA 三线制：一个实例一组线（periods=[5,10,20] 可改参）。
+- **75 项** = Vela 0.8.4 的 74 个经典研究 + KDJ 产品扩展；`GET /api/indicator-catalog` 是唯一目录真源
+  （`agentkline/resources/indicator_spec.json`，由 `tools/gen_indicator_spec.mjs` 从 vendored bundle 生成）。
+- **单源纪律不变**：值全部由 Python 计算（`agentkline/indicators/`），脚本只做字面元数据 + `registry.run`；
+  颜色/线型/填充带/水平线/区带/逐点色由 `visual_spec.js`（+ 生成的 `indicator_visuals.js`）决定。
+- **类型族**：均线 8 / 通道带状 10 / 震荡 26 / 趋势 3 / 波动率 7 / 成交量 15 / 覆盖 6；`overlay=true` 叠主图，
+  false 自动建副图（命名=script stem）。
+- **多实例**：每个研究可重复添加（SMA 想三条就加三次）；`inst_id` 自动 `sma`/`sma_2`。
+- **特殊输出**：zigzag 走 `polylines`，williams-fractal 走 `markers`，参数相关阈值走 `levels`；
+  init/切换/广播/get_indicators 均透传（v0.5.3 缓存契约扩展）。
+- **前端指标库**：`＋指标` 打开面板（搜索 + 7 分类 + 多列网格）；点卡片加一个实例，`×` 移除该研究全部实例；
+  设置弹窗按 catalog schema 渲染 int/float/bool/enum/source 控件。
+- **自定义分类**：`scripts/indicator/*.py`（source=custom）自动并入目录，固定归 `group=custom`，不参与内置 7 类策展；
+  卡片带「自定义」徽标；与内置同 id 的 shadow 脚本复用内置卡片并标 `shadowed`。没有自定义脚本时该分类显示 0 + 写入提示。
+- **脚本命名**：连字符类型转下划线，如 `bollinger-bands → indicator/bollinger_bands`、
+  `parabolic-sar → indicator/parabolic_sar`、`on-balance-volume → indicator/on_balance_volume`；
+  旧 `indicator/bb|sar|obv` 已删除（v0.5.2 起不保留兼容别名）。
 
 ## 内置数据源（v0.4.4）
 | `datasource/binance` | Binance 直连（requests 非 ccxt 库）：现货+永续全量、K线全周期、批量实时；含股票代币（现货 B 后缀 78 + TradFi 永续 205，display 带官方分类标注） |

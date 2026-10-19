@@ -15,6 +15,7 @@ export const state = {
         visibility: {},  // indicator name -> bool (default true)
         drawings: {},  // id -> SerializedDrawing（划线，属板不属周期）
         timeIndex: null,  // Map(timeSec -> ohlcv index)
+        indicatorCatalog: null,  // v0.5.3：/api/indicator-catalog 缓存（指标库/设置面板共用）
     };
 
 // v0.4.1: 状态重置原语（自 ws.js 下沉到叶子模块，断 ws↔ui 环）

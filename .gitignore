@@ -67,3 +67,6 @@ web_dist/          # 前端构建输出（临时调试用）
 config.yaml
 !config.example.yaml
 docs/ARCH_DISCUSSION_*.md
+
+# v0.5.3 指标 golden（开发期生成，2MB+；用 tools/indicator_port/gen_golden.mjs 重出）
+tools/indicator_port/golden.json

@@ -28,7 +28,7 @@ def _to_ms(v):
 class AgentKlineService:
     """AgentKline 业务核心"""
 
-    VERSION = "0.5.2"
+    VERSION = "0.5.3"
 
     def __init__(self, scripts_dir: str, limits: dict = None):
         limits = limits or {}
@@ -529,7 +529,8 @@ class AgentKlineService:
         times = [b["timestamp"] for b in feed]
         self.state.set_cache(board_id, tf, inst["inst_id"],
                              result.get("values"), result.get("lines"), result.get("markers"),
-                             times=times)
+                             times=times, levels=result.get("levels"),
+                             polylines=result.get("polylines"))
         if not inst.get("custom_label"):
             inst["auto_label"] = self._auto_label(inst, result.get("meta"))
 
@@ -569,6 +570,7 @@ class AgentKlineService:
                           "scope": it["scope"], "script": it["script"],
                           "values": c.get("values"), "lines": c.get("lines"),
                           "markers": c.get("markers"), "times": c.get("times"),
+                          "levels": c.get("levels"), "polylines": c.get("polylines"),
                           "visible": it.get("visible", True)})
 
     def delete_indicator(self, board_id, timeframe, inst_id):
@@ -825,6 +827,10 @@ class AgentKlineService:
                                   for ln in c["lines"]]
             if c.get("markers"):
                 entry["markers"] = c["markers"]
+            if c.get("levels"):
+                entry["levels"] = c["levels"]
+            if c.get("polylines"):
+                entry["polylines"] = c["polylines"]
             out[inst["inst_id"]] = entry
         return {"board_id": board_id, "timeframe": timeframe,
                 "range": {"from": t0, "to": t1},

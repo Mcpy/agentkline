@@ -24,7 +24,7 @@ const LS = (n) => (n === 1 ? 'dotted' : n === 2 ? 'dashed' : 'solid');   // LWC 
 const clone = (o) => JSON.parse(JSON.stringify(o));       // §10-⑤ 活引用硬约定
 
 // P2：中间层视觉权威（kind/颜色/fills/circles）；V1：原生保真调色 + 逐点色策略
-import { visualSpec, multiVisual, effectiveStyle, effectiveFill, NATIVE_INK } from './visual_spec.js';
+import { visualSpec, effectiveStyle, effectiveFill, NATIVE_INK } from './visual_spec.js';
 
 // ---- dataFeed（R3）：后端 WS 数据 → Vela MarketDataFeed port；零 provider 注册 ----
 class AkFeed {
@@ -85,6 +85,7 @@ function _groupSeries(groupKey) {
     const series = [];
     const fills = [];   // P2：bb 上下轨填充带（NativeIndicatorOutput.fills）
     const priceLines = [];   // P3：水平线（rsi 阈值 / macd 零轴）
+    const polylines = [];   // v0.5.3：折线（zigzag 腿）
     // V1：逐点色策略需要「同 bar 收盘价」（sar 涨/跌判定，与原生 `x < bars[i].close` 同式）。
     //   懒建 time→close 索引：只有声明了 pointColor 的规格（当前 sar）才会触发。
     let _closeByTime = null;
@@ -119,8 +120,9 @@ function _groupSeries(groupKey) {
                 const id = `${instId}_${idx}`;
                 const lname = line.name || `${instId}_${idx}`;
                 nameToId[lname] = id;
-                const lv = (spec && spec.lines && spec.lines[lname])
-                    || (spec && spec.multi ? multiVisual(ind.script, idx) : null);   // 多线型（sma/ema）按调色板
+                // 动态线名（MA Type 切换 / VWAP 多轨 #N）→ 回退到该研究首条线规格
+                const lv = (spec && spec.lines && (spec.lines[lname]
+                    || spec.lines[Object.keys(spec.lines)[0]])) || null;
                 const ov = linesStyle ? linesStyle[lname] : null;
                 const s = _lineSpec(id, lname, line.values, line.type, line.style, vis, times, lv, ov, { ...env, idx });
                 series.push(s);
@@ -163,6 +165,19 @@ function _groupSeries(groupKey) {
                 lineStyle: L.lineStyle || 'solid', width: 1,
             });
         });
+        // v0.5.3：脚本自带水平线（参数相关阈值，如 MFI 80/20）——与规格线去重后合并
+        (ind.levels || []).forEach((L, li) => {
+            const price = Number(L.price);
+            if (!Number.isFinite(price)) return;
+            const dup = priceLines.some(pl => Math.abs(pl.price - price) < 1e-9
+                && (pl.title || '') === (L.title || ''));
+            if (dup) return;
+            priceLines.push({
+                id: `${instId}_ipl${li}`, paneId: '', price,
+                title: L.title || '', color: L.color || NATIVE_INK.NEUTRAL,
+                lineStyle: L.lineStyle || 'dashed', width: 1,
+            });
+        });
         if (spec && spec.zones) {
             const anchorId = {};
             spec.zones.forEach(z => [z.from, z.to].forEach(end => {
@@ -185,6 +200,36 @@ function _groupSeries(groupKey) {
                 fills.push({ id: `${instId}_zone${zi}`, paneId: '', fromSeriesId: a, toSeriesId: b, color: z.color });
             });
         }
+        // v0.5.3：指标自带 markers（williams-fractal）→ series.kind='markers'
+        if (Array.isArray(ind.markers) && ind.markers.length) {
+            series.push({
+                id: `${instId}_markers`, title: ind.display_name || instId, paneId: '',
+                kind: 'markers',
+                markers: ind.markers.map(m => ({
+                    time: Number(m.time), position: m.position,
+                    shape: m.shape || 'circle',
+                    color: m.color || (m.position === 'belowBar' ? NATIVE_INK.BULLISH : NATIVE_INK.BEARISH),
+                    ...m.text ? { text: m.text } : {},
+                })),
+            });
+            count++;
+        }
+        // v0.5.3：指标自带折线（zigzag）→ NativeIndicatorOutput.polylines
+        (ind.polylines || []).forEach((p, pi) => {
+            const pts = (p.points || []).map(pt => ({
+                xloc: 'bar_time', x: Number(pt.x), price: Number(pt.price),
+            })).filter(pt => Number.isFinite(pt.x) && Number.isFinite(pt.price));
+            if (pts.length < 2) return;
+            const rising = pts[pts.length - 1].price >= pts[0].price;
+            polylines.push({
+                id: `${instId}_poly${pi}`, paneId: '',
+                points: pts, curved: false, closed: false,
+                lineColor: p.lineColor || (rising ? NATIVE_INK.BULLISH : NATIVE_INK.BEARISH),
+                lineWidth: p.lineWidth || 1, lineStyle: 'solid',
+            });
+        });
+        // 只有折线的指标（zigzag）也要登记「有内容」，否则 ws 每 tick 判空 → 整图重建
+        if (polylines.length) count += polylines.length;
         _emitLines[instId] = count;   // P2：emit 注册表（取代 seriesMap 占位）
     };
     const isSub = groupKey.startsWith(SUB);
@@ -193,7 +238,26 @@ function _groupSeries(groupKey) {
     Object.entries(state.indicators || {}).forEach(([instId, ind]) => {
         if (isSub ? (ind.subplot === subName) : (instId === onlyId)) pushInd(ind, instId);
     });
-    return { series, fills, priceLines };
+    return { series, fills, priceLines, polylines };
+}
+function _colorRuleInk(rule, v, ctx) {
+    const ink = ctx.ink || {};
+    const prev = ctx.prev;
+    switch (rule) {
+        case 'sign': return v >= 0 ? ink.pos : ink.neg;
+        case 'slope': return prev == null ? null : v > prev ? ink.up : v < prev ? ink.down : (ink.flat || null);
+        case 'slope2': return prev == null ? null : v >= prev ? ink.up : ink.down;
+        case 'mid': return v >= 0.5 ? ink.above : ink.below;
+        case 'close': {
+            const c = ctx.close;
+            return c == null ? null : (c >= v ? ink.above : ink.below);
+        }
+        case 'momentum': return v >= 0
+            ? (prev != null && v < prev ? ink.fallAbove : ink.growAbove)
+            : (prev != null && v < prev ? ink.fallBelow : ink.growBelow);
+        case 'absSlope': return prev == null ? null : Math.abs(v) > Math.abs(prev) ? ink.grow : ink.shrink;
+        default: return null;
+    }
 }
 function _lineSpec(id, title, values, type, style, vis, times, lv, override, env) {
     style = style || {}; lv = lv || {}; override = override || {}; env = env || {};
@@ -238,6 +302,13 @@ function _lineSpec(id, title, values, type, style, vis, times, lv, override, env
                 close: env.closeOf ? env.closeOf(time) : null,
             });
         }
+        // v0.5.3：generated visual spec 的逐点色规则（原生 plot.colors 反推；用户改单色则停用）
+        if (!c && lv.colorRule && !eff.flat) {
+            c = _colorRuleInk(lv.colorRule, v, {
+                prev: vals[i - 1], ink: eff.inks,
+                close: env.closeOf ? env.closeOf(time) : null,
+            });
+        }
         if (!c && (kind === 'histogram' || kind === 'columns') && autoColor) {
             c = v >= 0 ? NATIVE_INK.BULLISH : NATIVE_INK.BEARISH;
         }
@@ -266,7 +337,8 @@ function _ensureType(type, title, paneHint, overlay, legend) {
 }
 function _emitOne(groupKey, ctx) {
     const g = _groupSeries(groupKey);
-    ctx.emit({ series: g.series, fills: g.fills, priceLines: g.priceLines });
+    ctx.emit({ series: g.series, fills: g.fills, priceLines: g.priceLines,
+               polylines: g.polylines });
 }
 function reEmit(groupKey) {
     Object.entries(_emitGroups).forEach(([k, ctx]) => { if (k.startsWith(groupKey + '#')) _emitOne(groupKey, ctx); });

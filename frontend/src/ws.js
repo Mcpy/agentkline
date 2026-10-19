@@ -85,7 +85,7 @@ import { groupKeyOfInstance, remountGroupByKey } from './vela_adapter.js';
                     const inst = {
                         inst_id: msg.inst_id, kind: msg.kind, script: msg.script,
                         values: msg.values, lines: msg.lines, markers: msg.markers,
-                        times: msg.times,   // P1 时间戳契约：values 的 bar 时间轴（recipe 有，blob 无）
+                        times: msg.times, levels: msg.levels, polylines: msg.polylines,   // P1 时间戳契约：values 的 bar 时间轴（recipe 有，blob 无）
                         subplot: msg.subplot, style: msg.style, lines_style: msg.lines_style,
                         scope: msg.scope, params: msg.params,
                         display_name: msg.display_name,

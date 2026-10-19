@@ -10,6 +10,7 @@ import { log } from './log.js';
 import { openSettings } from './settings.js';
 import { t, localizeBoardName } from './i18n.js';
 import { showContextMenu } from './menu.js';
+import { openIndicatorLibrary } from './indicator_library.js';
 import { effectiveStyle } from './visual_spec.js';   // V1：芯片色点与图上生效色同源
 import {
     renderChartCore, applyDataUpdateCore, updateIndicatorSeriesCore,
@@ -127,39 +128,10 @@ function deleteIndicator(name) {
         .then(d => { if (d.error) log('error', t('ind.delete_fail', { e: d.error })); });
 }
 
-const BUILTIN_INDICATORS = [
-    { ref: 'indicator/sma',  label: t('ind.ma'),   group: t('ind.mainpane') },
-    { ref: 'indicator/ema',  label: t('ind.ema'),  group: t('ind.mainpane') },
-    { ref: 'indicator/bb',   label: t('ind.boll'), group: t('ind.mainpane') },
-    { ref: 'indicator/sar',  label: t('ind.sar'),  group: t('ind.mainpane') },
-    { ref: 'indicator/macd', label: 'MACD',        group: t('ind.subpane') },
-    { ref: 'indicator/kdj',  label: 'KDJ',         group: t('ind.subpane') },
-    { ref: 'indicator/rsi',  label: 'RSI',         group: t('ind.subpane') },
-    { ref: 'indicator/obv',  label: 'OBV',         group: t('ind.subpane') },
-];
-function _instsOf(ref) {
-    return Object.entries(state.indicators || {}).filter(([, i]) => (i.script || '') === ref).map(([id]) => id);
-}
-function openIndicatorMenu(e) {
-    if (!state.currentBoard) { log('info', t('ind.need_board')); return; }
-    showContextMenu(e.clientX, e.clientY, BUILTIN_INDICATORS.map(b => ({
-        label: `${_instsOf(b.ref).length ? '✓ ' : '　'}[${b.group}] ${b.label}`,
-        onClick: () => toggleBuiltin(b.ref),
-    })));
-}
-async function toggleBuiltin(ref) {
-    const insts = _instsOf(ref);
-    if (insts.length) {
-        for (const id of insts) {
-            const r = await fetch(`/api/indicator/${encodeURIComponent(id)}?board_id=${encodeURIComponent(state.currentBoard)}&timeframe=${encodeURIComponent(state.currentTimeframe)}`, { method: 'DELETE' });
-            if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || t('ind.delete_fail_short')); }
-        }
-        return;
-    }
-    const r = await fetch('/api/indicator', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ board_id: state.currentBoard, timeframe: state.currentTimeframe, script: ref }) });
-    if (!r.ok) { const d = await r.json().catch(() => ({})); log('error', d.detail || t('ind.add_fail')); }
+// 指标库面板（v0.5.3）：74 个 Vela 经典研究 + KDJ 扩展，搜索/分类/多列。
+//   面板自己管增删；这里只提供「变更后刷新指标栏」回调（避免反向 import 环）。
+function openIndicatorMenu() {
+    openIndicatorLibrary(() => { renderIndicatorBar(); });
 }
 
 // ============ 渲染入口（rAF 节流 + 引导/空态分支 + 委托 adapter） ============

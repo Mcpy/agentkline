@@ -10,7 +10,8 @@ const LINE_STYLES = [[0, t('set.solid')], [1, t('set.dotted')], [2, t('set.dashe
 import { effectiveStyle, effectiveFill, specFills, visualSpec, transp } from './visual_spec.js';
 
 // 逐点色语义槽标签（sar 涨/跌、rsi 低/中/高）；非白名单槽名直接显示原名
-const INK_KEYS = new Set(['bull', 'bear', 'low', 'mid', 'high']);
+const INK_KEYS = new Set(['bull', 'bear', 'low', 'mid', 'high',
+    'above', 'below', 'pos', 'neg', 'up', 'down', 'grow', 'shrink', 'flat']);
 function inkLabel(k) { return INK_KEYS.has(k) ? t('set.ink_' + k) : k; }
 
 function post(name, payload) {
@@ -63,43 +64,93 @@ export async function openSettings(name) {
     nameRow.appendChild(autoBtn);
     panel.appendChild(nameRow);
 
-    // ---- 参数（v0.4.3：脚本 PARAMS meta 兜底合并，旧空参实例也有得改；list 参=逗号文本） ----
-    // V1 修：/api/scripts 是 agent 端口专属（group=exec）→ web 端口恒 404、兜底一直静默失效；
-    //   改走 web 可读的只读元数据路由 /api/scripts/meta，且失败要出声（不再吞）。
-    let metaParams = {};
-    try {
-        const sr = await fetch('/api/scripts/meta');
-        if (!sr.ok) {
-            log('info', t('set.meta_fail', {d: sr.status}));
-        } else {
-            const sd = await sr.json();
-            const list = sd.scripts || sd || [];
-            const me = list.find(x => x.id === ind.script);
-            metaParams = (me && me.params) || {};
-        }
-    } catch (e) { log('info', t('set.meta_fail', {d: (e && e.message) || e})); }
-    const params = { ...metaParams, ...(ind.params || {}) };
+    // ---- 参数（v0.5.3：指标目录 schema 驱动） ----
+    // /api/indicator-catalog 给 key/title/type/options/defval/min/max/step；
+    // 旧脚本（custom / 无目录项）回退 /api/scripts/meta 的 PARAMS 字面量。
+    let catalog = state.indicatorCatalog;
+    if (!catalog) {
+        try {
+            const cr = await fetch('/api/indicator-catalog');
+            if (cr.ok) { catalog = await cr.json(); state.indicatorCatalog = catalog; }
+        } catch (e) { /* 目录不可用 → 回退脚本元数据 */ }
+    }
+    const meta = ((catalog && catalog.indicators) || []).find(x => x.script === ind.script);
+    let schema = (meta && meta.inputs) || [];
+    if (!schema.length) {
+        try {
+            const sr = await fetch('/api/scripts/meta');
+            if (!sr.ok) {
+                log('info', t('set.meta_fail', {d: sr.status}));
+            } else {
+                const sd = await sr.json();
+                const list = sd.scripts || sd || [];
+                const me = list.find(x => x.id === ind.script);
+                const metaParams = (me && me.params) || {};
+                schema = Object.entries(metaParams).map(([k, v]) => ({
+                    key: k, title: k,
+                    type: Array.isArray(v) ? 'list' : (typeof v === 'number' ? 'number' : 'string'),
+                    defval: v,
+                }));
+            }
+        } catch (e) { log('info', t('set.meta_fail', {d: (e && e.message) || e})); }
+    }
+    const specByKey = Object.fromEntries(schema.map(i => [i.key, i]));
+    const defaults = Object.fromEntries(schema.map(i => [i.key, i.defval]));
+    const params = { ...defaults, ...(ind.params || {}) };
     const paramInputs = {};
     if (Object.keys(params).length) {
         panel.appendChild(row(`<div class="set-sec">${t('set.sec_params')}</div>`));
         const grid = document.createElement('div');
-        grid.className = 'set-grid';  // 双列网格，参数多时不撑高弹窗
-        Object.entries(params).forEach(([k, v]) => {
+        grid.className = 'set-grid';  // 单列，参数多时靠面板滚动
+        const keys = [...schema.map(i => i.key),
+                      ...Object.keys(params).filter(k => !specByKey[k])];
+        keys.forEach((k) => {
+            const spec = specByKey[k] || { key: k, title: k, type: 'number' };
+            const v = params[k];
             const r = row('');
             const lab = document.createElement('span');
             lab.className = 'set-key';
-            lab.textContent = k;
-            const inp = document.createElement('input');
-            if (Array.isArray(v)) {
+            lab.textContent = spec.title || k;
+            lab.title = k;
+            let inp;
+            let kind;
+            if (Array.isArray(v) || spec.type === 'list') {
+                kind = 'list';
+                inp = document.createElement('input');
                 inp.type = 'text';
-                inp.value = v.join(',');
+                inp.value = Array.isArray(v) ? v.join(',') : String(v ?? '');
                 inp.title = t('set.list_ph');
                 inp.dataset.list = '1';
+            } else if (spec.type === 'bool') {
+                kind = 'bool';
+                inp = document.createElement('input');
+                inp.type = 'checkbox';
+                inp.checked = !!v;
+            } else if (spec.type === 'string' && Array.isArray(spec.options)) {
+                kind = 'select';
+                inp = document.createElement('select');
+                spec.options.forEach(o => {
+                    const op = document.createElement('option');
+                    op.value = String(o);
+                    op.textContent = String(o);
+                    inp.appendChild(op);
+                });
+                inp.value = String(v);
+            } else if (spec.type === 'string') {
+                kind = 'text';
+                inp = document.createElement('input');
+                inp.type = 'text';
+                inp.value = String(v ?? '');
             } else {
+                kind = 'number';
+                inp = document.createElement('input');
                 inp.type = 'number';
-                inp.step = 'any';
+                inp.step = spec.step != null ? String(spec.step) : 'any';
+                if (spec.min != null) inp.min = String(spec.min);
+                if (spec.max != null) inp.max = String(spec.max);
                 inp.value = v;
             }
+            inp.dataset.kind = kind;
             paramInputs[k] = inp;
             r.appendChild(lab); r.appendChild(inp);
             grid.appendChild(r);
@@ -224,14 +275,25 @@ export async function openSettings(name) {
             const newParams = {};
             let paramsChanged = false;
             Object.entries(paramInputs).forEach(([k, inp]) => {
-                if (inp.dataset.list) {
-                    newParams[k] = inp.value.split(',').map(x => x.trim()).filter(x => x !== '')
+                const kind = inp.dataset.kind || 'number';
+                let nv;
+                if (kind === 'list') {
+                    nv = inp.value.split(',').map(x => x.trim()).filter(x => x !== '')
                         .map(x => (isNaN(parseFloat(x)) ? x : parseFloat(x)));
+                } else if (kind === 'bool') {
+                    nv = !!inp.checked;
+                } else if (kind === 'select' || kind === 'text') {
+                    nv = inp.value;
                 } else {
-                    const nv = parseFloat(inp.value);
-                    newParams[k] = isNaN(nv) ? inp.value : nv;
+                    const n = parseFloat(inp.value);
+                    nv = isNaN(n) ? inp.value : n;
+                    if (typeof nv === 'number') {
+                        if (inp.min !== '' && Number.isFinite(+inp.min)) nv = Math.max(+inp.min, nv);
+                        if (inp.max !== '' && Number.isFinite(+inp.max)) nv = Math.min(+inp.max, nv);
+                    }
                 }
-                if (JSON.stringify(newParams[k]) !== JSON.stringify(params[k])) paramsChanged = true;
+                newParams[k] = nv;
+                if (JSON.stringify(nv) !== JSON.stringify(params[k])) paramsChanged = true;
             });
             if (paramsChanged) p1.params = newParams;
             if (wantAuto) p1.auto_label = true;

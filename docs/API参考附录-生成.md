@@ -26,6 +26,7 @@
 | POST | `/api/drawings` | Draw Many |
 | POST | `/api/drawings/delete` | Delete Drawings |
 | POST | `/api/indicator` | Add Indicator |
+| GET | `/api/indicator-catalog` | Indicator Catalog |
 | POST | `/api/indicator/refresh/{inst_id}` | Refresh Indicator |
 | PUT | `/api/indicator/{inst_id}` | Update Indicator |
 | DELETE | `/api/indicator/{inst_id}` | Delete Indicator |
@@ -96,7 +97,7 @@
 | `save_script` | 保存自定义脚本到 custom 根（保存即校验：入口函数存在/能力声明一致/元数据合法）。 |
 | `set_view_range` | 让前端聚焦到指定时间窗口（AI 主动把画面拉到某段时间，如回测亏损区间）。 |
 | `run_script` | 跑一次脚本拿计算结果（**不上图、不留痕**）。适合：试算指标输出、拉一段数据源样本检查。要让指标上图用 add_indicator；要当画板数据源用 set_kline_source。 |
-| `add_indicator` | 加一个指标到图上。最常用：加内置指标，如 script='indicator/macd'（内置清单见 list_skills 之外的 list_scripts）。 |
+| `add_indicator` | 加一个指标到图上。内置 75 项（74 个 Vela 经典研究 + KDJ，清单见 GET /api/indicator-catalog |
 | `set_kline_source` | 给"画板+周期"配置或更换 K 线数据来源。 |
 | `create_subplot` | 创建副图——主图下方的独立小面板，用于放置指标（如 MACD/KDJ/成交量）。 |
 | `delete_subplot` | 删除副图（连同其上指标） |

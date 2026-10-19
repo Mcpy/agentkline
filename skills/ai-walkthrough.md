@@ -63,7 +63,7 @@ description: AI 引导呈现流程——把分析结论（标记/划线）自动
 
 
 ## 指标意识
-- 用户可用指标栏"＋指标"自助开关内置 8 枚；AI 加指标走同一 add_indicator（subplot 族自动归属副图）；
+- 指标库现有 75 项内置（74 个 Vela 经典研究 + KDJ）+「自定义」分类；`list_scripts` 可查 `indicator/*`，`save_script` 写入的 custom 指标会自动进「自定义」（无需重启）；指标栏"＋指标"打开搜索/分类面板，AI 加指标走同一 add_indicator（subplot 族自动归属副图）；
 - 讲解时读 overview.indicators 知用户当前开了什么；改参走 update_indicator params（如 MA 周期档）。
 
 

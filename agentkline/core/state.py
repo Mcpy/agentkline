@@ -300,7 +300,7 @@ class StateManager:
 
     def set_cache(self, board_id: str, timeframe: str, inst_id: str,
                   values: list = None, lines: list = None, markers: list = None,
-                  times: list = None) -> None:
+                  times: list = None, levels: list = None, polylines: list = None) -> None:
         """物化缓存写入（NaN/Inf 清洗挂这里，覆盖所有入值路径）
         times（P1 时间戳契约）：values 对应的 bar 时间轴（与脚本 feed 同源），int ms，无需清洗。
         前端据此按时间戳映射，消除 off=bars.len-values.len 索引对齐（prepend/竞态免疫）。
@@ -310,7 +310,8 @@ class StateManager:
             return
         tf = board.ensure_tf(timeframe)
         tf.ind_cache[inst_id] = {"values": _clean(values), "lines": _clean(lines),
-                                 "markers": _clean(markers), "times": times}
+                                 "markers": _clean(markers), "times": times,
+                                 "levels": _clean(levels), "polylines": _clean(polylines)}
 
     def get_cache(self, board_id: str, timeframe: str, inst_id: str) -> Optional[dict]:
         board = self.boards.get(board_id)

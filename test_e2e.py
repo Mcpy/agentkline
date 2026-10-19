@@ -215,8 +215,9 @@ def test(port: int, token: str = None):
                      "board_id": "bare", "timeframe": "1d"})
     check("blob 钉死本周期", r.json().get("scope") == "timeframe", r.text)
     r = s.put(f"{base}/api/indicator/macd",
-              json={"params": {"fast": 6, "slow": 13, "signal": 4}, "board_id": "bare", "timeframe": "1d"})
-    check("update params 重算+自动名", "MACD(6, 13, 4)" in r.text, r.text)
+              json={"params": {"fastLength": 6, "slowLength": 13, "signalLength": 4},
+                    "board_id": "bare", "timeframe": "1d"})
+    check("update params 重算+自动名", "MACD(6, 13, 4" in r.text, r.text)
     r = s.get(f"{base}/api/indicators?board_id=bare&timeframe=1d&instances=myblob")
     check("get_indicators instances 过滤", list(r.json().get("indicators", {}).keys()) == ["myblob"], r.text)
     r = s.get(f"{base}/api/overview?board_id=bare&timeframe=1d")
@@ -485,8 +486,9 @@ def test(port: int, token: str = None):
     r = s.post(f"{base}/api/board", json={"id": "indb", "symbol": "IND/USDT",
                                           "source": "datasource/mock_btc", "params": {"symbol": "IND/USDT"}})
     check("指标板建锁", r.status_code == 200, r.text)
-    BUILTINS = ["indicator/sma", "indicator/ema", "indicator/bb", "indicator/sar",
-                "indicator/macd", "indicator/kdj", "indicator/rsi", "indicator/obv"]
+    BUILTINS = ["indicator/sma", "indicator/ema", "indicator/bollinger_bands",
+                "indicator/supertrend", "indicator/macd", "indicator/kdj",
+                "indicator/rsi", "indicator/on_balance_volume"]
     inst_ids = {}
     for ref in BUILTINS:
         r = s.post(f"{base}/api/indicator", json={"board_id": "indb", "timeframe": "1d", "script": ref})
@@ -497,20 +499,80 @@ def test(port: int, token: str = None):
     r = s.get(f"{base}/api/indicators?board_id=indb&timeframe=1d")
     inds = r.json().get("indicators") or {}  # {inst_id: inst} dict 面
     sma_inst = next((i for i in inds.values() if (i.get("script") or "").endswith("/sma")), None)
-    check("sma 三线 MA5/10/20", bool(sma_inst) and [l["name"] for l in (sma_inst.get("lines") or [])] == ["MA5", "MA10", "MA20"],
+    check("sma 单线（Vela 语义）", bool(sma_inst)
+          and [l["name"] for l in (sma_inst.get("lines") or [])] == ["SMA"],
           str(sma_inst and [l["name"] for l in sma_inst.get("lines") or []]))
+    check("sma 默认参数 length/source", bool(sma_inst)
+          and (sma_inst.get("params") or {}).get("length") == 20
+          and (sma_inst.get("params") or {}).get("source") == "Close",
+          str(sma_inst and sma_inst.get("params")))
     ema_inst = next((i for i in inds.values() if (i.get("script") or "").endswith("/ema")), None)
-    check("ema 三线 EMA5/10/20", bool(ema_inst) and [l["name"] for l in (ema_inst.get("lines") or [])] == ["EMA5", "EMA10", "EMA20"],
+    check("ema 单线", bool(ema_inst)
+          and [l["name"] for l in (ema_inst.get("lines") or [])] == ["EMA"],
           str(ema_inst and [l["name"] for l in ema_inst.get("lines") or []]))
     check("8 枚全在", len(inds) == 8, f"got {len(inds)}")
-    check("sma 实例带默认参数", bool(sma_inst) and (sma_inst.get("params") or {}).get("periods") == [5, 10, 20],
-          str(sma_inst and sma_inst.get("params")))
+    st_inst = next((i for i in inds.values() if (i.get("script") or "").endswith("/supertrend")), None)
+    check("supertrend 双线 Uptrend/Downtrend", bool(st_inst)
+          and [l["name"] for l in (st_inst.get("lines") or [])] == ["Uptrend", "Downtrend"],
+          str(st_inst and [l["name"] for l in st_inst.get("lines") or []]))
     macd_inst = next((i for i in inds.values() if (i.get("script") or "").endswith("/macd")), None)
     check("macd 自动归属副图", bool(macd_inst) and macd_inst.get("subplot") == "macd",
           str(macd_inst and macd_inst.get("subplot")))
     r = s.get(f"{base}/api/subplots?board_id=indb&timeframe=1d")
     subnames = [x.get("name") if isinstance(x, dict) else x for x in (r.json().get("subplots") or [])]
     check("副图列表含 macd", "macd" in subnames, str(subnames))
+
+    # 指标目录（v0.5.3：74 Vela 经典 + KDJ 扩展）
+    r = s.get(f"{base}/api/indicator-catalog")
+    cat = r.json() if r.status_code == 200 else {}
+    cinds = cat.get("indicators") or []
+    _builtin = [x for x in cinds if x.get("source") == "builtin"]
+    _groups = {g.get("id") for g in (cat.get("groups") or [])}
+    check("指标目录 200/内置 75 项", r.status_code == 200 and len(_builtin) == 75,
+          f"{r.status_code} builtin={len(_builtin)} total={len(cinds)}")
+    check("指标目录 7 内置分类", {"average", "band", "oscillator", "trend",
+          "volatility", "volume", "overlay"} <= _groups, str(_groups))
+    check("目录脚本 id 唯一", len({x["script"] for x in cinds}) == len(cinds), "")
+    check("目录参数 schema 无 color", all(i.get("type") != "color"
+          for x in cinds for i in x.get("inputs") or []), "")
+    check("目录含 Vela 74 + KDJ", sum(1 for x in _builtin if x["type"] != "kdj") == 74
+          and any(x["type"] == "kdj" for x in _builtin), "")
+    check("目录 overlay/pane 归属齐全", all(isinstance(x.get("overlay"), bool) for x in cinds), "")
+    check("目录含 custom 分类", any(g.get("id") == "custom" for g in cat.get("groups") or []), "")
+    check("目录 source 标注", all(x.get("source") in ("builtin", "custom") for x in cinds), "")
+
+    # 新研究实测：stochastic（副图多线）
+    r = s.post(f"{base}/api/indicator", json={"board_id": "indb", "timeframe": "1d",
+                                              "script": "indicator/stochastic"})
+    sid = (r.json() or {}).get("inst_id")
+    check("加 stochastic", r.status_code == 200 and bool(sid), r.text[:120])
+    r = s.get(f"{base}/api/indicators?board_id=indb&timeframe=1d&instances={sid}")
+    st = (r.json().get("indicators") or {}).get(sid) or {}
+    check("stochastic 两线 %K/%D", [l["name"] for l in st.get("lines") or []] == ["%K", "%D"],
+          str([l["name"] for l in st.get("lines") or []]))
+    check("stochastic 默认参数 kLength=14", (st.get("params") or {}).get("kLength") == 14,
+          str(st.get("params")))
+    if sid:
+        s.delete(f"{base}/api/indicator/{sid}?board_id=indb&timeframe=1d")
+
+    # zigzag（polylines）/ williams_fractal（markers）传输
+    r = s.post(f"{base}/api/indicator", json={"board_id": "indb", "timeframe": "1d",
+                                              "script": "indicator/zigzag"})
+    zid = (r.json() or {}).get("inst_id")
+    r = s.get(f"{base}/api/indicators?board_id=indb&timeframe=1d&instances={zid}")
+    z = (r.json().get("indicators") or {}).get(zid) or {}
+    check("zigzag 输出 polylines", len(z.get("polylines") or []) > 0, str(z.keys()))
+    if zid:
+        s.delete(f"{base}/api/indicator/{zid}?board_id=indb&timeframe=1d")
+    r = s.post(f"{base}/api/indicator", json={"board_id": "indb", "timeframe": "1d",
+                                              "script": "indicator/williams_fractal"})
+    fid = (r.json() or {}).get("inst_id")
+    r = s.get(f"{base}/api/indicators?board_id=indb&timeframe=1d&instances={fid}")
+    f = (r.json().get("indicators") or {}).get(fid) or {}
+    check("fractal 输出 markers", len(f.get("markers") or []) > 0, str(f.keys()))
+    if fid:
+        s.delete(f"{base}/api/indicator/{fid}?board_id=indb&timeframe=1d")
+
     # toggle 对：删 sma 再列表无
     if sma_inst:
         r = s.delete(f"{base}/api/indicator/{sma_inst['inst_id']}?board_id=indb&timeframe=1d")
@@ -657,10 +719,11 @@ def test(port: int, token: str = None):
     r = s.get(f"{base}/api/scripts/meta")
     check("scripts/meta 200", r.status_code == 200, r.text[:120])
     ml = r.json().get("scripts", []) if r.status_code == 200 else []
-    check("scripts/meta 含内置指标", any(x.get("id") == "indicator/bb" for x in ml),
+    check("scripts/meta 含内置指标", any(x.get("id") == "indicator/bollinger_bands" for x in ml),
           str([x.get("id") for x in ml][:6]))
-    _bbm = next((x for x in ml if x.get("id") == "indicator/bb"), None) or {}
-    check("scripts/meta 带 PARAMS 默认值", _bbm.get("params") == {"period": 20, "std": 2}, str(_bbm.get("params")))
+    _bbm = next((x for x in ml if x.get("id") == "indicator/bollinger_bands"), None) or {}
+    check("scripts/meta 带 PARAMS 默认值", _bbm.get("params") == {"length": 20, "source": "Close", "mult": 2},
+          str(_bbm.get("params")))
     check("scripts/meta 精简面（不含能力/数据源元数据）",
           all(not ({"caps", "identity", "intervals"} & set(x.keys())) for x in ml),
           str(sorted(ml[0].keys())) if ml else "empty")

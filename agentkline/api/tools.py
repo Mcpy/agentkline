@@ -167,6 +167,16 @@ def list_script_meta():
                         for sc in service.script_engine.list_scripts()]}
 
 
+@api_tool(group="read", path="/api/indicator-catalog", mcp=False)
+def indicator_catalog():
+    """指标目录（v0.5.3，只读）：Vela 0.8.4 的 74 个经典研究 + KDJ 扩展 + 自定义脚本。
+    每项含 type/script/title/short/title_zh/group/overlay/inputs（参数 schema，颜色已剔除）与
+    source（builtin/custom）；自定义脚本归入 group=custom，与内置同 id 时标 shadowed=true。
+    前端指标库面板与设置面板共用；脚本执行仍走 add_indicator(script=...)。"""
+    from ..core.indicator_spec import catalog
+    return catalog(service.script_engine)
+
+
 @api_tool(group="read", path="/api/view")
 def get_current_view():
     """获取用户当前视图（画板/周期/可见时间窗口），由前端上报"""
@@ -427,9 +437,10 @@ def add_indicator(board_id: Optional[str] = None, timeframe: Optional[str] = Non
                   lines: Optional[list] = None, script: Optional[str] = None,
                   params: Optional[dict] = None, scope: Optional[str] = None,
                   display_name: Optional[str] = None):
-    """加一个指标到图上。最常用：加内置指标，如 script='indicator/macd'（内置清单见 list_skills 之外的 list_scripts）。
-    subplot 族（macd/kdj/rsi/obv）不传 subplot 时自动建副图放置；主图族（sma/ema/bb/sar）叠在主图。
-    params=参数覆盖（如 {'periods':[10,20,60]} 换均线档）；inst_id 不传自动生成。
+    """加一个指标到图上。内置 75 项（74 个 Vela 经典研究 + KDJ，清单见 GET /api/indicator-catalog
+    或 list_scripts 的 indicator/*）；script 用 indicator/<stem>，如 indicator/macd、indicator/bollinger_bands、
+    indicator/supertrend。overlay=false 的副图族不传 subplot 时自动建副图；overlay=true 叠在主图。
+    params=参数覆盖（键见目录 inputs，如 {'length': 10}）；同一 script 可重复加多个实例（inst_id 自动 sma_2）。
     返回 inst_id；改参/改样式用 update_indicator，从图上移除用 delete_indicator。"""
     board_id, timeframe = _resolve(board_id, timeframe)
     return service.add_indicator(board_id, timeframe, inst_id=inst_id, values=values,
