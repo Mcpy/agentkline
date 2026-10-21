@@ -13,7 +13,7 @@ import inspect
 from datetime import datetime
 from typing import Optional
 
-from .common import service, _resolve, _err, SCRIPTS_DIR
+from .common import service, _resolve, _err, SCRIPTS_DIR, CONFIG
 from ..core import skills as _skills
 from ..core import drawing_spec
 
@@ -153,8 +153,10 @@ def list_drawings(board_id: Optional[str] = None, timeframe: Optional[str] = Non
 
 @api_tool(group="read", path="/api/config", mcp=False)
 def get_config():
-    """服务配置快照：scripts_dir（custom 根路径）与版本号"""
-    return {"scripts_dir": str(SCRIPTS_DIR), "version": service.VERSION}
+    """服务配置快照：scripts_dir（custom 根路径）、版本号、界面时区"""
+    ui = CONFIG.get("ui") or {}
+    return {"scripts_dir": str(SCRIPTS_DIR), "version": service.VERSION,
+            "ui": {"timezone": ui.get("timezone") or "browser"}}
 
 
 @api_tool(group="read", path="/api/scripts/meta", mcp=False)
@@ -555,6 +557,44 @@ def watchlist_move(source: str, symbol: str, group_id: str, index: int = None):
 def get_quotes():
     """全行 quotes 快照（AI 读盘用）；面板实时走 WS quotes_update"""
     return service.watchlist.quotes_snapshot()
+
+
+# ============ 结果实例（v0.6.0） ============
+@api_tool(group="exec", method="POST", path="/api/result", err_status=400)
+def import_result(payload: dict):
+    """导入一份回测结果并在画板上展示（外部引擎/脚本算完推上来）。
+    请求体：{"payload": {...}}；payload 必填 equity={times[],values[]}，可选 trades/fills/benchmark/
+    execution_assumptions/strategy/engine/run/status。
+    服务端校验时间轴与初始资金、补算统计口径、记录数据质量与可复现指纹，返回结果摘要。
+    同一份结果重复导入会生成新 result_id（结果冻结，重跑不覆盖）。"""
+    return service.import_result(payload)
+
+
+@api_tool(group="read", path="/api/results")
+def list_results(board_id: Optional[str] = None, timeframe: Optional[str] = None):
+    """列出结果摘要（不含净值/交易大数组）。按创建时间倒序；可按画板或周期过滤。
+    board_id 不传=全部画板；timeframe 不传=全部周期。"""
+    return service.list_results(board_id, timeframe)
+
+
+@api_tool(group="read", path="/api/result/{result_id}", err_status=404)
+def get_result(result_id: str, section: str = "summary", offset: int = 0, limit: int = 200):
+    """按需读取一条结果。section=summary（默认，元信息+统计）/equity（净值序列）/trades（平仓交易）/fills（成交）。
+    equity/trades 默认只返回前 200 条，用 offset/limit 翻页；limit=0 返回全部（大数组慎用）。
+    返回 truncated/next_offset 表示还有下一页。先读 summary，再按需取数组。"""
+    return service.get_result(result_id, section, offset, limit)
+
+
+@api_tool(group="user_write", method="PUT", path="/api/result/{result_id}", err_status=400)
+def rename_result(result_id: str, display_name: str):
+    """给结果改显示名（只改名字，不改内容；结果本身冻结）。返回新名字。"""
+    return service.rename_result(result_id, display_name)
+
+
+@api_tool(group="user_write", method="DELETE", path="/api/result/{result_id}", err_status=404)
+def delete_result(result_id: str):
+    """删除一条结果（清理权，不是改写权）。删掉后画板上的净值曲线和交易点一并消失。"""
+    return service.delete_result(result_id)
 
 
 # ============ MCP-only（二进制/图片，REST 豁免） ============

@@ -1,6 +1,6 @@
 # AgentKline API 文档
 
-> 版本：v0.5.4 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server（API 自 v0.4.0 起保持兼容）
+> 版本：v0.6.0 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server（API 自 v0.4.0 起保持兼容）
 > 破坏性硬切版本：无兼容层。旧路径（/api/ohlcv、/api/load-csv、/history、datasource 端点、indicator/update 杂交路径）一律 404/405。
 > 机器可读附录：`python scripts/gen_api_ref.py` 可从运行中服务生成 REST 路由表 + MCP 工具表（防漂移）。
 

@@ -16,6 +16,13 @@ export const state = {
         drawings: {},  // id -> SerializedDrawing（划线，属板不属周期）
         timeIndex: null,  // Map(timeSec -> ohlcv index)
         indicatorCatalog: null,  // v0.5.3：/api/indicator-catalog 缓存（指标库/设置面板共用）
+        // v0.6.0 结果实例：当前板+周期的摘要/可见/选中；detail 缓存冻结结果（不可变）
+        results: [],
+        resultVisible: [],
+        resultActive: null,
+        resultDetail: {},   // result_id -> {summary, equity:{times,values}, trades:[]}
+        resultMarksOn: true,
+        uiTimezone: 'Asia/Shanghai',   // v0.6.0：界面时间显示时区（/api/config ui.timezone 覆盖；browser=跟随本机）
     };
 
 // v0.4.1: 状态重置原语（自 ws.js 下沉到叶子模块，断 ws↔ui 环）

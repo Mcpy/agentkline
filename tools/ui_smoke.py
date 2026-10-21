@@ -327,11 +327,10 @@ def run_checks(page, base: str) -> tuple[int, int]:
           and order[:2] == ["indicator/ema", "indicator/bollinger_bands"],
           f"recent={recent[:4]} order={order[:4]}")
 
-    # 5) VPVR layer chip: on → survives reload → off
+    # 5) VPVR layer chip: on → survives reload → off（0.6.0 起去掉 ⚙/设置，与 Vol 一样只有开关）
     _close_lib(page)
     chip = page.locator("#chart-layer-vpvr")
     off_width = (chip.bounding_box() or {}).get("width")
-    gear_off = chip.locator(".layer-gear").evaluate("e => getComputedStyle(e).display")
     chip.click()
     page.wait_for_function(
         "() => window.__ak.chart.presentNativeIndicators().includes('vpvr')",
@@ -341,7 +340,6 @@ def run_checks(page, base: str) -> tuple[int, int]:
     page.wait_for_timeout(300)
     on_width = (chip.bounding_box() or {}).get("width")
     fixed_width = bool(off_width and on_width and abs(off_width - on_width) < 0.5)
-    gear_always = gear_off == "block" and chip.locator(".layer-gear").evaluate("e => getComputedStyle(e).display") == "block"
     legend_hidden = page.evaluate("""() => [...document.querySelectorAll('#main-chart span')]
         .filter(e => e.children.length === 0 && e.textContent.trim() === 'VRVP'
             && e.offsetParent !== null).length""")
@@ -354,11 +352,6 @@ def run_checks(page, base: str) -> tuple[int, int]:
                     and chip_box["y"] - ohlc_box["y"] >= 4
                     and (ohlc_box["y"] + ohlc_box["height"])
                         - (chip_box["y"] + chip_box["height"]) >= 4)
-    page.locator("#chart-layer-vpvr .layer-gear").click()
-    page.wait_for_timeout(300)
-    settings_ok = page.evaluate("() => document.body.innerText.includes('Rows')")
-    page.evaluate("() => window.__ak.chart.renderer.closeDialogs()")
-    page.wait_for_timeout(150)
     page.evaluate("""() => {
         const h = (window.__ak.chart.indicators() || []).find(x => x.nativeType === 'vpvr');
         if (h) h.setInputs({ rows: 40 });
@@ -385,11 +378,11 @@ def run_checks(page, base: str) -> tuple[int, int]:
         timeout=4000,
     )
     chip_off = "on" not in (page.locator("#chart-layer-vpvr").get_attribute("class") or "")
-    check("VPVR 图层：固定宽度+常驻⚙ / 图例隐藏 / OHLC 居中留白 / 刷新恢复 / 参数保留 / 关",
-          chip_on and fixed_width and gear_always and legend_hidden == 0 and aligned and space_ok
-          and settings_ok and chip_after and legend_after == 0 and rows_after == 40 and chip_off,
-          f"on={chip_on} width={off_width}/{on_width} gear={gear_off} legend={legend_hidden} "
-          f"aligned={aligned} space={space_ok} settings={settings_ok} "
+    check("VPVR 图层：固定宽度 / 图例隐藏 / OHLC 居中留白 / 刷新恢复 / 参数保留 / 关",
+          chip_on and fixed_width and legend_hidden == 0 and aligned and space_ok
+          and chip_after and legend_after == 0 and rows_after == 40 and chip_off,
+          f"on={chip_on} width={off_width}/{on_width} legend={legend_hidden} "
+          f"aligned={aligned} space={space_ok} "
           f"afterReload={chip_after}/{legend_after} rows={rows_after} off={chip_off}")
 
     # 6) out-of-range last-price pin

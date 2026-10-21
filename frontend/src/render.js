@@ -18,7 +18,8 @@ import {
     onViewport, getVisibleTimeRange, onCrosshair, syncSubplotsCore, snapshotAll,
     tfMs, extendHistory, remountIndicator,
     refreshEmittedGroups, syncToolbarSticky,
-    isVpvrEnabled, setVpvrEnabled, openVpvrSettings,
+    isVpvrEnabled, setVpvrEnabled,
+    isVolumeEnabled, setVolumeEnabled, scrollToLatest,
 } from './vela_adapter.js';
 
 // ============ 活体注册表（resize 用；Vela 单图） ============
@@ -26,11 +27,6 @@ export function resizeAllCharts() { resizeAllChartsCore(); }
 
 // ============ 应用层小工具 ============
 function displayName(ind) { return (ind && ind.display_name) || (ind && ind.name) || ''; }
-
-function updateDataInfo() {
-    document.getElementById('data-info').textContent =
-        `${(state.ohlcv || []).length} bars | ${Object.keys(state.indicators || {}).length} indicators`;
-}
 
 // 芯片色点 = 图上实际生效色（V1：与 effectiveStyle 同源，避免「芯片一个色、图上另一个色」）
 //   多线取首线（bb=上轨、macd=DIF）；逐点色指标（sar）取首个语义槽（涨色）
@@ -157,7 +153,7 @@ function _renderInner() {
         container.innerHTML = '';
         _setOhlcVisible(false);   // 无画板（删光/首次进入）= 引导页：OHLC 条带不该留在画布上方
         syncLayerChip();          // 无板时收起 VPVR 开关
-        renderIndicatorBar(); updateDataInfo();
+        renderIndicatorBar();
         return;
     }
     guide.style.display = 'none';
@@ -166,7 +162,7 @@ function _renderInner() {
         container.innerHTML = '';
         _setOhlcVisible(false);   // 有板无数据（未加载/空窗）：同样不留旧读数
         syncLayerChip();
-        renderIndicatorBar(); updateDataInfo();
+        renderIndicatorBar();
         return;
     }
     emptyState.style.display = 'none';
@@ -177,7 +173,6 @@ function _renderInner() {
     renderSubplots();                  // 副图实例 diff + 动态总高（adapter；无 subplot DOM）
     syncLayerChip();                   // VPVR 开关位置/状态跟随建图/切板
     renderIndicatorBar();
-    updateDataInfo();
     reportView();
 }
 
@@ -185,13 +180,11 @@ function _renderInner() {
 export function applyDataUpdate() {
     applyDataUpdateCore();
     if (_ohlcHoverTime == null) _renderOhlcLatest();   // 未悬停时条带跟最新价走
-    updateDataInfo();
     reportView();
 }
 // P1：prepend（左划回补广播）只同步缓存与视图上报，不动图表——Vela 经 loadRange 自取
 export function applyPrependUpdate() {
     refreshEmittedGroups();   // P1 修复：prepend 后 vol/legacy 组 emit 与蜡烛对齐
-    updateDataInfo();
     reportView();
 }
 export function updateIndicatorSeries(instId) { updateIndicatorSeriesCore(instId); }
@@ -261,52 +254,107 @@ function _setOhlcVisible(on) {
     syncLayerChip();       // VPVR 贴图表左上/右上，OHLC 条带显隐会改它的 top
 }
 
-// ---- v0.5.4 VPVR 图层开关（图表右上方空白区；原生 legend 在左上，不抢位） ----
-function _ensureLayerChip() {
-    const host = _ensureOhlcEl() || document.querySelector('.chart-container');
+// ---- v0.6.0 图层开关组：Vol | VPVR（OHLC 条带右端，样式一致） ----
+function _ensureLayerChips() {
+    const ohlc = _ensureOhlcEl();
+    const host = (ohlc && _ensureOhlcRight(ohlc)) || document.querySelector('.chart-container');
     if (!host) return null;
+    let wrap = document.getElementById('chart-layer-chips');
+    if (!wrap || !wrap.isConnected || wrap.parentElement !== host) {
+        if (wrap) wrap.remove();
+        wrap = document.createElement('div');
+        wrap.id = 'chart-layer-chips';
+        wrap.className = 'chart-layer-chips';
+        host.appendChild(wrap);
+    }
+    _ensureVolChip(wrap);
+    _ensureVpvrChip(wrap);
+    _ensureLatestChip(wrap);
+    return wrap;
+}
+
+function _ensureLatestChip(wrap) {
+    let chip = document.getElementById('chart-layer-latest');
+    if (!chip || !chip.isConnected) {
+        if (chip) chip.remove();
+        chip = document.createElement('button');
+        chip.id = 'chart-layer-latest';
+        chip.type = 'button';
+        chip.className = 'chart-layer-chip chip-action';
+        chip.textContent = t('chart.latest');
+        chip.title = t('chart.latest_title');
+        chip.onclick = () => {
+            scrollToLatest();
+            log('info', t('chart.latest_done'));
+        };
+    }
+    if (chip.parentElement !== wrap) wrap.appendChild(chip);
+    return chip;
+}
+
+function _ensureVolChip(wrap) {
+    let chip = document.getElementById('chart-layer-vol');
+    if (!chip || !chip.isConnected) {
+        if (chip) chip.remove();
+        chip = document.createElement('button');
+        chip.id = 'chart-layer-vol';
+        chip.type = 'button';
+        chip.className = 'chart-layer-chip';
+        chip.innerHTML = '<span class="layer-dot"></span><span>Vol</span>';
+        chip.onclick = () => {
+            const on = !isVolumeEnabled();
+            setVolumeEnabled(on);
+            syncLayerChip();
+            log('info', t(on ? 'chart.vol_on' : 'chart.vol_off'));
+        };
+    }
+    if (chip.parentElement !== wrap) wrap.insertBefore(chip, wrap.firstChild);
+    return chip;
+}
+
+function _ensureVpvrChip(wrap) {
     let chip = document.getElementById('chart-layer-vpvr');
-    if (!chip || !chip.isConnected || chip.parentElement !== host) {
+    if (!chip || !chip.isConnected) {
         if (chip) chip.remove();
         chip = document.createElement('button');
         chip.id = 'chart-layer-vpvr';
         chip.type = 'button';
         chip.className = 'chart-layer-chip';
-        chip.innerHTML = '<span class="layer-dot"></span><span>VPVR</span>'
-            + `<span class="layer-gear" title="${t('chart.vpvr_settings')}">⚙</span>`;
+        chip.innerHTML = '<span class="layer-dot"></span><span>VPVR</span>';
         chip.onclick = () => {
             const on = !isVpvrEnabled();
             setVpvrEnabled(on);
             syncLayerChip();
             log('info', t(on ? 'chart.vpvr_on' : 'chart.vpvr_off'));
         };
-        chip.oncontextmenu = (e) => {
-            e.preventDefault();
-            openVpvrSettings();   // 关闭态点齿轮/右键 = 先开启再进设置
-            syncLayerChip();
-        };
-        chip.querySelector('.layer-gear').onclick = (e) => {
-            e.stopPropagation();
-            openVpvrSettings();
-            syncLayerChip();
-        };
-        host.appendChild(chip);
     }
+    if (chip.parentElement !== wrap) wrap.appendChild(chip);
     return chip;
 }
 
 function syncLayerChip() {
-    const chip = _ensureLayerChip();
-    if (!chip) return;
+    const wrap = _ensureLayerChips();
+    if (!wrap) return;
     const hasChart = !!(state.currentBoard && state.ohlcv && state.ohlcv.length);
-    chip.style.display = hasChart ? 'flex' : 'none';
+    wrap.style.display = hasChart ? 'flex' : 'none';
     const ohlc = document.getElementById('ohlc-legend');
     if (!hasChart && ohlc) ohlc.style.display = 'none';   // 空态别留一条新建的空条带
-    const on = isVpvrEnabled();
-    chip.classList.toggle('on', on);
-    chip.title = t(on ? 'chart.vpvr_hide' : 'chart.vpvr_show');
-    chip.setAttribute('aria-pressed', on ? 'true' : 'false');
+    const vol = document.getElementById('chart-layer-vol');
+    const onVol = isVolumeEnabled();
+    if (vol) {
+        vol.classList.toggle('on', onVol);
+        vol.title = t(onVol ? 'chart.vol_hide' : 'chart.vol_show');
+        vol.setAttribute('aria-pressed', onVol ? 'true' : 'false');
+    }
+    const chip = document.getElementById('chart-layer-vpvr');
+    if (chip) {
+        const on = isVpvrEnabled();
+        chip.classList.toggle('on', on);
+        chip.title = t(on ? 'chart.vpvr_hide' : 'chart.vpvr_show');
+        chip.setAttribute('aria-pressed', on ? 'true' : 'false');
+    }
 }
+
 function _ensureOhlcEl() {
     // 画布外条带（Vela 无 legend 位置配置，原生 legend 恒占画布内第一行）→ 本行置于图表上方=视觉第一行
     const container = document.querySelector('.chart-container');
@@ -319,7 +367,27 @@ function _ensureOhlcEl() {
         el.id = 'ohlc-legend';
         container.insertBefore(el, host);
     }
+    let vals = el.querySelector('.ohlc-values');
+    if (!vals) {
+        vals = document.createElement('div');
+        vals.className = 'ohlc-values';
+        el.appendChild(vals);
+    }
+    _ensureOhlcRight(el);
     return el;
+}
+
+// OHLC 条带右侧：周期 tabs + 图层 chips 成组靠右，周期紧挨 Vol 左侧
+function _ensureOhlcRight(el) {
+    let right = el.querySelector('.ohlc-right');
+    if (!right) {
+        right = document.createElement('div');
+        right.className = 'ohlc-right';
+        el.appendChild(right);
+    }
+    const tfs = document.getElementById('timeframe-tabs');
+    if (tfs && tfs.parentElement !== right) right.insertBefore(tfs, right.firstChild);
+    return right;
 }
 let _ohlcHoverTime = null;   // 十字线锁定的 bar 时间（ms）；null = 跟随最新
 function _ohlcBarByTime(ms) {
@@ -337,16 +405,17 @@ function _renderOhlcFromBar(bar, prev) {
     const pct = prev && prev.close ? (bar.close - prev.close) / prev.close * 100
         : (bar.open ? (bar.close - bar.open) / bar.open * 100 : 0);
     const cls = pct >= 0 ? 'up' : 'down';
-    const stamp = formatTimeCN(Math.floor((bar.timestamp || 0) / 1000), isIntraday(state.currentTimeframe));
-    const chip = document.getElementById('chart-layer-vpvr');
-    el.innerHTML =
+    const stamp = formatTimeCN(Math.floor((bar.timestamp || 0) / 1000), isIntraday(state.currentTimeframe), state.uiTimezone);
+    const vals = el.querySelector('.ohlc-values');
+    if (!vals) return;
+    _ensureLayerChips();
+    vals.innerHTML =
         `<span class="ohlc-time">${stamp}</span>`
         + `<span>O <b>${_fmtOhlc(bar.open)}</b></span>`
         + `<span>H <b>${_fmtOhlc(bar.high)}</b></span>`
         + `<span>L <b>${_fmtOhlc(bar.low)}</b></span>`
         + `<span>C <b class="${cls}">${_fmtOhlc(bar.close)}</b></span>`
         + `<span class="${cls}">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</span>`;
-    if (chip) el.appendChild(chip);   // innerHTML 会清掉 chip，原位放回（不重建绑定）
 }
 function _renderOhlcLatest() {
     const { bar, prev } = _ohlcBarByTime(null);
@@ -419,6 +488,7 @@ export function bindOverlays() {
     const ro = new ResizeObserver(() => resizeAllCharts());
     const host = document.querySelector('.chart-container');
     if (host) ro.observe(host);
+    window.addEventListener('ak:layer-visibility', syncLayerChip);   // 原生图例眼睛 → 芯片同步
     const ba = document.getElementById('board-add');
     if (ba) ba.onclick = () => openSearch();
     const gs = document.getElementById('guide-search-btn');

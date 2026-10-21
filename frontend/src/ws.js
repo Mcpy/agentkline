@@ -5,8 +5,16 @@ import { log } from './log.js';
 import { renderBoardTabs, renderTimeframeTabs, switchBoard, switchTimeframe, refreshIntervalOptions } from './ui.js';
 import { renderChart, applyDataUpdate, applyPrependUpdate, updateIndicatorSeries, renderSubplots, captureSnapshot, setVisibleTimeRange , applyQuoteTick, refreshIndicatorBar } from './render.js';
 import { refreshSearch } from './search.js';
+import { syncResultsForScene, clearResultsScene, onResultEvent } from './results.js';
+import { noteWs, addActivity } from './activity.js';
+import { updateWorkbenchStatus } from './workbench.js';
 // P3：native 双源退役 —— 指标增删改一律走 emit 组差量（syncEmitGroups / updateIndicatorSeries）
-import { groupKeyOfInstance, remountGroupByKey } from './vela_adapter.js';
+import { groupKeyOfInstance, remountGroupByKey, forceRemountInstance } from './vela_adapter.js';
+
+// 指标库面板打开时也要跟随实例增删（否则新加实例后卡片/「已添加」要关掉重开才更新）
+function _notifyIndicatorsChanged() {
+    try { window.dispatchEvent(new CustomEvent('ak:indicators-changed')); } catch (e) {}
+}
 
     // ============================================================
     // WebSocket（v0.4 标准信封 {v,type,seq,ts,payload} 硬切）
@@ -18,8 +26,8 @@ import { groupKeyOfInstance, remountGroupByKey } from './vela_adapter.js';
         state.ws = new WebSocket(wsUrl);
 
         state.ws.onopen = () => {
-            document.getElementById('ws-status').className = 'connected';
-            document.getElementById('ws-status').textContent = '● ' + t('bar.connected');
+            updateWorkbenchStatus();
+            addActivity('system', t('act.connected'));
             log('ws', t('ws.connected_log'));
             // v0.4.2 C：重连韧性——重连后主动全量拉雷达（断线期间增删/价格一次补齐）
             if (state.watchHooks && state.watchHooks.resync) {
@@ -28,8 +36,8 @@ import { groupKeyOfInstance, remountGroupByKey } from './vela_adapter.js';
         };
 
         state.ws.onclose = () => {
-            document.getElementById('ws-status').className = 'disconnected';
-            document.getElementById('ws-status').textContent = '● ' + t('bar.disconnected');
+            updateWorkbenchStatus();
+            addActivity('error', t('act.disconnected'));
             log('ws', t('ws.reconnect_log'));
             setTimeout(connectWebSocket, 5000);
         };
@@ -54,6 +62,7 @@ import { groupKeyOfInstance, remountGroupByKey } from './vela_adapter.js';
     }
 
     function handleWsMessage(msg) {
+        noteWs(msg);
         switch (msg.type) {
             case 'init':
                 handleInit(msg);
@@ -78,6 +87,7 @@ import { groupKeyOfInstance, remountGroupByKey } from './vela_adapter.js';
                     if (app.length || upd.length) applyDataUpdate();    // tick 路径（push+reEmit）
                 }
                 log('ws', `ohlcv_update: ${msg.board_id}/${msg.timeframe} (+${(msg.prepended || []).length}/~${(msg.appended || []).length + (msg.updated || []).length})`);
+                if (msg.board_id === state.currentBoard) updateWorkbenchStatus();
                 break;
             case 'indicator_add':
             case 'indicator_update':
@@ -97,8 +107,11 @@ import { groupKeyOfInstance, remountGroupByKey } from './vela_adapter.js';
                     // P3 单源：新增=挂载该实例的 emit 组（零整图重建）；更新=按结构/样式/数值分级重发。
                     //   隐藏的实例不挂载（组差量按 state.visibility 判定），广播回流幂等。
                     updateIndicatorSeries(msg.inst_id);
+                    // 新增是结构事件：强制重挂载（空副图先挂载 ≠ 数据/标题已就绪）
+                    if (msg.type === 'indicator_add') forceRemountInstance(msg.inst_id);
                     // 新增 / 改名 → 刷芯片（改名不刷 = 芯片留旧名，此前要刷新页面才更新）
                     if (msg.type === 'indicator_add' || prevName !== inst.display_name) refreshIndicatorBar();
+                    if (msg.type === 'indicator_add') _notifyIndicatorsChanged();
                 }
                 log('ws', `${msg.type}: ${msg.inst_id}`);
                 break;
@@ -110,6 +123,7 @@ import { groupKeyOfInstance, remountGroupByKey } from './vela_adapter.js';
                     renderSubplots();                             // 组差量：卸载该实例的组 / 删空副图 pane
                     if (wasSubplot) remountGroupByKey(gk);        // 副图内少一条 → emit 补丁不重绘，重挂载
                     refreshIndicatorBar();
+                    _notifyIndicatorsChanged();
                 }
                 log('ws', `indicator_remove: ${msg.inst_id}`);
                 break;
@@ -152,6 +166,7 @@ import { groupKeyOfInstance, remountGroupByKey } from './vela_adapter.js';
                     // 删光 = 全白户：清当前视图数据 → renderChart 落引导页（不留旧K线残影）
                     state.currentBoard = null;
                     state.currentTimeframe = null;
+                    clearResultsScene();
                     applyState({});
                     renderBoardTabs();
                     renderTimeframeTabs();
@@ -176,6 +191,7 @@ import { groupKeyOfInstance, remountGroupByKey } from './vela_adapter.js';
                 }
                 state.currentBoard = msg.board_id;
                 if (msg.timeframe) state.currentTimeframe = msg.timeframe;
+                clearResultsScene();
                 if (msg.state) {
                     applyState(msg.state);
                 }
@@ -183,6 +199,8 @@ import { groupKeyOfInstance, remountGroupByKey } from './vela_adapter.js';
                 renderTimeframeTabs();
                 renderChart();
                 refreshIntervalOptions();
+                updateWorkbenchStatus();
+                syncResultsForScene();
                 log('ws', `board_switch: ${msg.board_id}`);
                 break;
             case 'board_locked':
@@ -218,11 +236,14 @@ import { groupKeyOfInstance, remountGroupByKey } from './vela_adapter.js';
             case 'timeframe_switch':
                 if (msg.board_id === state.currentBoard) {
                     state.currentTimeframe = msg.timeframe;
+                    clearResultsScene();
                     if (msg.state) {
                         applyState(msg.state);
                     }
                     renderTimeframeTabs();
                     renderChart();
+                    updateWorkbenchStatus();
+                    syncResultsForScene();
                 }
                 log('ws', `timeframe_switch: ${msg.board_id}/${msg.timeframe}`);
                 break;
@@ -239,6 +260,9 @@ import { groupKeyOfInstance, remountGroupByKey } from './vela_adapter.js';
                 if (msg.board_id === state.currentBoard && msg.timeframe === state.currentTimeframe) {
                     state.subplots[msg.name] = { name: msg.name, height: msg.height, title: msg.title };
                     renderSubplots();
+                    // indicator_add 可能先到：副图就绪后按当前 state 再强挂一次，保证标题/数据
+                    const host = Object.entries(state.indicators || {}).find(([, i]) => i.subplot === msg.name);
+                    if (host) forceRemountInstance(host[0]);
                 }
                 log('ws', `subplot_create: ${msg.name}`);
                 break;
@@ -268,6 +292,11 @@ case 'subplot_remove':
             case 'quote':
                 if (msg.board_id === state.currentBoard) applyQuoteTick(msg);
                 break;
+            case 'result_created':
+            case 'result_updated':
+            case 'result_deleted':
+                onResultEvent(msg);
+                break;
             case 'pong':
                 break;
             default:
@@ -276,6 +305,7 @@ case 'subplot_remove':
     }
 
     function handleInit(msg) {
+        clearResultsScene();
         state.boards = msg.boards || [];
         state.currentBoard = msg.board_id;
         state.currentTimeframe = msg.timeframe;
@@ -287,6 +317,8 @@ case 'subplot_remove':
         renderTimeframeTabs();
         renderChart();
         refreshIntervalOptions();
+        updateWorkbenchStatus();
+        syncResultsForScene();
         log('info', t('ws.init_done', {b: state.currentBoard, tf: state.currentTimeframe}));
     }
 

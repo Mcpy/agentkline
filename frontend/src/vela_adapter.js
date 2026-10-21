@@ -11,13 +11,13 @@
 // 注意事项锚点：§10-①..⑭ + 附二（深拷贝/事件缺/双格式读/slice(8)/ctx.id 等）。
 // ============================================================================
 import { state } from './state.js';
+import { t } from './i18n.js';
 import { getLayerPref, setLayerPref, getLayerInputs, setLayerInputs } from './chart_layers_prefs.js';
 
 const V = window.Vela;
 
 // ---- 常量与工具 ----
 const MAIN_H = 450;          // 主图固定像素高（0.4 产品承诺）
-const VOL_H = 110;           // 成交量常驻窗格
 const VOL_UP = 'rgba(38,166,154,0.6)';    // 0.4 成交量涨跌色（P2 起经原生 volume 输入项配置）
 const VOL_DOWN = 'rgba(239,83,80,0.6)';
 const ms = (bar) => bar.timestamp;                       // state.ohlcv.timestamp 已是 ms
@@ -81,6 +81,17 @@ const _emitGroups = {};        // groupKey#ctxId → ctx
 // ============================================================================
 const OV = 'ak-ov::';
 const SUB = 'ak-sub::';
+const RES = 'ak-result';   // v0.6.0：结果净值组（一个组容纳全部可见结果，一组一个 pane）
+const RES_MARK = 'ak-result-mk';   // 结果交易点：主图 overlay 的 labels（not 底部 marks 泳道）
+let _resultHandleId = null;        // RES handle id（pane.indicators 只暴露 {id,title}，用 id 定位 pane）
+const RESULT_PALETTE = ['#26c6da', '#ffb74d', '#ba68c8', '#64b5f6',
+                        '#ffd54f', '#4db6ac', '#f06292', '#9575cd'];
+export function resultColor(id) {
+    const s0 = String(id || '');
+    let h = 0;
+    for (let i = 0; i < s0.length; i++) h = (h * 31 + s0.charCodeAt(i)) >>> 0;
+    return RESULT_PALETTE[h % RESULT_PALETTE.length];
+}
 function groupOfInstance(instId, ind) { return (ind && ind.subplot) ? SUB + ind.subplot : OV + instId; }
 function _groupSeries(groupKey) {
     const series = [];
@@ -329,17 +340,131 @@ function _ensureType(type, title, paneHint, overlay, legend) {
         type, title, paneHint, overlay, legend, multiInstance: true,
         inputsSchema: () => [], defaultInputs: () => ({}),
         create: () => ({
-            start(ctx) { _emitGroups[type + '#' + ctx.id] = ctx; _emitOne(type, ctx); ctx.setStatus('live'); },
-            onBars() {}, setInputs() {}, suspend() {}, resume() {},
+            start(ctx) {
+                _emitGroups[type + '#' + ctx.id] = ctx;
+                if (type === RES) _resultBarsSig = _barsSig();
+                _emitOne(type, ctx);
+                ctx.setStatus('live');
+            },
+            onBars() { if (type === RES) _onResultBars(); },
+            setInputs() {}, suspend() {}, resume() {},
             stop() { Object.keys(_emitGroups).forEach(k => { if (k.startsWith(type + '#')) delete _emitGroups[k]; }); },
         }),
     });
     return true;
 }
+// ---- v0.6.0 结果净值：一个 RES 组、多条 series；多结果按共同起点归一 100 ----
+function _resultDetail(id) { return (state.resultDetail || {})[id] || null; }
+
+// 结果交易点：Vela 原生 labels（abovebar/belowbar + 点形状 + 文本），
+// 不改 chart.marks 的底部泳道；label 的 tooltip 带 reason。
+function _resultMarkerSeries() {
+    if (state.resultMarksOn === false) return { series: [], labels: [], fills: [], priceLines: [], polylines: [] };
+    const d = _resultDetail(state.resultActive);
+    const trades = (d && Array.isArray(d.trades)) ? d.trades : [];
+    if (!trades.length) return { series: [], labels: [], fills: [], priceLines: [], polylines: [] };
+    const labels = [];
+    trades.forEach((tr, i) => {
+        const pnl = Number(tr.pnl);
+        const win = !Number.isFinite(pnl) || pnl >= 0;
+        const color = win ? '#26a69a' : '#ef5350';
+        if (tr.entry_time) labels.push({
+            id: `res-l-${i}-in`, xloc: 'bar_time', x: Number(tr.entry_time),
+            yloc: 'belowbar', text: 'B', color, size: 'small', style: 'arrowup',
+            tooltip: String(tr.entry_reason || ''),
+        });
+        if (tr.exit_time) labels.push({
+            id: `res-l-${i}-out`, xloc: 'bar_time', x: Number(tr.exit_time),
+            yloc: 'abovebar', text: 'S', color, size: 'small', style: 'arrowdown',
+            tooltip: String(tr.exit_reason || ''),
+        });
+    });
+    if (!labels.length) return { series: [], labels: [], fills: [], priceLines: [], polylines: [] };
+    return { series: [], labels, fills: [], priceLines: [], polylines: [] };
+}
+
+// v0.6.0 结果净值：一个 RES 组、多条 series；多结果按共同起点归一 100。
+// 关键（0.6.0 修正）：Vela 的 series 按「一根 bar 一个点」逐位绘制，points 必须与
+// 当前 bars 等长；只给结果窗口内的点会让整条线错位/消失。这里对当前 bars 逐根取点，
+// 窗口外补 null（前置=结果开始前，后置=结果结束后），左划回补/实时追加都能保持对齐。
+let _resultBarsSig = '';
+function _barsSig() {
+    const b = state.ohlcv || [];
+    const f = b[0], l = b[b.length - 1];
+    return `${b.length}|${f ? f.timestamp : 0}|${l ? l.timestamp : 0}`;
+}
+function _onResultBars(force) {
+    if (!chart) return;
+    const sig = _barsSig();
+    if (!force && sig === _resultBarsSig) return;
+    _resultBarsSig = sig;
+    reEmit(RES);   // 补丁替换 points 数组；Vela updateIndicator 会 invalidate 重绘
+}
+
+function _resultSeries() {
+    const ids = (state.resultVisible || []).filter(id => {
+        const d = _resultDetail(id);
+        return d && d.equity && (d.equity.times || []).length;
+    });
+    const series = [], priceLines = [];
+    if (!ids.length) return { series, fills: [], priceLines, polylines: [] };
+    const bars = state.ohlcv || [];
+    if (!bars.length) return { series, fills: [], priceLines, polylines: [] };
+    const barTimes = bars.map(b => b.timestamp);
+    const multi = ids.length > 1;
+    let common = -Infinity;
+    if (multi) ids.forEach(id => {
+        const t = _resultDetail(id).equity.times;
+        if (t.length) common = Math.max(common, t[0]);
+    });
+    ids.forEach(id => {
+        const d = _resultDetail(id), eq = d.equity, meta = d.summary || {};
+        const times = eq.times, vals = eq.values;
+        if (!times.length) return;
+        const first = times[0], last = times[times.length - 1];
+        const startTime = multi ? Math.max(common, first) : first;
+        if (startTime > last) return;
+        // 归一基线：共同起点（或起点前最后一根）的净值，保证多结果都从 100 起
+        let base = null;
+        for (let k = 0; k < times.length; k++) {
+            if (times[k] <= startTime) base = Number(vals[k]); else break;
+        }
+        if (!Number.isFinite(base) || base === 0) base = 1;
+        const points = new Array(barTimes.length);
+        let j = 0;
+        for (let i = 0; i < barTimes.length; i++) {
+            const bt = barTimes[i];
+            while (j + 1 < times.length && times[j + 1] <= bt) j++;
+            const inWin = bt >= startTime && bt <= last;
+            const v = inWin ? Number(vals[j]) : NaN;
+            points[i] = { time: bt, value: Number.isFinite(v) ? (multi ? (v / base) * 100 : v) : null };
+        }
+        series.push({
+            id: 'res:' + id,
+            title: meta.display_name || id,
+            paneId: '', kind: 'line', points, visible: true,
+            style: { color: resultColor(id), width: id === state.resultActive ? 2 : 1.2,
+                     lineStyle: 'solid' },
+        });
+    });
+    const activeId = ids.includes(state.resultActive) ? state.resultActive : ids[0];
+    const a = _resultDetail(activeId);
+    const baseline = multi ? 100
+        : Number(((a && a.summary && a.summary.run) || {}).initial_cash)
+          || Number((a && a.equity && a.equity.values && a.equity.values[0]) || 0);
+    if (Number.isFinite(baseline) && baseline !== 0) {
+        priceLines.push({ id: 'res-base', paneId: '', price: baseline,
+                          title: multi ? '100' : t('result.baseline'),
+                          color: '#787b86', lineStyle: 'dashed', width: 1 });
+    }
+    return { series, fills: [], priceLines, polylines: [] };
+}
 function _emitOne(groupKey, ctx) {
-    const g = _groupSeries(groupKey);
+    const g = (groupKey === RES) ? _resultSeries()
+        : (groupKey === RES_MARK) ? _resultMarkerSeries()
+        : _groupSeries(groupKey);
     ctx.emit({ series: g.series, fills: g.fills, priceLines: g.priceLines,
-               polylines: g.polylines });
+               polylines: g.polylines, labels: g.labels || [] });
 }
 function reEmit(groupKey) {
     Object.entries(_emitGroups).forEach(([k, ctx]) => { if (k.startsWith(groupKey + '#')) _emitOne(groupKey, ctx); });
@@ -359,6 +484,7 @@ export function legacySeriesCount(instId) { return _emitLines[instId] || 0; }
 let chart = null;
 let _chartReady = false;
 let _vpvrOn = false;        // v0.5.4：按板记住的 VPVR 原生图层显隐
+let _volOn = true;           // v0.6.0：成交量 overlay 显隐（按板记住，默认开）
 let _vpvrHandle = null;
 let _vpvrLegendObs = null;  // Vela 原生 legend 行（VRVP）隐藏观察器
 
@@ -488,7 +614,8 @@ function _destroyChart() {
     if (chart) { try { chart.destroy(); } catch (e) {} }
     chart = null;
     _chartReady = false;
-    _volMoved = false;
+    _marksGroupDefined = false;
+    _resultHandleId = null;
     Object.keys(_emitGroups).forEach(k => delete _emitGroups[k]);
 }
 
@@ -552,6 +679,18 @@ export function setVpvrEnabled(on) {
     _syncVpvrLayer();
 }
 
+// ---- v0.6.0 成交量 overlay 显隐（按板记住，默认开） ----
+export function isVolumeEnabled() { return _volOn; }
+export function setVolumeEnabled(on) {
+    _volOn = !!on;
+    setLayerPref(state.currentBoard, 'volume', _volOn);
+    if (!chart || !_chartReady) return;
+    const h = (chart.indicators() || []).find(x => x.nativeType === 'volume');
+    if (h && h.setVisible) {
+        try { h.setVisible(_volOn); } catch (e) { console.warn('[ak] volume toggle failed:', e && e.message); }
+    }
+}
+
 function _syncVpvrLayer() {
     if (!chart || !_chartReady) return;   // 建图完成后 ready 回调里会再同步
     try {
@@ -581,36 +720,29 @@ function _syncVpvrLayer() {
 // 容器总高 = Σ 权重（= Σ 目标像素，超出由 .chart-container wheel 翻 = 0.4 滚动承诺）；
 // volume 常驻顶位（0.4 语义）。删除：OVERHEAD 校准 / _relayoutPanes legacy 分支 / 双路径。
 // ============================================================================
-const _isVolPane = p => (p.indicators || []).some(i => i.nativeType === 'volume' || (i.nativeType || i.title) === 'ak-vol' || i.title === 'Volume');
 function _paneWeight(p) {
     if (p.id === 'price') return MAIN_H;
-    if (_isVolPane(p)) return VOL_H;
+    if (_resultHandleId && (p.indicators || []).some(i => i.id === _resultHandleId)) return 140;
     const t = ((p.indicators || []).map(i => i.nativeType || '').find(n => n.startsWith('ak-sub::'))) || '';
     const sp = t ? (state.subplots || {})[t.slice(8)] : null;
     return (sp && sp.height) || 150;
 }
 let _layoutRaf = 0;
-let _volMoved = false;   // 每图一次：volume 移入独立 pane
 function _layoutPanes() {
     if (_layoutRaf) return;
     _layoutRaf = requestAnimationFrame(() => { _layoutRaf = 0; _layoutPanesNow(); });
 }
 function _layoutPanesNow() {
     if (!chart) return;
-    // P3：原生 volume 默认 overlay 在 price pane（0.8.4 paneHint:'price'）；裁决=独立顶位 pane。
-    // 自动挂载时机可能晚于 ready → 在布局路径补捉 moveTo({newPane:true})（官方入口，每图一次）。
-    if (!_volMoved) {
-        const vh = (chart.indicators() || []).find(h => h.nativeType === 'volume');
-        if (vh && vh.moveTo) {
-            try { vh.moveTo({ newPane: true }); _volMoved = true; } catch (e) { console.warn('[ak] volume moveTo newPane failed:', e && e.message); }
-        }
-    }
     let pl = chart.panes.list() || [];
-    const volPane = pl.find(_isVolPane);
-    if (volPane) {
-        let g = 0;
-        while ((chart.panes.list() || []).findIndex(p => p.id === volPane.id) > 1 && g++ < 8) {
-            try { chart.panes.move(volPane.id, 'up'); } catch (e) { break; }
+    const resPane = _resultHandleId ? pl.find(p => (p.indicators || []).some(i => i.id === _resultHandleId)) : null;
+    // v0.6.0：成交量回主图 overlay；净值 pane 放最底部（价格 → 指标 → 净值），
+    // 让 RSI 等副图紧贴价格辅助判断交易，净值作为结果收尾。
+    if (resPane) {
+        let guard = 0;
+        const lastIdx = () => (chart.panes.list() || []).length - 1;
+        while ((chart.panes.list() || []).findIndex(p => p.id === resPane.id) < lastIdx() && guard++ < 12) {
+            try { chart.panes.move(resPane.id, 'down'); } catch (e) { break; }
         }
     }
     pl = chart.panes.list() || [];
@@ -631,38 +763,74 @@ function _afterNativeChange() {
     _lastPaneCount = n;
     setTimeout(() => { if (chart) { try { chart.resize(); } catch (e) {} } }, 40);
 }
+// v0.6.0：界面时区（/api/config ui.timezone）→ Vela 时间轴；browser = 跟随本机。
+function _uiTz() {
+    const raw = state.uiTimezone;
+    if (raw && raw !== 'browser') {
+        try { new Intl.DateTimeFormat('en-US', { timeZone: raw }).format(new Date()); return raw; } catch (e) {}
+    }
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (e) { return 'UTC'; }
+}
 export function renderChartCore() {
     _emitLines = {};                               // P2：emit 注册表随重建清空
     _styleSig = {};                                // V1：样式签名随重建清空（重建后首帧不算「改样式」）
     _destroyChart();                               // P3：组类型由 syncEmitGroups 按需注册（title 跟随显示名）
     _vpvrOn = getLayerPref(state.currentBoard, 'vpvr');
+    _volOn = getLayerPref(state.currentBoard, 'volume', true);   // 成交量默认开
     const container = document.getElementById('main-chart');
     if (!container) return;
     container.innerHTML = '';
     chart = new V.Vela(container, {
         symbol: chartSymbol(),
         timeframe: state.currentTimeframe || '1d',
-        theme: 'dark', live: true, volume: true,   // P2：成交量交原生 volume 指标（独立 pane，store 驱动恒对齐）
+        theme: 'dark', live: true, volume: true,   // P2：原生 volume overlay 在价格 pane（与 Vela 演示一致）
         currentPriceLine: true,            // 原生最新价轴标签（替代 0.4 自绘吸附标签）
         drawings: true,                    // 0.5.2：Vela 原生工具栏（7 组 79 工具，44px 停靠）
     }, { dataFeed: feed });
+    // 0.6.0：图表时间轴跟随界面时区（与 OHLC 读数/状态条一致；不依赖系统时区）
+    try { chart.renderer.applyConfig({ timeScale: { timezone: _uiTz() } }); } catch (e) { console.warn('[ak] timezone apply failed', e); }
     // 探针/控制台把手（e2e 与人工排障；不参与业务逻辑）
-    try { window.__ak = { chart, drawings: () => (chart.drawings ? chart.drawings.all() : []) }; } catch (e) {}
+    try { window.__ak = { chart, drawings: () => (chart.drawings ? chart.drawings.all() : []), resultSeries: () => _resultSeries(), resultMarkers: () => _resultMarkerSeries() }; } catch (e) {}
     try { chart.renderer.set('attribution', false); } catch (e) {}   // 归因甲案（R6-2）
     _bindLastPricePin();   // v0.5.4：越界贴边标签包在原生 chrome 绘制里
     chart.on('indicator:inputs', () => _saveVpvrInputs());
+    // 新增/移动 pane 后，若净值不在最后，立刻重排（新副图 pane 常晚于 syncEmitGroups 创建）
+    chart.on('pane:changed', () => {
+        if (!chart || !_resultHandleId) return;
+        const pl = chart.panes.list() || [];
+        const idx = pl.findIndex(p => (p.indicators || []).some(i => i.id === _resultHandleId));
+        if (idx >= 0 && idx < pl.length - 1) _layoutPanes();
+    });
+    // 原生 volume 图例上的眼睛也会切换显隐：同步 _volOn/偏好/Vol 芯片，避免两处状态打架
+    chart.on('indicator:visibility', (ev) => {
+        try {
+            const h = (chart.indicators() || []).find(x => x.id === (ev && ev.id));
+            if (h && h.nativeType === 'volume') {
+                _volOn = ev.visible !== false;
+                setLayerPref(state.currentBoard, 'volume', _volOn);
+                window.dispatchEvent(new CustomEvent('ak:layer-visibility'));
+            }
+        } catch (e) {}
+    });
     chart.on('viewport:changed', () => _viewportCbs.forEach(cb => cb()));
-    chart.on('history:complete', () => { _backfillActive = false; clearTimeout(_backfillActiveT); });
+    chart.on('history:complete', () => {
+        _backfillActive = false; clearTimeout(_backfillActiveT);
+        // 左划回补后 bars 数组变了：结果线必须按新 bars 重铺（否则 series 与蜡烛错位）
+        _onResultBars(true);
+        // 状态条 bars 数同步（Vela 原生回补不走 WS，需主动通知）
+        try { window.dispatchEvent(new CustomEvent('ak:bars-changed')); } catch (e) {}
+    });
     chart.on('history:progress', () => _markBackfillActive());
     _bindCrosshairBridge(chart);
     chart.ready().then(() => {
         if (!chart) return;
         _chartReady = true;
-        // P2/P3：原生 volume 由构造选项自动挂载（默认 overlay 在 price pane，0.8.4 paneHint:'price'）；
-        // 裁决=独立顶位 pane → moveTo({newPane:true}) 官方入口移入自有 pane，再配 0.4 涨跌色。
+        // P2/P3：原生 volume 构造选项自动挂载，保持 overlay 在价格 pane（与 Vela 演示一致）；
+        // 配 0.4 涨跌色 + 按板显隐。
         try {
             const vh = (chart.indicators() || []).find(h => h.nativeType === 'volume');
             if (vh && vh.setInputs) vh.setInputs({ upColor: VOL_UP, downColor: VOL_DOWN });
+            if (vh && vh.setVisible) vh.setVisible(_volOn);
         } catch (e) {}
         syncEmitGroups();         // P3：全部指标（叠加+副图）单源 emit 组挂载 + 布局
         _syncVpvrLayer();
@@ -670,6 +838,7 @@ export function renderChartCore() {
         _showLatest(200);
         syncDrawings();
         syncMarks();
+        syncResultLayer();
         bindDrawingWriteback();
         bindDrawPrefs();
         bindToolbarSticky();
@@ -709,17 +878,63 @@ export function syncEmitGroups() {
         try { h.remove && h.remove(); } catch (e) {}
         Object.keys(_emitGroups).forEach(k => { if (k.startsWith(t + '#')) delete _emitGroups[k]; });
     });
+    let added = false;
     want.forEach(w => {
         const mounted = liveTypes.includes(w.type);
         const reregistered = _ensureType(w.type, w.title, w.paneHint, w.overlay, w.legend);
-        if (!mounted) { try { chart.addNativeIndicator(w.type); } catch (e) {} return; }
+        if (!mounted) { try { chart.addNativeIndicator(w.type); } catch (e) {} added = true; return; }
         if (reregistered) { remountGroup(w.type); remounted.push(w.type); }
     });
     _layoutPanes();
+    // 新副图 pane 可能在本帧 after layout 才由 Vela 创建 → 结果 pane 会被追加到它上面。
+    // 延迟再排一次，保证「净值永远最后」在新增副图后也成立（刷新才对的 bug）。
+    if (added) setTimeout(() => { if (chart) _layoutPanes(); }, 250);
     return remounted;
 }
 // 兼容名：render.js 的 renderSubplots() 调用点（副图+叠加组同一入口）
 export function syncSubplotsCore() { syncEmitGroups(); }
+
+// ---- v0.6.0 结果图层：可见结果 = 一个 RES 组（零结果=卸载整组，pane 随之消失） ----
+export function syncResultLayer() {
+    if (!chart || !_chartReady) return;
+    const ids = (state.resultVisible || []).filter(id => {
+        const d = _resultDetail(id);
+        return d && d.equity && (d.equity.times || []).length;
+    });
+    const live = (chart.indicators() || []).find(h => (h.nativeType || '') === RES);
+    if (!ids.length) {
+        if (live) { try { live.remove(); } catch (e) {} }
+        Object.keys(_emitGroups).forEach(k => { if (k.startsWith(RES + '#')) delete _emitGroups[k]; });
+    } else {
+        _ensureType(RES, t('result.pane_title'), 'new', false, true);
+        if (!live) {
+            try { chart.addNativeIndicator(RES); } catch (e) { console.warn('[ak] result add:', e.message); }
+        } else {
+            // emit 补丁不触发 native 重绘（V1 定论）：结果换数据必须重挂载，否则轴/线留在旧值
+            remountGroup(RES);
+        }
+        const h = (chart.indicators() || []).find(x => (x.nativeType || '') === RES);
+        _resultHandleId = h ? h.id : null;
+    }
+    // 交易点 overlay（只跟 active 结果；叠加在主图，不建 pane）
+    const mkLive = (chart.indicators() || []).find(h => (h.nativeType || '') === RES_MARK);
+    const d = _resultDetail(state.resultActive);
+    const wantMk = ids.length > 0 && state.resultMarksOn !== false && d
+        && Array.isArray(d.trades) && d.trades.length > 0;
+    if (!wantMk) {
+        if (mkLive) { try { mkLive.remove(); } catch (e) {} }
+        Object.keys(_emitGroups).forEach(k => { if (k.startsWith(RES_MARK + '#')) delete _emitGroups[k]; });
+    } else {
+        _ensureType(RES_MARK, t('result.trades_title'), 'price', true, false);
+        if (!mkLive) {
+            try { chart.addNativeIndicator(RES_MARK); } catch (e) { console.warn('[ak] result marks:', e.message); }
+        } else {
+            remountGroup(RES_MARK);
+        }
+    }
+    _layoutPanes();
+}
+export function refreshResultLayer() { syncResultLayer(); syncMarks(); _layoutPanes(); }
 // 重挂载一个组：emit 补丁不触发 native 渲染器重绘（V1 定论）→ remove+add，mount 必然重绘。
 //   remove+add 同一同步帧内完成，Vela 批渲染 ⇒ 无感知闪烁。
 function remountGroup(groupKey) {
@@ -738,6 +953,34 @@ function _showLatest(n) {
     const to = bars[bars.length - 1].timestamp + 2 * _tfMs(state.currentTimeframe);
     try { chart.setVisibleRange({ from, to }); } catch (e) {}
 }
+// 概览/图层条上的「最新」：回到初始的可视区间（最近 200 根 + 右侧留白）
+export function scrollToLatest(n = 200) { _showLatest(n); }
+
+// 概览里点某笔交易：把可视区间挪到这笔的开/平仓之间。
+// 两端各留 padBars 根；窗口不足 40 根按 40 根居中，避免一笔 1 根的交易把图放到最大。
+export function focusTradeRange(entryMs, exitMs, padBars = 4) {
+    const bars = state.ohlcv || [];
+    if (!chart || !bars.length) return false;
+    const step = _tfMs(state.currentTimeframe);
+    let from = Number(entryMs), to = Number(exitMs);
+    if (!Number.isFinite(from)) return false;
+    if (!Number.isFinite(to) || to < from) to = from;
+    const first = bars[0].timestamp, last = bars[bars.length - 1].timestamp;
+    // 交易发生在已载入 K 线之外（结果窗口比当前历史更早/更晚）→ 交给调用方提示
+    if (to < first || from > last) return false;
+    from -= padBars * step;
+    to += padBars * step;
+    const MIN = 40 * step;
+    if (to - from < MIN) {
+        const mid = (from + to) / 2;
+        from = mid - MIN / 2;
+        to = mid + MIN / 2;
+    }
+    if (from < first - step) { to += (first - step) - from; from = first - step; }
+    if (to > last + 2 * step) { from -= to - (last + 2 * step); to = last + 2 * step; }
+    try { chart.setVisibleRange({ from, to }); return true; } catch (e) { return false; }
+}
+
 export function tfMs(tf) { return _tfMs(tf); }
 function _tfMs(tf) {
     const m = { '1m': 60e3, '5m': 300e3, '15m': 900e3, '30m': 1800e3, '1h': 3600e3, '4h': 14400e3, '1d': 86400e3, '1w': 604800e3 };
@@ -761,6 +1004,17 @@ export function applyDataUpdateCore() {
 export function groupKeyOfInstance(instId) { return groupOfInstance(instId, (state.indicators || {})[instId]); }
 // ws.js 用：按组键强制重挂载（emit 补丁不重绘 → 组内少了一条也要重挂载）
 export function remountGroupByKey(groupKey) { remountGroup(groupKey); }
+// v0.6.0：新增指标/副图是结构事件——强制按当前 state 重注册 title 并重挂载。
+//   空副图（subplot_create）可能先挂载，随后 indicator_add 只做 emit 补丁不会改 title/不重绘；
+//   刷新才恢复的「average_true_range + 空白」即此路径。
+export function forceRemountInstance(instId) {
+    if (!chart) return;
+    const ind = (state.indicators || {})[instId];
+    if (!ind) return;
+    const gk = groupOfInstance(instId, ind);
+    syncEmitGroups();
+    if ((chart.indicators() || []).some(h => h.nativeType === gk)) remountGroup(gk);
+}
 export function remountIndicator(instId) {
     if (!chart) return;
     const ind = (state.indicators || {})[instId];
@@ -841,7 +1095,16 @@ export function updateIndicatorSeriesCore(instId) {
     const sig = _styleSigOf(ind);
     const prev = _styleSig[instId];
     _styleSig[instId] = sig;
-    if (legacySeriesCount(instId) !== want) { remountGroup(gk); return; }   // 结构变化（线数增减）
+    if (legacySeriesCount(instId) !== want) {
+        // 结构变化（新增/删除线）：先走组差量同步，让 _ensureType 用最新 display_name 重注册，
+        // 再按需强制重挂载。直接 remountGroup 会沿用「空副图先挂载时的原始 script 名」，
+        // 表现为首次添加图例显示 average_true_range、删后重加空白。
+        const remounted = syncEmitGroups() || [];
+        if (!remounted.includes(gk) && (chart.indicators() || []).some(h => h.nativeType === gk)) {
+            remountGroup(gk);
+        }
+        return;
+    }
     if (prev !== undefined && prev !== sig) {
         // 视觉签名变化：改名 → 组差量同步（重注册 title 时内部已重挂载）；纯改样式 → 直接重挂载
         const remounted = syncEmitGroups() || [];

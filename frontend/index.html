@@ -13,21 +13,26 @@
         <span id="board-add" class="board-add" data-i18n-title="bar.add_board_title" title="增加画板：搜索标的，一步建板即锁">＋</span>
         <span class="bar-label" data-i18n="bar.boards">画板:</span>
         <div class="board-tabs" id="board-tabs"></div>
-        <div class="status-bar">
-            <span id="ws-status" class="disconnected">● 未连接</span>
-            <span id="data-info" style="margin-left: 12px;"></span>
-        </div>
     </div>
 
-    <!-- 周期栏（独立一行） -->
-    <div class="timeframe-bar">
-        <span class="bar-label" data-i18n="bar.tfs">周期:</span>
-        <div class="timeframe-tabs" id="timeframe-tabs"></div>
+    <!-- 结果栏（v0.6.0）：占用原周期栏位置；有结果才出现 -->
+    <div class="result-bar" id="result-bar">
+        <span class="label" data-i18n="result.label">结果:</span>
+        <button class="res-add" id="result-add" type="button"
+                data-i18n="result.add_bt" data-i18n-title="result.backtest_soon">+回测</button>
+        <div class="result-chips" id="result-chips"></div>
+        <div class="result-stats" id="result-stats"></div>
+        <button class="result-detail" id="result-detail" data-i18n="result.detail">详情</button>
     </div>
 
     <!-- 指标栏（显隐切换） -->
     <div class="indicator-bar" id="indicator-bar">
         <span class="label" data-i18n="bar.indicators">指标:</span>
+    </div>
+
+    <!-- 周期：占位容器；图表就绪后 tabs 移入 OHLC 条带右侧（Vol 左边） -->
+    <div class="timeframe-bar" id="timeframe-bar" style="display:none;">
+        <div class="timeframe-tabs" id="timeframe-tabs"></div>
     </div>
 
     <!-- 主区域：图表（画线工具栏 = Vela 原生，停靠在 #main-chart 内） -->
@@ -85,13 +90,23 @@
     <!-- Toast（撞锁改道等） -->
     <div id="toast-wrap" class="toast-wrap"></div>
 
-    <!-- 日志面板（默认折叠） -->
-    <div class="log-panel collapsed" id="log-panel">
-        <div class="log-header">
-            <span data-i18n="bar.log">📋 日志</span>
-            <span style="margin-left: auto;" id="log-toggle">▲</span>
+    <!-- 底部工作坞（v0.6.0）：概览/动态/调试；原始日志降级到「调试」页 -->
+    <div class="workbench collapsed" id="workbench">
+        <div class="wb-resize" id="wb-resize" data-i18n-title="wb.resize_hint"></div>
+        <div class="wb-head" id="wb-head">
+            <div class="wb-tabs" id="wb-tabs">
+                <button class="wb-tab" data-tab="overview" data-i18n="result.overview">概览</button>
+                <button class="wb-tab" data-tab="activity" data-i18n="result.activity">动态</button>
+                <button class="wb-tab wb-tab-debug" data-tab="debug" data-i18n="result.debug">调试</button>
+            </div>
+            <div class="wb-status" id="wb-status">—</div>
+            <span class="wb-toggle" id="wb-toggle">▲</span>
         </div>
-        <div class="log-content collapsed" id="log-content"></div>
+        <div class="wb-body" id="wb-body">
+            <div class="wb-pane" data-pane="overview" id="wb-overview"></div>
+            <div class="wb-pane" data-pane="activity" id="wb-activity"></div>
+            <div class="wb-pane" data-pane="debug" id="wb-debug"><div class="log-content" id="log-content"></div></div>
+        </div>
     </div>
 
     <script src="/assets/vela.global.min.js"></script>

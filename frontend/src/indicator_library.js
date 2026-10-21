@@ -124,9 +124,13 @@ export async function openIndicatorLibrary(onChange) {
     foot.textContent = t('lib.hint');
     panel.appendChild(foot);
 
+    // 面板开着时，WS 增删实例 → 即时刷新卡片「已添加」/左侧计数（不再要求关闭重开）
+    const onIndicatorsChanged = () => { renderNav(); renderGrid(true); };
+    window.addEventListener('ak:indicators-changed', onIndicatorsChanged);
     const closeModal = () => {
         modal.remove();
         document.removeEventListener('keydown', onKey);
+        window.removeEventListener('ak:indicators-changed', onIndicatorsChanged);
         if (_activeClose === closeModal) _activeClose = null;
     };
     _activeClose = closeModal;

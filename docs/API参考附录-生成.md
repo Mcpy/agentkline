@@ -36,6 +36,11 @@
 | POST | `/api/markers` | Set Markers |
 | GET | `/api/overview` | Overview |
 | GET | `/api/quotes` | Get Quotes |
+| POST | `/api/result` | Import Result |
+| GET | `/api/result/{result_id}` | Get Result |
+| PUT | `/api/result/{result_id}` | Rename Result |
+| DELETE | `/api/result/{result_id}` | Delete Result |
+| GET | `/api/results` | List Results |
 | POST | `/api/run-script` | Run Script |
 | GET | `/api/scripts` | List Scripts |
 | POST | `/api/scripts` | Save Script |
@@ -109,5 +114,10 @@
 | `watchlist_group_remove` | 删除雷达分组，**组内盯盘行一并级联删除**（行不保留，组删行没）；默认组不可删（GROUP_PROTECTED）。只想移走行请先用 watchlist_move。 |
 | `watchlist_move` | 雷达行移组+定位（index=None 追加组尾；拖拽落定调用） |
 | `get_quotes` | 全行 quotes 快照（AI 读盘用）；面板实时走 WS quotes_update |
+| `import_result` | 导入一份回测结果并在画板上展示（外部引擎/脚本算完推上来）。 |
+| `list_results` | 列出结果摘要（不含净值/交易大数组）。按创建时间倒序；可按画板或周期过滤。 |
+| `get_result` | 按需读取一条结果。section=summary（默认，元信息+统计）/equity（净值序列）/trades（平仓交易）/fills（成交）。 |
+| `rename_result` | 给结果改显示名（只改名字，不改内容；结果本身冻结）。返回新名字。 |
+| `delete_result` | 删除一条结果（清理权，不是改写权）。删掉后画板上的净值曲线和交易点一并消失。 |
 | `take_snapshot` | 触发前端截图并返回图片+路径。需有浏览器连着 /ws。 |
 | `get_snapshot` | 读取最新快照（图片+路径）。快照由浏览器截图上传产生。 |

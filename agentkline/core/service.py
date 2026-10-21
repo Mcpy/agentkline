@@ -4,6 +4,7 @@ FastAPI 与 MCP server 共用此层，不依赖任何传输协议。
 推送事件通过 self.notify 回调注入（FastAPI 注入 WS 广播，MCP 可注入自己的通知或置空）。
 """
 import csv
+import hashlib
 import logging
 from bisect import bisect_left, bisect_right
 from datetime import datetime
@@ -13,6 +14,7 @@ from typing import Optional, Callable
 from .state import StateManager
 from .script_engine import ScriptEngine
 from .datasource import DataSourceManager
+from .results import normalize_result, next_result_id, summarize, slice_section
 
 logger = logging.getLogger("agentkline.service")
 
@@ -28,7 +30,7 @@ def _to_ms(v):
 class AgentKlineService:
     """AgentKline 业务核心"""
 
-    VERSION = "0.5.4"
+    VERSION = "0.6.0"
 
     def __init__(self, scripts_dir: str, limits: dict = None):
         limits = limits or {}
@@ -645,6 +647,79 @@ class AgentKlineService:
         self._bc_indicators("indicator_update", board_id, targets, inst)
         return {"status": "ok", "inst_id": inst_id,
                 "display_name": inst.get("display_name") or inst.get("auto_label") or inst_id}
+
+    # ============ 结果实例（v0.6.0） ============
+    def _script_sha(self, ref):
+        """脚本内容哈希（结果可复现指纹）；取不到返回空串。"""
+        try:
+            r = self.script_engine.resolve(ref) if ref else None
+            if not r or not r.get("path"):
+                return ""
+            return hashlib.sha256(open(r["path"], "rb").read()).hexdigest()
+        except Exception:
+            return ""
+
+    def import_result(self, payload):
+        """导入一份外部/引擎结果：校验、补算口径、冻结、广播。"""
+        if not isinstance(payload, dict):
+            return {"error": "RESULT_INVALID: payload 需要 JSON 对象"}
+        board_id = payload.get("board_id") or self.state.current_board_id
+        board = self.state.get_board(board_id)
+        if not board:
+            return {"error": f"Board '{board_id}' not found"}
+        tf = payload.get("timeframe") or board.current_timeframe
+        tf_state = board.get_tf(tf)
+        bars = tf_state.ohlcv if tf_state else []
+        lock = board.source_lock or {}
+        ident = lock.get("identity") or {}
+        out = normalize_result(
+            payload, board_id, tf, bars=bars, version=self.VERSION,
+            source_sha256=self._script_sha(lock.get("script")),
+            symbol=ident.get("symbol"), source_script=lock.get("script") or "")
+        if out.get("error"):
+            return out
+        res = out["result"]
+        res["result_id"] = next_result_id(board.results, res["strategy"]["id"])
+        r = self.state.add_result(board_id, res)
+        if r.get("error"):
+            return r
+        summary = summarize(res)
+        self._bc({"type": "result_created", "board_id": board_id,
+                  "timeframe": tf, "result": summary})
+        return {"status": "ok", "result": summary,
+                "warnings": out.get("warnings") or []}
+
+    def list_results(self, board_id=None, timeframe=None):
+        rows = self.state.list_results(board_id, timeframe)
+        return {"board_id": board_id, "count": len(rows), "results": rows}
+
+    def get_result(self, result_id, section="summary", offset=0, limit=200):
+        res = self.state.get_result(result_id)
+        if not res:
+            return {"error": f"Result '{result_id}' not found"}
+        return slice_section(res, section, offset, limit)
+
+    def rename_result(self, result_id, display_name):
+        r = self.state.rename_result(result_id, display_name)
+        if r.get("error"):
+            return r
+        res = self.state.get_result(result_id)
+        if res:
+            self._bc({"type": "result_updated", "board_id": res["data"]["board"],
+                      "timeframe": res["data"]["timeframe"], "result": summarize(res)})
+        return r
+
+    def delete_result(self, result_id):
+        res = self.state.get_result(result_id)
+        if not res:
+            return {"error": f"Result '{result_id}' not found"}
+        board_id, tf = res["data"]["board"], res["data"]["timeframe"]
+        r = self.state.delete_result(result_id)
+        if r.get("error"):
+            return r
+        self._bc({"type": "result_deleted", "board_id": board_id,
+                  "timeframe": tf, "result_id": result_id})
+        return r
 
     # ============ 划线 drawings（0.5.2：每板一份，showOn 管跨周期） ============
     def add_drawing(self, board_id, timeframe, drawing):

@@ -87,6 +87,8 @@ class Board:
         # 画线（0.5.2 原生化）：每板一份文档，drawing.showOn 控制跨周期可见性
         # id -> SerializedDrawing（Vela 原生条目，原样透传）
         self.drawings: dict[str, dict] = {}
+        # 结果实例（v0.6.0）：与板共存亡；result_id -> 冻结结果
+        self.results: dict[str, dict] = {}
         # 板锁（v0.4 一标的一板）：None=初始态(未锁定，仅 AI 可建)；
         # 锁定后 = {"script": id, "identity": {IDENTITY键: 值快照}}，不可变
         self.source_lock: Optional[dict] = None
@@ -164,6 +166,60 @@ class StateManager:
 
     def get_board(self, board_id: str) -> Optional[Board]:
         return self.boards.get(board_id)
+
+    # ========== 结果实例（v0.6.0） ==========
+
+    def add_result(self, board_id: str, result: dict) -> dict:
+        from .results import MAX_RESULTS_PER_BOARD
+        board = self.boards.get(board_id)
+        if not board:
+            return {"error": f"Board '{board_id}' not found"}
+        if len(board.results) >= MAX_RESULTS_PER_BOARD:
+            return {"error": f"RESULT_LIMIT: 每板最多 {MAX_RESULTS_PER_BOARD} 条结果，请先删除旧结果"}
+        board.results[result["result_id"]] = result
+        return {"status": "ok", "result_id": result["result_id"]}
+
+    def list_results(self, board_id: str = None, timeframe: str = None) -> list[dict]:
+        from .results import summarize
+        if board_id:
+            boards = [self.boards[board_id]] if board_id in self.boards else []
+        else:
+            boards = list(self.boards.values())
+        rows = []
+        for b in boards:
+            for r in b.results.values():
+                if timeframe and r.get("data", {}).get("timeframe") != timeframe:
+                    continue
+                rows.append(summarize(r))
+        rows.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+        return rows
+
+    def get_result(self, result_id: str, board_id: str = None) -> Optional[dict]:
+        if board_id:
+            b = self.boards.get(board_id)
+            return b.results.get(result_id) if b else None
+        for b in self.boards.values():
+            if result_id in b.results:
+                return b.results[result_id]
+        return None
+
+    def delete_result(self, result_id: str, board_id: str = None) -> dict:
+        b = self.boards.get(board_id) if board_id else None
+        for board in ([b] if b else self.boards.values()):
+            if board and result_id in board.results:
+                del board.results[result_id]
+                return {"status": "ok", "result_id": result_id, "board_id": board.id}
+        return {"error": f"Result '{result_id}' not found"}
+
+    def rename_result(self, result_id: str, display_name: str, board_id: str = None) -> dict:
+        r = self.get_result(result_id, board_id)
+        if not r:
+            return {"error": f"Result '{result_id}' not found"}
+        name = str(display_name or "").strip()
+        if not name:
+            return {"error": "RESULT_INVALID: display_name 不能为空"}
+        r["display_name"] = name
+        return {"status": "ok", "result_id": result_id, "display_name": name}
 
     # ========== 时间周期管理 ==========
 

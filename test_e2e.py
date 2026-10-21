@@ -60,6 +60,11 @@ TOOL_REST_MAP = {
     "watchlist_move": ("put", "/api/watchlist/move"),
     "watchlist_remove": ("delete", "/api/watchlist/rows"),
     "get_quotes": ("get", "/api/quotes"),
+    "import_result": ("post", "/api/result"),
+    "list_results": ("get", "/api/results"),
+    "get_result": ("get", "/api/result/"),
+    "rename_result": ("put", "/api/result/"),
+    "delete_result": ("delete", "/api/result/"),
     "list_skills": ("get", "/api/skills"),
     "load_skill": ("get", "/api/skills/"),
 }
@@ -434,7 +439,7 @@ def test(port: int, token: str = None):
     print("🔗 两表面对齐")
     try:
         tools = mcp_tools(base, s)
-        check("MCP 工具数=46", len(tools) == 46, f"got {len(tools)}")
+        check("MCP 工具数=51", len(tools) == 51, f"got {len(tools)}")
         missing = [t for t in tools if t not in TOOL_REST_MAP and t not in MCP_ONLY]
         check("无未映射工具", not missing, str(missing))
         spec = s.get(f"{base}/openapi.json").json()
@@ -757,6 +762,45 @@ def test(port: int, token: str = None):
 
 
     section_docstring_jargon(check)
+
+    # === 11.8 结果实例（v0.6.0） ===
+    print("📈 结果实例")
+    r = s.post(f"{base}/api/board", json={"id": "resb", "symbol": "RES/USDT",
+                                          "source": "datasource/mock_btc", "params": {"days": 80}})
+    check("结果板建板", r.status_code == 200, r.text)
+    kl = s.get(f"{base}/api/kline?board_id=resb&timeframe=1d").json().get("ohlcv") or []
+    check("结果板有 K 线", len(kl) > 20, str(len(kl)))
+    times = [b["timestamp"] for b in kl]
+    vals = [10000.0 * (b["close"] / kl[0]["close"]) for b in kl]
+    payload = {
+        "board_id": "resb", "timeframe": "1d", "display_name": "e2e 结果",
+        "equity": {"times": times, "values": vals},
+        "trades": [{"entry_time": times[5], "exit_time": times[9], "entry_price": kl[5]["close"],
+                    "exit_price": kl[9]["close"], "size": 1.0, "pnl": 10.0, "fee": 0.5,
+                    "entry_reason": "e2e", "exit_reason": "e2e"}],
+        "strategy": {"id": "strategy/e2e", "mode": "signal", "params": {"x": 1}},
+        "run": {"initial_cash": 10000, "bars_per_year": 365},
+        "execution_assumptions": {"fill_rule": "next_open"},
+    }
+    r = s.post(f"{base}/api/result", json={"payload": payload})
+    check("导入结果", r.status_code == 200 and r.json().get("result", {}).get("result_id"), r.text[:200])
+    rid = r.json()["result"]["result_id"]
+    check("结果摘要口径齐", all(k in r.json()["result"].get("stats", {})
+                              for k in ("total_return", "max_drawdown", "sharpe", "profit_factor")), r.text[:200])
+    r = s.get(f"{base}/api/results?board_id=resb")
+    check("结果列表", r.status_code == 200 and any(x["result_id"] == rid for x in r.json().get("results", [])), r.text[:200])
+    r = s.get(f"{base}/api/result/{rid}?section=equity&limit=5")
+    check("结果净值分页", r.status_code == 200 and r.json().get("returned") == 5
+          and r.json().get("truncated") is True, r.text[:200])
+    r = s.put(f"{base}/api/result/{rid}", json={"display_name": "e2e 改名"})
+    check("结果改名", r.status_code == 200 and r.json().get("display_name") == "e2e 改名", r.text[:200])
+    bad = dict(payload, equity={"times": times, "values": [v + 1 for v in vals]},
+               run={"initial_cash": 10000})
+    r = s.post(f"{base}/api/result", json={"payload": bad})
+    check("equity[0]!=初始资金 拒收", r.status_code == 400, r.text[:160])
+    r = s.delete(f"{base}/api/result/{rid}")
+    check("结果删除", r.status_code == 200, r.text[:200])
+    s.delete(f"{base}/api/board/resb")
 
     # === 12. 清理 ===
     print("🧹 清理")
