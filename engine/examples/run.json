@@ -1,0 +1,20 @@
+{
+  "api": 1,
+  "engine": "builtin",
+  "bars": {
+    "path": "../core/tests/cases/btc_1d_200.csv",
+    "format": "csv"
+  },
+  "strategy": {
+    "path": "strategy_ma.py"
+  },
+  "run": {
+    "initial_cash": 10000,
+    "fee_bps": 5,
+    "slippage_bps": 5,
+    "direction": "long_only",
+    "eval_start": null,
+    "eval_end": null
+  },
+  "timeframe": "1d"
+}

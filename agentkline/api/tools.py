@@ -51,7 +51,8 @@ def list_skills():
 
 @api_tool(group="read", path="/api/skills/{name}", err_status=404)
 def load_skill(name: str):
-    """加载指定 skill 的完整文档（如 datasource-authoring / indicator-authoring / ai-walkthrough）。"""
+    """加载指定 skill 的完整文档（datasource-authoring / indicator-authoring /
+    strategy-authoring / ai-walkthrough）。写脚本、跑回测、做呈现前先读对应那卷。"""
     return _skills.load_skill(name)
 
 
@@ -401,14 +402,14 @@ def delete_timeframe(board_id: str, timeframe: str):
 def list_scripts():
     """列出全部可用脚本（内置+自定义）。每条含：id（引用格式如 'indicator/macd'，加指标/配源都用它）、
     desc、params（默认参数）、caps 能力（backfill=支持历史回补 / symbols=有搜索索引 / ticker=支持实时报价）。
-    写自定义脚本前先按 kind 读 skill：datasource-authoring / indicator-authoring。"""
+    写自定义脚本前先按 kind 读 skill：datasource-authoring / indicator-authoring / strategy-authoring。"""
     return {"scripts": service.script_engine.list_scripts()}
 
 
 @api_tool(group="exec", method="POST", path="/api/scripts", err_status=400)
 def save_script(id: str, code: str):
     """保存自定义脚本到 custom 根（保存即校验：入口函数存在/能力声明一致/元数据合法）。
-    **写之前先按 kind 读 skill：datasource-authoring / indicator-authoring**。id 格式 kind/name（如 indicator/my_macd）；
+    **写之前先按 kind 读 skill：datasource-authoring / indicator-authoring / strategy-authoring**。id 格式 kind/name（如 indicator/my_macd）；
     同名 custom 覆盖同名内置（shadow 优先）。custom 根位置见 get_config，升级不丢（包外）。"""
     if not id or not code:
         return {"error": "SAVE_EMPTY: 需要 id 与 code"}
@@ -595,6 +596,50 @@ def rename_result(result_id: str, display_name: str):
 def delete_result(result_id: str):
     """删除一条结果（清理权，不是改写权）。删掉后画板上的净值曲线和交易点一并消失。"""
     return service.delete_result(result_id)
+
+
+# ============ 引擎回测（v0.6.1） ============
+@api_tool(group="read", path="/api/engines", err_status=400)
+def list_engines():
+    """列出可用回测引擎：id/version/api/caps/assumptions。
+    后端只通过 ak-engine 子进程发现引擎；builtin 随主包安装。"""
+    return service.list_engines()
+
+
+@api_tool(group="read", path="/api/strategies")
+def list_strategies():
+    """列出可用策略脚本（strategy/xxx）：id/display/desc/params。
+    运行回测时把 id 传给 run_backtest.script；参数表单用 strategy_meta 读 PARAM_META。"""
+    return service.list_strategies()
+
+
+@api_tool(group="read", path="/api/strategy/meta", err_status=400)
+def strategy_meta(script: Optional[str] = None, source: Optional[str] = None):
+    """读取策略脚本的声明（NAME/DESC/WARMUP/PARAMS/PARAM_META/PROTECTION/BARS_PER_YEAR）
+    并做 AST 校验（不执行代码）。script 用 strategy/xxx；也可直接传 source。"""
+    return service.strategy_meta(script, source)
+
+
+@api_tool(group="user_write", method="POST", path="/api/backtest", err_status=400)
+def run_backtest(board_id: str, timeframe: Optional[str] = None, engine: str = "builtin",
+                 script: Optional[str] = None, source: Optional[str] = None,
+                 params: Optional[dict] = None, direction: str = "long_only",
+                 initial_cash: float = 10000.0, fee_bps: float = 5.0,
+                 slippage_bps: float = 5.0, protection: Optional[dict] = None,
+                 start_time: Optional[int] = None, end_time: Optional[int] = None,
+                 limit: int = 20000, timeout: float = 120.0):
+    """跑一次回测，结果按结果实例登记并广播。
+    board_id 必填；timeframe 缺省=当前周期；script=strategy/xxx（也可用 source 内联源码）。
+    时间范围可选：start_time/end_time 为毫秒时间戳；都不给 = 最新往回 limit 根（默认 20000）。
+    历史不够会自动按数据源能力回补（补到开始时间之前够指标预热，或补到数据源最早一根）。
+    params 覆盖策略参数（按 PARAM_META 校验）；direction=long_only/short_only/both；
+    protection={"stop_loss_pct":0.05,"take_profit_pct":0.1} 可选，覆盖策略声明。
+    返回 result 摘要 + 本次运行信息（引擎/耗时/评估根数/补了多少根）。"""
+    return service.run_backtest(
+        board_id, timeframe=timeframe, engine=engine, script=script, source=source,
+        params=params, direction=direction, initial_cash=initial_cash,
+        fee_bps=fee_bps, slippage_bps=slippage_bps, protection=protection,
+        start_time=start_time, end_time=end_time, limit=limit, timeout=timeout)
 
 
 # ============ MCP-only（二进制/图片，REST 豁免） ============

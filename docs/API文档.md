@@ -1,6 +1,6 @@
 # AgentKline API 文档
 
-> 版本：v0.6.0 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server（API 自 v0.4.0 起保持兼容）
+> 版本：v0.6.1 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server（API 自 v0.4.0 起保持兼容）
 > 破坏性硬切版本：无兼容层。旧路径（/api/ohlcv、/api/load-csv、/history、datasource 端点、indicator/update 杂交路径）一律 404/405。
 > 机器可读附录：`python scripts/gen_api_ref.py` 可从运行中服务生成 REST 路由表 + MCP 工具表（防漂移）。
 
@@ -81,7 +81,7 @@ CSV 入图 = 内置 `datasource/csv` 脚本（path 归操作参数，IDENTITY=[]
 | GET | `/api/scripts` | exec | 双根脚本表 `[{id,kind,source,display,desc,params,caps,identity}]` |
 | GET | `/api/scripts/meta` | read | 脚本元数据精简面 `[{id,kind,source,display,desc,params}]`：web 端口可读（设置面板补 PARAMS 默认值），无 MCP 面 |
 | GET | `/api/indicator-catalog` | read | 指标目录（内置 75 项 = 74 Vela 经典 + KDJ，并合并自定义脚本）：`{vela, groups[], indicators[], custom_count}`；每项含 type/script/title/short/title_zh/group/overlay/inputs（参数 schema，颜色已剔除）与 source（builtin/custom）。自定义脚本归 group=custom，与内置同 id 时标 shadowed=true，不重复出卡。指标库面板与设置面板共用，无 MCP 面 |
-| POST | `/api/scripts` | exec | `save_script`：`{id,code}` 只写 custom，保存即校验（CAPS_MISMATCH/SAVE_SYNTAX/SAVE_NO_MAIN/SAVE_EMPTY） |
+| POST | `/api/scripts` | exec | `save_script`：`{id,code}` 只写 custom，保存即校验（CAPS_MISMATCH/SAVE_SYNTAX/SAVE_NO_MAIN/SAVE_EMPTY）；`strategy/*` 另按 signal 契约做 AST 校验（MODE_MISMATCH/MAIN_MISSING/PARAMS_INVALID/PROTECTION_*，不执行代码） |
 | POST | `/api/run-script` | exec | 窄身 `{script,params}`：只执行返回，图上不留痕 |
 | GET | `/api/search` | read | 标的搜索 `?q=&refresh=`：rows=`[{symbol,source,display,has_board}]`；索引=CAPS.symbols 源首用全量+TTL 日级；搜索不穿透交易所 |
 | GET | `/api/skills` / `/api/skills/{name}` | read | skills 列表/全文（MCP 薄镜像） |
@@ -126,12 +126,14 @@ CAPS 声明⇒实现（backfill⇒until 参/symbols⇒list_symbols/ticker⇒tick
 数据源 until 回溯可重放跨窗连续；单槽 max_bars_per_slot=50000 截旧+dropped；重算尾窗 max_window=5000；
 数据家族单脚本分片范式；L1 沙箱自律。
 
-## 10. MCP 工具（Streamable HTTP `/mcp`，agent 端口，35 个）
+## 10. MCP 工具（Streamable HTTP `/mcp`，agent 端口，55 个）
 
 改名：set_datasource→**set_kline_source**；load_history→**backfill**；run_script 窄身；list_scripts payload 升级。
 新增：save_script、search_symbols。换参：add/update/delete_indicator 与 get_indicators 换 inst_id/instances。
 payload 调整：create_board(+symbol/source/params/poll_s)、create_timeframe、overview、list_boards。
 原样保留 21 + list_skills/load_skill/get_kline/take_snapshot 等。
+v0.6.0 增结果实例 5 个（import_result/list_results/get_result/rename_result/delete_result）；
+v0.6.1 增引擎回测 4 个（list_engines/list_strategies/strategy_meta/run_backtest，见 §17）。
 **MCP-only 判决**：take_snapshot（无 REST 触发）。**REST-only**：get_kline_source、/api/view 上报。
 docstring 为单一真相；REST 为薄镜像；`test_e2e.py` 含两表面对齐断言。
 
@@ -240,6 +242,52 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
 - **脚本命名**：连字符类型转下划线，如 `bollinger-bands → indicator/bollinger_bands`、
   `parabolic-sar → indicator/parabolic_sar`、`on-balance-volume → indicator/on_balance_volume`；
   旧 `indicator/bb|sar|obv` 已删除（v0.5.2 起不保留兼容别名）。
+
+## 17. 引擎回测（v0.6.1）
+
+### 17.1 接口
+
+| 方法 | 路径 | 端口 | 说明 |
+|---|---|---|---|
+| GET | `/api/engines` | web+agent | 引擎清单 `{engines:[{id,version,api,caps,assumptions,load_error}]}`；后端通过 `ak-engine list` 子进程发现，不 import 引擎运行时 |
+| GET | `/api/strategies` | web+agent | 策略脚本清单 `{strategies:[...]}`（同 list_scripts 行，仅 kind=strategy） |
+| GET | `/api/strategy/meta` | web+agent | `?script=strategy/x` 或 `?source=<全文>`：返回 NAME/DESC/WARMUP/PARAMS/PARAM_META/PROTECTION/BARS_PER_YEAR + `errors`（纯 AST，不执行） |
+| POST | `/api/backtest` | web+agent | 跑一次回测，结果按结果实例登记并广播 |
+
+### 17.2 POST /api/backtest
+
+```json
+{
+  "board_id": "b_btc_usdt_usdt_xxx", "timeframe": "1d",
+  "engine": "builtin", "script": "strategy/ma_cross",
+  "params": {"fast": 8}, "direction": "long_only",
+  "initial_cash": 10000, "fee_bps": 5, "slippage_bps": 5,
+  "protection": {"stop_loss_pct": 0.05},
+  "start_time": 1704067200000, "end_time": 1735689599999, "limit": 20000
+}
+```
+
+- 策略来源二选一：`script`（`strategy/xxx`）或 `source`（内联源码）。
+- **时间范围可选**：`start_time/end_time`（毫秒）缺省 = 最新往回 `limit` 根（默认 20000，限 100–50000）；
+  历史不够时按数据源 `CAPS.backfill` 分批回补（默认 20s 预算），回补会同步给前端；
+  窗口前自动多带策略 `WARMUP` 根做指标预热（不计绩效、不交易）。
+- 返回：`{status, result: <结果摘要>, warnings, run: {engine, elapsed_ms, bars, from, to, warmup_bars, backfilled, clipped, requested}}`；
+  `clipped=true` 表示请求的开始时间早于数据源最早一根，实际从 `run.from` 开始。
+- 结果不覆盖：重跑生成新 `result_id`；查询走 `/api/results`、`/api/result/{id}?section=summary|equity|trades|fills`。
+- 出错：400 + `{"error": "CODE: 说明"}`，码与 CLI 一致（`ENGINE_NOT_FOUND`/`API_MISMATCH`/`SCRIPT_NOT_FOUND`/
+  `MAIN_MISSING`/`PARAMS_INVALID`/`PROTECTION_*`/`TARGET_*`/`RUN_TIMEOUT`/`ENGINE_CRASH`）。
+
+### 17.3 执行口径（signal 内核）
+
+收盘确认 → 次开盘成交；1x、连续数量、默认 5bp 费用 + 5bp 滑点；`rebalance_tolerance` 防抖；
+`direction` 运行时裁剪（long_only/short_only/both）；entry 级保护（跳空按 open、盘中按触发价、同根先止损后止盈）；
+窗口最后一根收盘强制平仓。详见《v0.6.1 引擎插件与 signal 内核》§5 与《引擎插件开发指南》。
+
+### 17.4 引擎插件边界
+
+后端只通过 `ak-engine` 子进程调用引擎（stdin spec / stdout `__AK_RESULT__` + JSON / 超时 killpg），
+插件用 entry point group `agentkline.engines` 注册；内置 `builtin` 随主包安装，第三方引擎单独成包、
+只依赖 `agentkline-engine-core`。详见 `docs/引擎插件开发指南.md`。
 
 ## 内置数据源（v0.4.4）
 | `datasource/binance` | Binance 直连（requests 非 ccxt 库）：现货+永续全量、K线全周期、批量实时；含股票代币（现货 B 后缀 78 + TradFi 永续 205，display 带官方分类标注） |

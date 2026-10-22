@@ -77,6 +77,6 @@ description: AI 引导呈现流程——把分析结论（标记/划线）自动
 | 雷达盯盘配置 | watchlist_add(group_id 可选) → watchlist_list 核对；组管理 group_add/rename/remove(级联删行)/move |
 | 指标调参 | overview 拿 inst_id → update_indicator(params) → get_indicators 核对 |
 | 历史回溯 | backfill(源需 caps.backfill) → get_kline(早段) |
-| 写新脚本 | load_skill(datasource-authoring 或 indicator-authoring 按 kind) → save_script → run_script 试算 → add_indicator / create_board 上图 |
+| 写新脚本 | load_skill(datasource-authoring / indicator-authoring / strategy-authoring 按 kind) → save_script → run_script 试算 → add_indicator / create_board 上图；策略用 strategy-authoring → run_backtest |
 | 股票代币/TradFi | binance 源搜 TENCENT/OPENAI/XAU（display 带官方分类标注）→ 建板即看；现货代币=B 后缀 symbol |
 | 用户视角验收 | get_current_view 知用户在看哪 → 操作后 take_snapshot 自证 |

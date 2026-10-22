@@ -43,11 +43,13 @@ Since v0.4 the chart is a **scene per symbol** (one symbol, one locked board): t
 - 🏷 **Out-of-range last price pin (v0.5.4)** — when the latest price leaves the visible price range, an `▲/▼` price block stays at the top/bottom of the axis; in range the native label is untouched
 - 🧾 **Results as first-class board citizens (v0.6.0)** — imported/backtested results live on the same board as the chart: result bar with chips, 15-metric overview, equity sub-pane, buy/sell marks and a comparison table; no separate report page
 - 🔍 **Trade details & return curves (v0.6.0)** — paginated per-trade list (entry/exit, holding time, PnL, reasons, explicit units), page summary, single-trade card with “Locate on chart”, and three chart tabs: time-based return curve, per-trade cumulative %, monthly PnL
+- 🧮 **Backtest from the chart (v0.6.1)** — `+Backtest` in the result bar: engine, strategy, direction, optional time range (start/end/bars linked, up to 20k bars with automatic history fetch), cash/fees/slippage and stop-loss/take-profit; results land as frozen result instances with equity, trades and buy/sell marks
+- 🧩 **Engine plugins (v0.6.1)** — built-in signal engine plus a zero-dependency `agentkline-engine-core`; every engine (including builtin) runs as an isolated `ak-engine` subprocess, third-party engines register via entry points and depend only on the core framework
 - 🎨 **Native-faithful indicator visuals** — every ported study starts from Vela's own palette, line kinds, fills, levels and zones (BOLL bands/basis, SAR dots, MACD 4-state momentum columns, RSI ramp + zones, Supertrend steps…); the settings dialog edits color/width/line style/band fill/ink slots with immediate repaint
 - 🗂 **Radar groups** — themed watch groups (collapse/rename/drag-move, delete falls rows back to default)
 - 📡 **Radar watchlist** — pin symbols across boards (CAPS.ticker sources); live price/change with three-state dispatch (visible heartbeat / hidden unread badge / watch-only); row click = jump to scene or one-step lock-create
 - ⏱ **Realtime multi-timeframe** — locked boards default to 15m/1h/4h/1d/1w (∩ source `INTERVALS`), all slots auto-configured; the "+" on the timeframe row adds any supported interval, tabs keep short→long order
-- 📚 **Bundled skills** — on-demand domain knowledge shipped in `skills/` (`script-authoring`, `ai-walkthrough`), loaded via `list_skills` / `load_skill` so any agent can author legal scripts without trial-and-error
+- 📚 **Bundled skills** — on-demand domain knowledge shipped in `skills/` (`datasource-authoring`, `indicator-authoring`, `strategy-authoring`, `ai-walkthrough`), loaded via `list_skills` / `load_skill` so any agent can author legal scripts and run backtests without trial-and-error
 - 🤖 **Agent-native** — dual-port architecture + standard MCP (Streamable HTTP): AI can read, write and execute
 
 ## 🏗 Architecture: dual-port

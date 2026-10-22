@@ -388,6 +388,17 @@ class ScriptEngine:
         caps_err = self.check_caps(meta)
         if caps_err:
             return {"error": caps_err}
+        if kind == "strategy":
+            # v0.6.1：策略保存即验（纯 AST，不执行；错误码与 ak-engine 一致）
+            try:
+                from agentkline_engine.loader import check_source
+            except Exception:  # pragma: no cover - 精简安装没有引擎框架
+                check_source = None
+            if check_source is not None:
+                errs = check_source(code)
+                if errs:
+                    first = errs[0]
+                    return {"error": f"{first['code']}: {first['message']}", "errors": errs}
         path = self.custom_root / kind / f"{stem}.py"
         warning = None
         size = len(code.encode("utf-8"))

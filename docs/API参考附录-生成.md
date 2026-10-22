@@ -2,6 +2,7 @@
 
 | 方法 | 路径 | 摘要 |
 |---|---|---|
+| POST | `/api/backtest` | Run Backtest |
 | POST | `/api/board` | Create Board |
 | POST | `/api/board/empty` | Create Empty Board |
 | GET | `/api/board/{board_id}` | Switch Board |
@@ -25,6 +26,7 @@
 | GET | `/api/drawings` | List Drawings |
 | POST | `/api/drawings` | Draw Many |
 | POST | `/api/drawings/delete` | Delete Drawings |
+| GET | `/api/engines` | List Engines |
 | POST | `/api/indicator` | Add Indicator |
 | GET | `/api/indicator-catalog` | Indicator Catalog |
 | POST | `/api/indicator/refresh/{inst_id}` | Refresh Indicator |
@@ -51,6 +53,8 @@
 | GET | `/api/snapshot` | Get Snapshot File |
 | POST | `/api/snapshot` | Push Snapshot |
 | GET | `/api/state` | Get State |
+| GET | `/api/strategies` | List Strategies |
+| GET | `/api/strategy/meta` | Strategy Meta |
 | POST | `/api/subplot` | Create Subplot |
 | PUT | `/api/subplot/{name}` | Update Subplot |
 | DELETE | `/api/subplot/{name}` | Delete Subplot |
@@ -72,7 +76,7 @@
 |---|---|
 | `list_boards` | 列出所有画板 |
 | `list_skills` | 列出可用 skills（name+description）。先用它发现，再用 load_skill 读全文。 |
-| `load_skill` | 加载指定 skill 的完整文档（如 datasource-authoring / indicator-authoring / ai-walkthrough）。 |
+| `load_skill` | 加载指定 skill 的完整文档（datasource-authoring / indicator-authoring / |
 | `search_symbols` | 搜索可交易标的。返回候选行，每行=一个"来源+符号"组合（has_board=True 表示该组合已有画板）。 |
 | `switch_board` | 切换当前画板，前端随之显示该画板（广播其默认周期状态）；用于 AI 主动展示。 |
 | `list_timeframes` | 列出画板的时间周期 |
@@ -119,5 +123,9 @@
 | `get_result` | 按需读取一条结果。section=summary（默认，元信息+统计）/equity（净值序列）/trades（平仓交易）/fills（成交）。 |
 | `rename_result` | 给结果改显示名（只改名字，不改内容；结果本身冻结）。返回新名字。 |
 | `delete_result` | 删除一条结果（清理权，不是改写权）。删掉后画板上的净值曲线和交易点一并消失。 |
+| `list_engines` | 列出可用回测引擎：id/version/api/caps/assumptions。 |
+| `list_strategies` | 列出可用策略脚本（strategy/xxx）：id/display/desc/params。 |
+| `strategy_meta` | 读取策略脚本的声明（NAME/DESC/WARMUP/PARAMS/PARAM_META/PROTECTION/BARS_PER_YEAR） |
+| `run_backtest` | 跑一次回测，结果按结果实例登记并广播。 |
 | `take_snapshot` | 触发前端截图并返回图片+路径。需有浏览器连着 /ws。 |
 | `get_snapshot` | 读取最新快照（图片+路径）。快照由浏览器截图上传产生。 |

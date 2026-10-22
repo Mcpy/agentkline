@@ -61,6 +61,10 @@ TOOL_REST_MAP = {
     "watchlist_remove": ("delete", "/api/watchlist/rows"),
     "get_quotes": ("get", "/api/quotes"),
     "import_result": ("post", "/api/result"),
+    "list_engines": ("get", "/api/engines"),
+    "list_strategies": ("get", "/api/strategies"),
+    "strategy_meta": ("get", "/api/strategy/meta"),
+    "run_backtest": ("post", "/api/backtest"),
     "list_results": ("get", "/api/results"),
     "get_result": ("get", "/api/result/"),
     "rename_result": ("put", "/api/result/"),
@@ -107,6 +111,16 @@ def mcp_tools(base: str, session: requests.Session) -> list:
         raise RuntimeError(f"mcp tools/list parse fail: status={r2.status_code} "
                            f"body={r2.text[:200]!r} init_status={r.status_code} sid={sid}")
     return [t["name"] for t in payload["result"]["tools"]]
+
+
+SYMS_TEST_CODE = (
+    'NAME="测试符号源"\nDESC="静态符号表(e2e 自给)"\nPARAMS={"symbol":"X1"}\n'
+    'CAPS={"backfill": False, "symbols": True, "ticker": False}\nIDENTITY=["symbol"]\n'
+    'SYMS=[{"symbol":"AAA/USD","display":"AAA 现货"},{"symbol":"AAC/USD","display":"AAC 现货"}]\n'
+    'def main(params):\n    return []\n'
+    'def list_symbols(query=""):\n    q=(query or "").upper()\n'
+    '    return [x for x in SYMS if not q or q in x["symbol"]]\n'
+)
 
 
 def test(port: int, token: str = None):
@@ -189,6 +203,7 @@ def test(port: int, token: str = None):
     r = s.get(f"{base}/api/boards")
     check("慢源板不残留", all(b["id"] != "slowb" for b in r.json()["boards"]), str([b['id'] for b in r.json()['boards']]))
 
+    s.post(f"{base}/api/scripts", json={"id": "datasource/syms_test", "code": SYMS_TEST_CODE})
     r = s.get(f"{base}/api/search", params={"q": "A", "source": "datasource/syms_test"})
     rows = r.json().get("rows", [])
     check("搜索 source 筛选（v0.4.4）", rows and all(x["source"] == "datasource/syms_test" for x in rows),
@@ -304,13 +319,6 @@ def test(port: int, token: str = None):
 
     # === 6. 搜索 ===
     print("🔍 搜索")
-    s.post(f"{base}/api/scripts", json={"id": "datasource/syms_test", "code":
-           'NAME="测试符号源"\nDESC="静态符号表(e2e 自给)"\nPARAMS={"symbol":"X1"}\n'
-           'CAPS={"backfill": False, "symbols": True, "ticker": False}\nIDENTITY=["symbol"]\n'
-           'SYMS=[{"symbol":"AAA/USD","display":"AAA 现货"},{"symbol":"AAC/USD","display":"AAC 现货"}]\n'
-           'def main(params):\n    return []\n'
-           'def list_symbols(query=""):\n    q=(query or "").upper()\n'
-           '    return [x for x in SYMS if not q or q in x["symbol"]]\n'})
     s.post(f"{base}/api/board", json={"id": "symboard", "symbol": "AAA/USD",
                                       "source": "datasource/syms_test"})
     r = s.get(f"{base}/api/search?q=AA")
@@ -439,7 +447,7 @@ def test(port: int, token: str = None):
     print("🔗 两表面对齐")
     try:
         tools = mcp_tools(base, s)
-        check("MCP 工具数=51", len(tools) == 51, f"got {len(tools)}")
+        check("MCP 工具数=55", len(tools) == 55, f"got {len(tools)}")
         missing = [t for t in tools if t not in TOOL_REST_MAP and t not in MCP_ONLY]
         check("无未映射工具", not missing, str(missing))
         spec = s.get(f"{base}/openapi.json").json()
@@ -733,17 +741,27 @@ def test(port: int, token: str = None):
           all(not ({"caps", "identity", "intervals"} & set(x.keys())) for x in ml),
           str(sorted(ml[0].keys())) if ml else "empty")
 
-    # === 11.4 skills 三卷（v0.4.4 拆分） ===
+    # === 11.4 skills 四卷（v0.4.4 拆分；0.6.1 增策略卷） ===
     print("📚 skills")
     r = s.get(f"{base}/api/skills")
     names = sorted(x["name"] for x in r.json().get("skills", r.json()))
-    check("skills 三卷齐", names == ["ai-walkthrough", "datasource-authoring", "indicator-authoring"], str(names))
+    check("skills 四卷齐", names == ["ai-walkthrough", "datasource-authoring",
+                                    "indicator-authoring", "strategy-authoring"], str(names))
     r = s.get(f"{base}/api/skills/datasource-authoring")
     body = r.json().get("content", r.text)
-    check("datasource 卷含契约章", "datasource 契约" in body and "INTERVALS" in body, body[:80])
+    check("datasource 卷含契约章+内联模板", "datasource 契约" in body and "INTERVALS" in body
+          and "<!-- include" not in body and "CAPS = {" in body and "def main(params" in body,
+          body[:80])
     r = s.get(f"{base}/api/skills/indicator-authoring")
     body = r.json().get("content", r.text)
-    check("indicator 卷含 SUBPLOT", "SUBPLOT" in body and "indicator 契约" in body, body[:80])
+    check("indicator 卷含 SUBPLOT+内联模板", "SUBPLOT" in body and "indicator 契约" in body
+          and "<!-- include" not in body and '"lines"' in body, body[:80])
+    r = s.get(f"{base}/api/skills/strategy-authoring")
+    body = r.json().get("content", r.text)
+    check("strategy 卷含契约+内联模板",
+          r.status_code == 200 and "main 契约" in body and "<!-- include" not in body
+          and 'STRATEGY_MODE = "signal"' in body and "def main(params, ohlcv):" in body,
+          body[:120])
 
     # === 11.5 MCP 提示词黑话门禁（v0.4.4） ===
     print("📜 MCP docstring 黑话门禁")
@@ -801,6 +819,108 @@ def test(port: int, token: str = None):
     r = s.delete(f"{base}/api/result/{rid}")
     check("结果删除", r.status_code == 200, r.text[:200])
     s.delete(f"{base}/api/board/resb")
+
+    # === 11.9 引擎回测（v0.6.1） ===
+    print("🧮 引擎回测")
+    r = s.get(f"{base}/api/engines")
+    engines = (r.json() or {}).get("engines") or []
+    check("引擎清单", r.status_code == 200
+          and any(e["id"] == "builtin" and e["api"] == 1 and e["caps"].get("signal")
+                  for e in engines), r.text[:200])
+    r = s.get(f"{base}/api/strategies")
+    strategies = (r.json() or {}).get("strategies") or []
+    check("策略清单（只读）", r.status_code == 200
+          and any(x["id"] == "strategy/ma_cross" for x in strategies), r.text[:200])
+    r = s.get(f"{base}/api/strategy/meta", params={"script": "strategy/ma_cross"})
+    meta = r.json()
+    check("策略声明（AST，不执行）", r.status_code == 200 and meta.get("ok")
+          and meta.get("warmup") == 30 and "fast" in (meta.get("params") or {}),
+          r.text[:200])
+    bad_src = ('STRATEGY_MODE = "event"\nNAME = "e2e_bad"\nWARMUP = 0\nPARAMS = {}\n'
+               'def main(p, o):\n    return {}\n')
+    r = s.post(f"{base}/api/scripts", json={"id": "strategy/e2e_bad", "code": bad_src})
+    check("策略保存即验 MODE_MISMATCH", r.status_code == 400 and "MODE_MISMATCH" in r.text, r.text[:200])
+
+    r = s.post(f"{base}/api/board", json={"id": "btb", "symbol": "BT/USDT",
+                                          "source": "datasource/mock_btc",
+                                          "params": {"days": 300}})
+    check("回测板建板", r.status_code == 200, r.text[:200])
+    body = {"board_id": "btb", "timeframe": "1d", "script": "strategy/ma_cross",
+            "direction": "long_only", "initial_cash": 10000, "limit": 300}
+    r = s.post(f"{base}/api/backtest", json=body)
+    j = r.json()
+    res = j.get("result") or {}
+    rid1 = res.get("result_id")
+    check("回测产出结果", r.status_code == 200 and rid1
+          and res.get("engine", {}).get("id") == "builtin"
+          and res.get("stats", {}).get("trade_count", 0) > 0, r.text[:300])
+    check("回测结果带引擎口径", bool(res.get("execution_assumptions", {}).get("fill_rule"))
+          and res.get("strategy", {}).get("warmup") == 30, r.text[:300])
+    r2 = s.post(f"{base}/api/backtest", json=body)
+    check("重跑=新结果（冻结）", r2.json().get("result", {}).get("result_id") not in (None, rid1),
+          r2.text[:200])
+
+    # CLI 与 API 同 spec 逐数一致（B3）
+    try:
+        bars_all = s.get(f"{base}/api/kline?board_id=btb&timeframe=1d").json().get("ohlcv") or []
+        run_info = j.get("run") or {}
+        warm = int(run_info.get("warmup_bars") or 0)
+        to_idx = max(i for i, b in enumerate(bars_all)
+                     if b["timestamp"] <= int(run_info["to"]))
+        from_idx = next(i for i, b in enumerate(bars_all)
+                        if b["timestamp"] == int(run_info["from"]))
+        bars = bars_all[max(0, from_idx - warm):to_idx + 1]
+        strat_src = open(os.path.join(os.path.dirname(__file__),
+                                      "agentkline/resources/scripts/strategy/ma_cross.py"),
+                         encoding="utf-8").read()
+        spec_obj = {"api": 1, "engine": "builtin", "bars": bars,
+                    "strategy": {"source": strat_src},
+                    "run": {"initial_cash": 10000, "fee_bps": 5, "slippage_bps": 5,
+                            "direction": "long_only", "params": {}, "eval_start": warm},
+                    "timeframe": "1d"}
+        import subprocess as _sp
+        ak = os.path.join(os.path.dirname(__file__), ".venv", "bin", "ak-engine")
+        proc = _sp.run([ak, "run", "--stdin"], input=json.dumps(spec_obj),
+                       capture_output=True, text=True, timeout=120)
+        lines = proc.stdout.splitlines()
+        cli = json.loads(lines[1]) if lines and lines[0] == "__AK_RESULT__" else {}
+        eq_api = s.get(f"{base}/api/result/{rid1}?section=equity&limit=0").json()
+        tr_api = s.get(f"{base}/api/result/{rid1}?section=trades&limit=0").json()
+        same_eq = (eq_api.get("values") or []) == (cli.get("equity") or {}).get("values")
+        same_trades = len(tr_api.get("items") or []) == len(cli.get("trades") or [])
+        check("CLI/API 同 spec 逐数一致", same_eq and same_trades,
+              f"eq={same_eq} trades={len(tr_api.get('items') or [])}/"
+              f"{len(cli.get('trades') or [])}")
+    except Exception as exc:  # noqa: BLE001
+        check("CLI/API 同 spec 逐数一致", False, f"{type(exc).__name__}: {exc}")
+
+    # B8 方向：同一份 ±1 目标，both 下必须出现空头
+    both_src = ('STRATEGY_MODE = "signal"\nNAME = "e2e_both"\nWARMUP = 2\nPARAMS = {}\n'
+                'def main(p, o):\n'
+                '    return {"target": [0.0, 0.0] + [1.0 if i % 2 else -1.0 '
+                'for i in range(len(o) - 2)]}\n')
+    r = s.post(f"{base}/api/backtest", json={"board_id": "btb", "timeframe": "1d",
+                                             "source": both_src, "direction": "both",
+                                             "initial_cash": 10000})
+    ridb = (r.json().get("result") or {}).get("result_id")
+    items = []
+    if ridb:
+        items = s.get(f"{base}/api/result/{ridb}?section=trades&limit=0").json().get("items") or []
+    sides = {t["side"] for t in items}
+    check("方向 both 出现多空两侧", r.status_code == 200 and sides == {"long", "short"},
+          f"{r.text[:120]} sides={sides}")
+
+    # B9 参数校验：越界参数由引擎拒绝，错误码透传
+    r = s.post(f"{base}/api/backtest", json={"board_id": "btb", "timeframe": "1d",
+                                             "script": "strategy/ma_cross",
+                                             "params": {"fast": 1}})
+    check("参数越界被拒 PARAMS_INVALID", r.status_code == 400 and "PARAMS_INVALID" in r.text,
+          r.text[:160])
+    r = s.post(f"{base}/api/backtest", json={"board_id": "btb", "timeframe": "1d",
+                                             "script": "strategy/no_such"})
+    check("策略不存在 SCRIPT_NOT_FOUND", r.status_code == 400 and "SCRIPT_NOT_FOUND" in r.text,
+          r.text[:160])
+    s.delete(f"{base}/api/board/btb")
 
     # === 12. 清理 ===
     print("🧹 清理")

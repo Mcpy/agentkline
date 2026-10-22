@@ -166,7 +166,8 @@ function _groupSeries(groupKey) {
         });
         Object.entries((spec && spec.axis) || {}).forEach(([k, v]) => { lvl[k] = Number(v); });
         const lvlVal = (x) => (lvl[x] != null ? lvl[x] : Number(x));
-        const timeArr = (times && times.length) ? times : (state.ohlcv || []).map(b => b.timestamp);
+        // 区带锚点同样按「一根 bar 一个点」铺（times 可能长于当前窗口 → 会撑错位/撑歪填充带）
+        const timeArr = _alignBars().map(b => b.timestamp);
         if (spec && spec.levels) spec.levels.forEach((L, li) => {
             const price = lvlVal(L.at);
             if (!Number.isFinite(price)) return;
@@ -271,6 +272,25 @@ function _colorRuleInk(rule, v, ctx) {
         default: return null;
     }
 }
+// 对齐基准 = 图表实际持有的 bars（scene.bars），不是镜像 state.ohlcv：
+//   头部取数按 limit+2 拉取（防 <to 过滤后不足），镜像会比 Vela BarStore 多 1~2 根；
+//   series 若按镜像出点就会整体左移 1~2 根（BB 错位的同一类问题）。
+//   这里把镜像裁到图表窗口，保证 points 与蜡烛逐根同长、同首末。
+function _alignBars() {
+    const src = state.ohlcv || [];
+    try {
+        const scene = chart && chart.orchestrator && chart.orchestrator.renderer
+            && chart.orchestrator.renderer.scene;
+        const sb = scene && scene.bars;
+        if (sb && sb.length) {
+            const t0 = sb[0].time, t1 = sb[sb.length - 1].time;
+            const out = src.filter(b => b.timestamp >= t0 && b.timestamp <= t1);
+            if (out.length) return out;
+        }
+    } catch (e) {}
+    return src;
+}
+
 function _lineSpec(id, title, values, type, style, vis, times, lv, override, env) {
     style = style || {}; lv = lv || {}; override = override || {}; env = env || {};
     // V1：生效样式统一由 visual_spec.effectiveStyle 求解（渲染 ≡ 设置弹窗初值，单一优先级链）
@@ -288,23 +308,16 @@ function _lineSpec(id, title, values, type, style, vis, times, lv, override, env
     const lstyle = LS(eff.lineStyle);
     const autoColor = eff.autoColor;
     const vals = values || [];
-    // P1 时间戳契约：优先用引擎随 values 同载荷下发的 times（两者同源恒一致，prepend/竞态免疫）。
-    //   对 times 尾对齐（toff 仅脚本返回短于 feed 时非零；times 权威无竞态，区别于旧 bars.length）。
-    //   无 times（冻结 blob）→ 回退旧 off=bars.len-values.len 索引对齐（blob 时间戳迁移留待后续统一）。
-    let timeAt;
-    if (times && times.length) {
-        const toff = Math.max(0, times.length - vals.length);
-        timeAt = (i) => times[toff + i];
-    } else {
-        const bars = state.ohlcv || [];
-        const off = Math.max(0, bars.length - vals.length);
-        timeAt = (i) => { const b = bars[off + i]; return b ? ms(b) : i; };
-    }
+    // 对齐契约（Vela 原生渲染按位绘制）：points 必须与当前 bars 等长、一根 bar 一个点。
+    //   旧实现直接按 values 出点：boards > init_window（默认 2000）时 init 只带 2000 根 K 线、
+    //   指标 times/values 仍是全量 2200 → Vela 取前 2000 个点逐位铺，整条线左移 200 根
+    //   （BB/RSI 全部错位）。现在一律按 bar 时间戳落位，窗口外用 null 补齐：
+    //   prepend/回补/指标广播竞态都天然免疫；无 times 的冻结 blob 回退旧索引右对齐。
+    const bars = _alignBars();
     // 逐点色（Vela SeriesPoint.color）：规格策略优先（sar 涨跌 / macd 动能四态 / rsi 阈值渐变），
     //   用户显式挑了单色（eff.flat）则停用策略，尊重用户颜色；柱状无策略时回退原生涨跌二色。
     const strat = (lv.pointColor && !eff.flat) ? lv.pointColor : null;
-    const points = vals.map((v, i) => {
-        const time = timeAt(i);
+    const mkPoint = (v, i, time) => {
         const pt = { time, value: (v == null ? null : v) };
         if (v == null) return pt;
         let c = null;
@@ -326,7 +339,25 @@ function _lineSpec(id, title, values, type, style, vis, times, lv, override, env
         }
         if (c) pt.color = c;
         return pt;
-    });
+    };
+    let points;
+    if (times && times.length) {
+        const toff = Math.max(0, times.length - vals.length);
+        const slot = new Map();
+        for (let i = 0; i < bars.length; i++) slot.set(ms(bars[i]), i);
+        points = bars.map(b => ({ time: ms(b), value: null }));
+        for (let i = 0; i < vals.length && toff + i < times.length; i++) {
+            const bi = slot.get(times[toff + i]);
+            if (bi === undefined) continue;
+            points[bi] = mkPoint(vals[i], i, ms(bars[bi]));
+        }
+    } else {
+        const off = Math.max(0, bars.length - vals.length);
+        points = bars.map((b, i) => {
+            const j = i - off;
+            return mkPoint(j >= 0 && j < vals.length ? vals[j] : null, j, ms(b));
+        });
+    }
     return { id, title, paneId: '', kind, points, visible: vis,
              style: { color, width, lineStyle: lstyle } };
 }
@@ -408,7 +439,7 @@ function _resultSeries() {
     });
     const series = [], priceLines = [];
     if (!ids.length) return { series, fills: [], priceLines, polylines: [] };
-    const bars = state.ohlcv || [];
+    const bars = _alignBars();
     if (!bars.length) return { series, fills: [], priceLines, polylines: [] };
     const barTimes = bars.map(b => b.timestamp);
     const multi = ids.length > 1;
@@ -790,7 +821,15 @@ export function renderChartCore() {
     // 0.6.0：图表时间轴跟随界面时区（与 OHLC 读数/状态条一致；不依赖系统时区）
     try { chart.renderer.applyConfig({ timeScale: { timezone: _uiTz() } }); } catch (e) { console.warn('[ak] timezone apply failed', e); }
     // 探针/控制台把手（e2e 与人工排障；不参与业务逻辑）
-    try { window.__ak = { chart, drawings: () => (chart.drawings ? chart.drawings.all() : []), resultSeries: () => _resultSeries(), resultMarkers: () => _resultMarkerSeries() }; } catch (e) {}
+    try {
+        window.__ak = {
+            chart,
+            drawings: () => (chart.drawings ? chart.drawings.all() : []),
+            resultSeries: () => _resultSeries(),
+            resultMarkers: () => _resultMarkerSeries(),
+            focusTradeRange,   // 调试/回归用：按交易时间定位（会按需补历史）
+        };
+    } catch (e) {}
     try { chart.renderer.set('attribution', false); } catch (e) {}   // 归因甲案（R6-2）
     _bindLastPricePin();   // v0.5.4：越界贴边标签包在原生 chrome 绘制里
     chart.on('indicator:inputs', () => _saveVpvrInputs());
@@ -815,8 +854,9 @@ export function renderChartCore() {
     chart.on('viewport:changed', () => _viewportCbs.forEach(cb => cb()));
     chart.on('history:complete', () => {
         _backfillActive = false; clearTimeout(_backfillActiveT);
-        // 左划回补后 bars 数组变了：结果线必须按新 bars 重铺（否则 series 与蜡烛错位）
+        // 左划回补后 bars 数组变了：结果线与指标都必须按新 bars 重铺（否则 series 与蜡烛错位）
         _onResultBars(true);
+        reEmitAllGroups();
         // 状态条 bars 数同步（Vela 原生回补不走 WS，需主动通知）
         try { window.dispatchEvent(new CustomEvent('ak:bars-changed')); } catch (e) {}
     });
@@ -958,16 +998,64 @@ export function scrollToLatest(n = 200) { _showLatest(n); }
 
 // 概览里点某笔交易：把可视区间挪到这笔的开/平仓之间。
 // 两端各留 padBars 根；窗口不足 40 根按 40 根居中，避免一笔 1 根的交易把图放到最大。
-export function focusTradeRange(entryMs, exitMs, padBars = 4) {
+// 目标早于已载入窗口时不直接失败：先走 Vela 原生历史通道补深度（setMarket(bars) →
+//   feed.loadRange → 服务端 backfill），补到目标之后再用 setVisibleRange 定位。
+//   这是 0.6.1 修的「2020 年的交易点不过去」：init_window=2000 只决定首屏，
+//   不是 Vela 的上限；历史按需加载本来就是原生能力。
+const _HISTORY_MAX = 20000;   // 单次定位最多补到 2 万根（约 2.5MB），更早的窗口提示不可达
+let _histFlight = null;
+async function _ensureHistoryTo(targetMs) {
+    if (!chart) return false;
     const bars = state.ohlcv || [];
+    if (!bars.length) return false;
+    const step = _tfMs(state.currentTimeframe);
+    if (bars[0].timestamp <= targetMs + step) return true;
+    const need = Math.ceil((bars[0].timestamp - targetMs) / step) + 240;
+    const total = bars.length + need;
+    if (total > _HISTORY_MAX) return false;
+    const m = chart.market || {};
+    if (!m.symbol || !m.timeframe) return false;
+    if (_histFlight) return _histFlight;
+    _histFlight = (async () => {
+        try {
+            await chart.setMarket({ symbol: m.symbol, timeframe: m.timeframe, bars: total });
+        } catch (e) {
+            return false;
+        }
+        // setMarket 的 promise 早于「数据真正落到 BarStore/镜像」；此时 setVisibleRange
+        //   会被旧窗口夹住（表现为点了定位却停在 2021 年）。等镜像头越过目标再定位。
+        let lastLen = -1, stable = 0;
+        const deadline = Date.now() + 8000;
+        while (Date.now() < deadline) {
+            const after = state.ohlcv || [];
+            if (after.length && after[0].timestamp <= targetMs + step) return true;
+            if (after.length === lastLen) {
+                if (++stable >= 10) return false;   // 头不再增长 = 已到数据源创世点
+            } else {
+                lastLen = after.length; stable = 0;
+            }
+            await new Promise(r => setTimeout(r, 80));
+        }
+        return false;
+    })().finally(() => { _histFlight = null; });
+    return _histFlight;
+}
+
+export async function focusTradeRange(entryMs, exitMs, padBars = 4) {
+    let bars = state.ohlcv || [];
     if (!chart || !bars.length) return false;
     const step = _tfMs(state.currentTimeframe);
     let from = Number(entryMs), to = Number(exitMs);
     if (!Number.isFinite(from)) return false;
     if (!Number.isFinite(to) || to < from) to = from;
+    if (to < bars[0].timestamp) {
+        if (!(await _ensureHistoryTo(from - padBars * step))) return false;
+        bars = state.ohlcv || [];
+        if (!bars.length) return false;
+    } else if (from > bars[bars.length - 1].timestamp) {
+        return false;   // 晚于最新：结果不应出现，保持原提示
+    }
     const first = bars[0].timestamp, last = bars[bars.length - 1].timestamp;
-    // 交易发生在已载入 K 线之外（结果窗口比当前历史更早/更晚）→ 交给调用方提示
-    if (to < first || from > last) return false;
     from -= padBars * step;
     to += padBars * step;
     const MIN = 40 * step;

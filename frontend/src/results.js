@@ -11,6 +11,7 @@ import { openDialog } from './dialog.js';
 import { refreshResultLayer, resultColor, focusTradeRange, tfMs } from './vela_adapter.js';
 import { addActivity } from './activity.js';
 import { openWorkbench, renderWorkbench, updateWorkbenchStatus } from './workbench.js';
+import { openBacktestDialog } from './backtest.js';
 
 const MAX_VISIBLE = 8;
 const TRADE_PAGE = 10;
@@ -202,8 +203,10 @@ function _selectTrade(tr) {
 }
 
 // 唯一的 K 线定位入口：详情卡上的「在图上定位」按钮
-function _locateTrade(tr) {
-    if (!focusTradeRange(tr.entry_time, tr.exit_time)) addActivity('warn', t('result.t.out_of_range'));
+//   focusTradeRange 现在会先按需补历史（0.6.1：2020 年的交易也能跳过去），因此是异步；
+//   真不可达（补到 2 万根仍不够）才提示 out_of_range。
+async function _locateTrade(tr) {
+    if (!(await focusTradeRange(tr.entry_time, tr.exit_time))) addActivity('warn', t('result.t.out_of_range'));
 }
 
 function _renderTradeDetail() {
@@ -1041,7 +1044,7 @@ export function bindResults() {
         if (id) { selectResult(id); openWorkbench('overview'); }
     });
     const addBt = document.getElementById('result-add');
-    if (addBt) addBt.addEventListener('click', () => toast(t('result.backtest_soon')));
+    if (addBt) addBt.addEventListener('click', () => { openBacktestDialog(); });
     renderResultBar();
     fillOverview();
 }

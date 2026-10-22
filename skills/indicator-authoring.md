@@ -36,6 +36,13 @@ lines 项 `{name, values}` 就够——**只出计算值**：类型/颜色/线�
 落盘：`add_indicator(script=id, params=...)`=recipe（随 K 线自动重算）；直接给 values/lines=blob
 （钉死单周期，传 scope 报错）。实例名 inst_id：撞名 INST_EXISTS；不传自动 `macd_2` 式。
 
+## 最小模板
+
+> 模板唯一来源：内置指标 `indicator/kdj`（自包含计算、三条 lines、副图声明）。
+> 加载技能时源码原样内联到下面；改模板只改那份脚本，别在技能里另抄。
+
+<!-- include:indicator/kdj -->
+
 ## 多线与特殊输出
 - 一个实例可返回多条 `lines`（BOLL 三轨）；内置 SMA/EMA 是 Vela 单线语义，多线靠**多实例**。
 - 特殊输出：zigzag 用 `polylines`，fractal 用 `markers`；其余一律 `lines`。

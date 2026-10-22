@@ -6,6 +6,7 @@ FastAPI 与 MCP server 共用此层，不依赖任何传输协议。
 import csv
 import hashlib
 import logging
+import time
 from bisect import bisect_left, bisect_right
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +16,7 @@ from .state import StateManager
 from .script_engine import ScriptEngine
 from .datasource import DataSourceManager
 from .results import normalize_result, next_result_id, summarize, slice_section
+from ..backtest import runner as engine_runner
 
 logger = logging.getLogger("agentkline.service")
 
@@ -30,7 +32,7 @@ def _to_ms(v):
 class AgentKlineService:
     """AgentKline 业务核心"""
 
-    VERSION = "0.6.0"
+    VERSION = "0.6.1"
 
     def __init__(self, scripts_dir: str, limits: dict = None):
         limits = limits or {}
@@ -41,6 +43,8 @@ class AgentKlineService:
         self.watchlist = WatchlistManager(self, poll_s=limits.get("quotes_poll_s", 5))
         # R8 性能三件套限额（config limits 可覆盖）
         self.max_window = int(limits.get("max_window", 5000))
+        # (board, tf) -> 已确认没有更早数据时的最早时间戳；有新增历史会自动失效
+        self._backfill_exhausted: dict = {}
         self.max_bars_per_slot = int(limits.get("max_bars_per_slot", 50000))
         self.state.MAX_BARS_PER_SLOT = self.max_bars_per_slot
         self.init_window = int(limits.get("init_window", 2000))
@@ -720,6 +724,278 @@ class AgentKlineService:
         self._bc({"type": "result_deleted", "board_id": board_id,
                   "timeframe": tf, "result_id": result_id})
         return r
+
+    # ============ 引擎回测（v0.6.1 M3：只走 ak-engine 子进程） ============
+    def list_strategies(self):
+        """策略脚本清单（web 只读；exec 的 list_scripts 在 agent 端口）。"""
+        rows = [r for r in self.script_engine.list_scripts() if r.get("kind") == "strategy"]
+        return {"strategies": rows}
+
+    def list_engines(self):
+        """引擎清单。后端不 import 引擎运行时，清单也来自子进程。"""
+        try:
+            return {"engines": engine_runner.list_engines()}
+        except engine_runner.EngineRunError as exc:
+            return {"error": f"{exc.code}: {exc.message}", **exc.to_dict()}
+
+    def _strategy_source(self, script=None, source=None):
+        """策略源码：内联 source 优先，否则按 strategy/xxx 读脚本。"""
+        if source:
+            return str(source), None
+        if not script:
+            return None, "STRATEGY_REQUIRED: 需要 script（strategy/xxx）或 source"
+        r = self.script_engine.resolve(script)
+        if not r:
+            return None, f"SCRIPT_NOT_FOUND: {script}"
+        try:
+            return r["path"].read_text(encoding="utf-8-sig"), None
+        except OSError as exc:
+            return None, f"SCRIPT_NOT_FOUND: 读取 {script} 失败: {exc}"
+
+    def strategy_meta(self, script=None, source=None):
+        """策略声明（NAME/DESC/WARMUP/PARAMS/PARAM_META/PROTECTION）+ AST 校验。"""
+        src, err = self._strategy_source(script, source)
+        if err:
+            return {"ok": False, "error": err}
+        try:
+            from agentkline_engine.loader import describe_source
+        except Exception:  # pragma: no cover - 精简安装
+            return {"ok": False, "error": "ENGINE_UNAVAILABLE: 引擎框架未安装"}
+        info = describe_source(src)
+        return {"ok": not info["errors"], "script": script or "", **info}
+
+    BACKFILL_CHUNK = 1000
+    MAX_BACKFILL_CALLS = 40
+
+    def _ensure_history(self, board_id, tf, start_ms, want, warmup, budget_s):
+        """按需补历史：默认补到 want+warmup 根；给了 start 则补到 start 之前 warmup 根。
+
+        补到数据源 genesis 或预算用完为止；返回实际补进来的根数。
+        """
+        target = start_ms
+        need = warmup if start_ms is not None else want + warmup
+        if need <= 0:
+            return 0
+        pulled = 0
+        t0 = time.monotonic()
+        exhausted_at = self._backfill_exhausted.get((board_id, tf))
+        for _ in range(self.MAX_BACKFILL_CALLS):
+            bars = self.state.get_ohlcv(board_id, tf) or []
+            have = len(bars) if target is None else sum(
+                1 for b in bars if int(b["timestamp"]) < int(target))
+            if have >= need:
+                break
+            if exhausted_at is not None and bars and int(bars[0]["timestamp"]) == exhausted_at:
+                break
+            if time.monotonic() - t0 > budget_s:
+                logger.info("run_backtest 补历史超预算（%.1fs），用现有 %d 根", budget_s, len(bars))
+                break
+            chunk = self.BACKFILL_CHUNK
+            try:
+                r = self.backfill(board_id, tf, limit=chunk)
+            except Exception as exc:  # pragma: no cover - 数据源异常不阻塞回测
+                logger.warning("run_backtest 补历史失败: %s", exc)
+                break
+            n = int(r.get("prepended") or 0)
+            if n <= 0:
+                # 记住"已到最早"，避免每次回测都白跑一次数据源请求
+                head = self.state.get_ohlcv(board_id, tf) or []
+                if head:
+                    self._backfill_exhausted[(board_id, tf)] = int(head[0]["timestamp"])
+                break
+            pulled += n
+        return pulled
+
+    @staticmethod
+    def _slice_window(bars, start_ms, end_ms, want, warmup):
+        """按时间/根数切窗口；窗口前留 warmup 根给指标预热。返回 (bars, lead, error)。"""
+        if not bars:
+            return None, 0, "NO_BARS: 该周期没有可用的 K 线"
+        if end_ms is not None:
+            end_idx = next((i for i in range(len(bars) - 1, -1, -1)
+                            if int(bars[i]["timestamp"]) <= int(end_ms)), None)
+            if end_idx is None:
+                return None, 0, "INPUT_INVALID: 结束时间早于最早一根 K 线"
+        else:
+            end_idx = len(bars) - 1
+        if start_ms is not None:
+            start_idx = next((i for i, b in enumerate(bars)
+                              if int(b["timestamp"]) >= int(start_ms)), None)
+            if start_idx is None:
+                return None, 0, "INPUT_INVALID: 开始时间晚于最后一根 K 线"
+        else:
+            start_idx = max(0, end_idx - want + 1)
+        if start_idx > end_idx:
+            return None, 0, "INPUT_INVALID: 时间范围内没有 K 线"
+        lead = min(max(warmup, 0), start_idx)
+        window = bars[start_idx - lead:end_idx + 1]
+        if len(window) <= lead:
+            return None, 0, "INPUT_INVALID: 时间范围内没有可评估的 K 线"
+        return window, lead, None
+
+    def run_backtest(self, board_id, timeframe=None, engine="builtin", script=None,
+                     source=None, params=None, direction="long_only",
+                     initial_cash=10000.0, fee_bps=5.0, slippage_bps=5.0,
+                     protection=None, start_time=None, end_time=None, limit=20000,
+                     backfill_budget=20.0, timeout=120.0):
+        """跑一次回测：确定窗口（必要时补历史）→ 子进程 → 校验/补算 → 登记结果 + 广播。
+
+        窗口：start_time/end_time 可选；缺省 = 最新往回 limit 根（默认 2 万）。
+        历史不够时先按数据源能力回补；再往前没有数据就用现有的。"""
+        if direction not in ("long_only", "short_only", "both"):
+            return {"error": f"INPUT_INVALID: direction 需为 long_only/short_only/both，收到 {direction!r}"}
+        try:
+            cash = float(initial_cash)
+            fee = float(fee_bps)
+            slip = float(slippage_bps)
+        except (TypeError, ValueError):
+            return {"error": "INPUT_INVALID: initial_cash/fee_bps/slippage_bps 必须是数字"}
+        if cash <= 0:
+            return {"error": "INPUT_INVALID: initial_cash 必须 > 0"}
+        if fee < 0 or slip < 0:
+            return {"error": "INPUT_INVALID: fee_bps/slippage_bps 不能为负"}
+
+        board = self.state.get_board(board_id)
+        if not board:
+            return {"error": f"Board '{board_id}' not found"}
+        tf = timeframe or board.current_timeframe
+        if not (board.get_tf(tf) and board.get_tf(tf).ohlcv):
+            return {"error": "NO_BARS: 该周期还没有已载入的 K 线，先等行情加载完再回测"}
+
+        src, err = self._strategy_source(script, source)
+        if err:
+            return {"error": err}
+
+        # 策略声明：显示名/warmup/默认保护（纯 AST，不执行）
+        try:
+            from agentkline_engine.loader import describe_source
+            info = describe_source(src)
+        except Exception:  # pragma: no cover - 精简安装
+            info = {}
+        merged_params = {**(info.get("params") or {}), **(params or {})}
+        merged_prot = {**(info.get("protection") or {}), **(protection or {})}
+        warmup = int(info.get("warmup") or 0)
+
+        # 时间窗口：可选；默认最新往回 limit 根
+        try:
+            want = int(limit if limit is not None else 20000)
+        except (TypeError, ValueError):
+            return {"error": "INPUT_INVALID: limit 必须是整数（回溯根数）"}
+        if want < 100:
+            return {"error": "INPUT_INVALID: limit 至少 100 根"}
+        want = min(want, 50000)
+        start_ms = _to_ms(start_time) if start_time is not None else None
+        end_ms = _to_ms(end_time) if end_time is not None else None
+        try:
+            budget = max(0.0, float(backfill_budget if backfill_budget is not None else 20.0))
+        except (TypeError, ValueError):
+            budget = 20.0
+        backfilled = self._ensure_history(board_id, tf, start_ms, want, warmup, budget)
+        bars, lead, werr = self._slice_window(
+            [dict(b) for b in (self.state.get_ohlcv(board_id, tf) or [])],
+            start_ms, end_ms, want, warmup)
+        if werr:
+            return {"error": werr}
+        # 引擎口径：eval_start = max(请求的窗口起点, 策略 WARMUP)；历史不够时实际起点会晚于请求
+        eval_idx = max(lead, warmup)
+        if eval_idx >= len(bars) - 1:
+            return {"error": f"EVAL_WINDOW_EMPTY: 可用 {len(bars)} 根，不够指标预热（WARMUP={warmup}）"}
+        clipped = bool(start_ms is not None and int(bars[eval_idx]["timestamp"]) > int(start_ms))
+
+        run_in = {
+            "initial_cash": cash, "fee_bps": fee, "slippage_bps": slip,
+            "direction": direction,
+            # 窗口前的 warmup 根只给策略预热，不计绩效也不交易
+            "eval_start": eval_idx,
+            "params": params or {},
+        }
+        if protection:
+            run_in["protection"] = protection
+        spec = {"api": 1, "engine": engine, "bars": bars,
+                "strategy": {"source": src}, "run": run_in, "timeframe": tf}
+        try:
+            payload = engine_runner.run_spec(spec, timeout=float(timeout))
+        except engine_runner.EngineRunError as exc:
+            return {"error": f"{exc.code}: {exc.message}", **exc.to_dict()}
+
+        elapsed_ms = int(payload.pop("_elapsed_ms", 0) or 0)
+        eq = payload.get("equity") or {}
+        times = [int(t) for t in (eq.get("times") or [])]
+        values = [float(v) for v in (eq.get("values") or [])]
+        if not times or len(times) != len(values):
+            return {"error": "RESULT_INVALID: 引擎没有返回可用的权益序列"}
+        if abs(values[0] - cash) > max(1e-6, abs(cash) * 1e-6):
+            # eval_start > WARMUP 时首点带仓：补一个初始资金锚点，满足结果契约
+            idx = next((i for i, b in enumerate(bars)
+                        if int(b["timestamp"]) >= times[0]), 0)
+            anchor = int(bars[idx - 1]["timestamp"]) if idx > 0 else times[0] - 1
+            times = [anchor] + times
+            values = [cash] + values
+
+        asm = payload.get("assumptions") or {}
+        eng = payload.get("engine") or {}
+        result_payload = {
+            "board_id": board_id,
+            "timeframe": tf,
+            "status": payload.get("status"),
+            "equity": {"times": times, "values": values},
+            "trades": payload.get("trades") or [],
+            "fills": payload.get("fills") or [],
+            "warnings": payload.get("warnings") or [],
+            "runtime_ms": elapsed_ms,
+            "run": {
+                "initial_cash": cash, "fee": fee / 10_000.0, "slippage": slip / 10_000.0,
+                "leverage": 1.0, "bars_per_year": asm.get("bars_per_year"),
+            },
+            "engine": {
+                "id": str(eng.get("id") or engine),
+                "version": str(eng.get("version") or ""),
+                "caps": eng.get("caps") if isinstance(eng.get("caps"), dict) else {},
+                "config": {"api": 1, "direction": direction, "fee_bps": fee,
+                           "slippage_bps": slip, "params": params or {}},
+            },
+            "strategy": {
+                "id": script or "strategy/inline",
+                "mode": "signal",
+                "params": merged_params,
+                "warmup": int(info.get("warmup") or 0),
+                "protection": merged_prot,
+                "source": src,
+            },
+            "execution_assumptions": asm,
+            "data": {"requested": {"from": bars[eval_idx]["timestamp"],
+                                   "to": bars[-1]["timestamp"]}},
+            "display_name": (info.get("name") or "").strip() or None,
+            "units": {},
+        }
+        lock = board.source_lock or {}
+        out = normalize_result(
+            result_payload, board_id, tf, bars=bars, version=self.VERSION,
+            source_sha256=self._script_sha(script) if script else "",
+            symbol=(lock.get("identity") or {}).get("symbol"),
+            source_script=script or "",
+        )
+        if out.get("error"):
+            return out
+        res = out["result"]
+        res["result_id"] = next_result_id(board.results, res["strategy"]["id"])
+        r = self.state.add_result(board_id, res)
+        if r.get("error"):
+            return r
+        summary = summarize(res)
+        self._bc({"type": "result_created", "board_id": board_id,
+                  "timeframe": tf, "result": summary})
+        return {
+            "status": "ok",
+            "result": summary,
+            "warnings": out.get("warnings") or [],
+            "run": {"engine": result_payload["engine"]["id"],
+                    "elapsed_ms": elapsed_ms, "bars": len(bars) - eval_idx,
+                    "from": bars[eval_idx]["timestamp"], "to": bars[-1]["timestamp"],
+                    "warmup_bars": eval_idx, "backfilled": backfilled,
+                    "clipped": clipped,
+                    "requested": {"start": start_ms, "end": end_ms, "limit": want}},
+        }
 
     # ============ 划线 drawings（0.5.2：每板一份，showOn 管跨周期） ============
     def add_drawing(self, board_id, timeframe, drawing):

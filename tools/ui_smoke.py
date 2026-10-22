@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AgentKline UI smoke (v0.5.4) — 6 browser checks on a disposable instance.
+"""AgentKline UI smoke (v0.6.1) — 8 browser checks on a disposable instance.
 
 Why this exists: test_e2e.py covers the API/MCP surface, not the browser UI.
 These five checks protect the surfaces that 0.5.3/0.5.4 changed by hand:
@@ -11,6 +11,9 @@ These five checks protect the surfaces that 0.5.3/0.5.4 changed by hand:
   5. VPVR layer chip: on → survives reload → off (per-board, localStorage)
   6. latest price outside the visible price range pins to pane top/bottom
      (▲ / ▼) and disappears again when back in range
+  7. indicator series stay aligned by bar timestamp when the store exceeds
+     init_window (2000): the BB legend must equal the API's last value, not a
+     value (store-2000) bars back (the "BB shifted left" regression)
 
 It boots a temporary server on free localhost ports with an EMPTY custom
 scripts root (the 75 builtin entries), creates a mock board, drives headless
@@ -48,7 +51,7 @@ BOARD = {
     "id": BOARD_ID,
     "symbol": "AAA/USDT",
     "source": "datasource/mock_btc",
-    "params": {"days": 60},
+    "params": {"days": 2600},   # > init_window(2000)：回归指标左移（见 check 7）
 }
 
 
@@ -432,6 +435,96 @@ def run_checks(page, base: str) -> tuple[int, int]:
           above["top"] <= 2 and above["width"] > 0 and below["top"] > 100 and below["width"] > 0,
           f"above={above} below={below}")
 
+    # 7) 指标对齐：store > init_window 时不左移（BB 图例必须等于 API 最后一根）
+    #   board days=2600 → 后端全量 >2000 根，前端首屏只装 2000 根；
+    #   旧实现按 values 出点，Vela 取前 2000 个点逐位铺 → 整条线左移 store-2000 根。
+    api = _get(f"{base}/api/indicators?board_id={BOARD_ID}&timeframe=1d&instances=bollinger_bands",
+               timeout=5)
+    bb = (api.get("indicators") or {}).get("bollinger_bands") or {}
+    basis = ((bb.get("lines") or [{}])[0].get("values") or [])
+    api_last = basis[-1] if basis else None
+    probe = page.evaluate("""() => {
+        const r = window.__ak.chart.orchestrator.renderer;
+        const v = [...r.scene.indicators.values()]
+            .find(x => String(x.title || '').startsWith('BB('));
+        const bars = r.scene.bars;
+        if (!v || !bars.length) return null;
+        return {
+            bars: bars.length,
+            lastBar: bars[bars.length - 1].time,
+            series: (v.series || []).map(s => {
+                const pts = s.points || s.data || [];
+                return { n: pts.length, last: pts[pts.length - 1] || null };
+            }),
+        };
+    }""")
+    aligned = bool(
+        probe
+        and len(probe["series"]) == 3
+        and all(s["n"] == probe["bars"] for s in probe["series"])
+        and all(s["last"] and s["last"]["time"] == probe["lastBar"] for s in probe["series"])
+    )
+    shown = probe["series"][0]["last"]["value"] if aligned else None
+    check("指标对齐：store > init_window 仍逐根对齐（BB 不左移）",
+          aligned and api_last is not None and abs(shown - float(api_last)) < 0.5,
+          f"bars={probe and probe['bars']} n={probe and [s['n'] for s in probe['series']]} "
+          f"last={shown} api_last={api_last} store={len(basis)}")
+
+    # 8) +回测：对话框 → 引擎/策略/参数 → 运行 → 结果进结果栏（v0.6.1 M3）
+    page.locator("#result-add").click()
+    page.wait_for_selector(".bt-card", timeout=8000)
+    engine_vals = page.locator(".bt-card .bt-row select").nth(0).evaluate_all(
+        "els => els.map(e => e.value)")
+    strat_vals = page.locator(".bt-card .bt-row select").nth(1).evaluate_all(
+        "els => els.map(e => e.value)")
+    page.wait_for_selector(".bt-params [data-pname]", timeout=8000)
+    params = page.locator(".bt-params [data-pname]").evaluate_all(
+        "els => els.map(e => e.dataset.pname)")
+    # 限定回溯根数，别让冒烟去补 2 万根
+    page.fill("#bt-bars", "300")
+    page.locator(".bt-foot .btn-primary").click()
+    page.wait_for_selector("#result-chips .res-chip", timeout=30000)
+    chips = page.locator("#result-chips .res-chip")
+    n = chips.count()
+    text = chips.first.inner_text() if n else ""
+    check("+回测：对话框 → 运行 → 结果入栏",
+          "builtin" in engine_vals and "strategy/ma_cross" in strat_vals
+          and set(params) == {"fast", "slow"} and n >= 1 and "双均线" in text,
+          f"engines={engine_vals} strategies={strat_vals} params={params} "
+          f"chips={n} text={text[:40]}")
+
+    # 9) 定位历史：交易早于首屏窗口时按需补历史（0.6.1 的"2020 交易定位"回归）
+    #    用 2500 根窗口（不超过已载入的 2600 根，避免服务端回补把首屏也补满）：
+    #    首笔交易会落在首屏 2000 根之外，定位时必须先补历史。
+    ran = _post(f"{base}/api/backtest",
+                {"board_id": BOARD_ID, "timeframe": "1d",
+                 "script": "strategy/ma_cross", "limit": 2500}, timeout=60)
+    rid = (ran.get("result") or {}).get("result_id")
+    items = []
+    if rid:
+        items = (_get(f"{base}/api/result/{rid}?section=trades&limit=3", timeout=5).get("items")
+                 or [])
+    tr = items[0] if items else None
+    scene_bars = "window.__ak.chart.orchestrator.renderer.scene.bars"
+    before_bars = page.evaluate(f"() => ({scene_bars} || []).length")
+    located = False
+    covered = False
+    after_bars = before_bars
+    if tr:
+        located = page.evaluate(
+            "async ([a, b]) => await window.__ak.focusTradeRange(a, b)",
+            [tr["entry_time"], tr["exit_time"]])
+        covered = _wait_until(
+            lambda: page.evaluate(
+                f"(t) => {{ const bars = {scene_bars};"
+                " return bars.length > 0 && bars[0].time <= t; }",
+                [tr["entry_time"]]), timeout=8)
+        after_bars = page.evaluate(f"() => ({scene_bars} || []).length")
+    check("定位历史：早于首屏窗口的交易会补历史",
+          bool(tr) and located and covered and after_bars > before_bars,
+          f"rid={rid} entry={tr and tr['entry_time']} located={located} "
+          f"covered={covered} bars={before_bars}->{after_bars}")
+
     return passed, failed
 
 
@@ -469,10 +562,10 @@ def main() -> int:
             page.wait_for_selector(".ind-add", timeout=15000)
             _wait_app(page)
 
-            print("\nUI smoke（6 条）")
+            print("\nUI smoke（9 条）")
             passed, failed = run_checks(page, server.base)
 
-            # Console errors are a hard failure, but not a sixth check.
+            # Console errors are a hard failure, but not a numbered check.
             noise = [e for e in page_errors if "favicon" not in e]
             if noise:
                 failed += 1

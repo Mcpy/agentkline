@@ -1112,3 +1112,36 @@ body.wb-resizing { cursor: ns-resize; user-select: none; }
     border: 1px solid var(--border); background: transparent; color: var(--text-dim); cursor: pointer;
 }
 .act-link:hover { color: var(--text); background: var(--bg-input); }
+
+/* ---- v0.6.1 运行回测对话框 ---- */
+.bt-card {
+    width: 480px; max-width: 94vw; max-height: 86vh; padding: 18px;
+    display: flex; flex-direction: column;
+}
+.bt-range { display: grid; grid-template-columns: 1fr 1fr 76px; gap: 6px; }
+.bt-range input { min-width: 0; }
+.bt-body { overflow: auto; flex: 1 1 auto; min-height: 0; padding-right: 6px; margin-right: -6px; }
+.bt-row {
+    display: grid; grid-template-columns: 96px 1fr; gap: 10px;
+    align-items: start; margin-bottom: 8px;
+}
+.bt-row > label {
+    font-size: 12px; color: var(--text-dim); padding-top: 7px;
+}
+.bt-ctl { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.bt-row input, .bt-row select {
+    height: 30px; padding: 0 8px; background: var(--bg-input);
+    border: 1px solid var(--border); border-radius: var(--radius-s);
+    color: var(--text); font-size: 12px; width: 100%;
+}
+.bt-row input[type="checkbox"] { width: 16px; height: 16px; margin-top: 7px; }
+.bt-row input:focus, .bt-row select:focus { border-color: var(--accent); outline: none; }
+.bt-hint { font-size: 11px; color: var(--text-faint); line-height: 1.5; }
+.bt-params { border-top: 1px dashed var(--border); margin-top: 10px; padding-top: 10px; }
+.bt-meta { font-size: 12px; color: var(--text); margin-bottom: 2px; }
+.bt-sec { font-size: 11px; color: var(--text-dim); margin: 8px 0 6px; }
+.bt-err {
+    color: var(--down); font-size: 12px; line-height: 1.6;
+    margin-top: 8px; white-space: pre-wrap; min-height: 14px;
+}
+.bt-foot { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }

@@ -6,13 +6,45 @@ skills/ 目录下每个 .md 为一个 skill，头部 YAML frontmatter 含 name/d
 （仿 vibe-trading 的 list_skills/load_skill 模式），让任意接入方学会
 "如何编写能在 AgentKline 合法运行的脚本" 等领域知识，避免试错。
 """
+import os
 import re
 from pathlib import Path
 
 # 项目根/skills（与 scripts/ 同级，随仓库发布）
-SKILLS_DIR = Path(__file__).resolve().parent.parent.parent / "skills"
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+SKILLS_DIR = BASE_DIR / "skills"
+BUILTIN_SCRIPTS = Path(__file__).resolve().parent.parent / "resources" / "scripts"
 
 _FM_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.S)
+# <!-- include:strategy/ma_cross --> → 用内置/自定义脚本源码替换（技能模板单一来源）
+_INCLUDE_RE = re.compile(r"^<!--\s*include:\s*([a-zA-Z0-9_/]+)\s*-->\s*$", re.M)
+
+
+def _script_roots():
+    custom = Path(os.environ.get("AGENTKLINE_SCRIPTS_DIR") or (BASE_DIR / "scripts"))
+    return (custom, BUILTIN_SCRIPTS)
+
+
+def _resolve_script(ref: str):
+    kind, _, stem = ref.partition("/")
+    if not kind or not stem:
+        return None
+    for root in _script_roots():
+        p = root / kind / f"{stem}.py"
+        if p.exists():
+            return p
+    return None
+
+
+def _expand_includes(body: str) -> str:
+    """把 include 指令换成脚本源码代码块；找不到就原样保留（不静默吞内容）。"""
+    def repl(m):
+        path = _resolve_script(m.group(1))
+        if not path:
+            return m.group(0)
+        code = path.read_text(encoding="utf-8").rstrip()
+        return f"```python\n{code}\n```"
+    return _INCLUDE_RE.sub(repl, body)
 
 
 def _parse(md_text: str):
@@ -48,5 +80,5 @@ def load_skill(name: str) -> dict:
     for f in sorted(SKILLS_DIR.glob("*.md")):
         meta, body = _parse(f.read_text(encoding="utf-8"))
         if meta.get("name", f.stem) == name or f.stem == name:
-            return {"name": meta.get("name", f.stem), "content": body}
+            return {"name": meta.get("name", f.stem), "content": _expand_includes(body)}
     return {"error": f"skill '{name}' not found"}

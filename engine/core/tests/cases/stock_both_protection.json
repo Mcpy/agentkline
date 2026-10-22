@@ -1,0 +1,22 @@
+{
+  "api": 1,
+  "engine": "builtin",
+  "bars": {
+    "path": "stock_1d_500.csv",
+    "format": "csv"
+  },
+  "strategy": {
+    "path": "strategy_ma.py"
+  },
+  "run": {
+    "initial_cash": 100000,
+    "fee_bps": 5,
+    "slippage_bps": 5,
+    "direction": "both",
+    "protection": {
+      "stop_loss_pct": 0.03,
+      "take_profit_pct": 0.06
+    }
+  },
+  "timeframe": "1d"
+}

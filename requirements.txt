@@ -6,3 +6,5 @@ websockets>=12.0
 mcp>=1.0.0
 ccxt>=4.0.0
 pyyaml>=6.0
+# 引擎框架（同仓分目录，本地 distribution）：先装 core 再装主包
+-e ./engine/core

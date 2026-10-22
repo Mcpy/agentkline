@@ -6,7 +6,7 @@ description: 如何编写 AgentKline 数据源脚本——main(params[, until])�
 # AgentKline 数据源脚本编写
 
 脚本由 `script_engine` 在隔离命名空间 exec（L1 沙箱：不限 import，自律）。
-人类版同文见 `docs/脚本编写指南.md`；冲突以本 skill 为准。指标脚本见姊妹卷 `indicator-authoring`。
+人类版同文见 `docs/脚本编写指南.md`；冲突以本 skill 为准。指标脚本见姊妹卷 `indicator-authoring`，策略脚本见 `strategy-authoring`。
 
 ## 存放与 id
 - 双根：builtin（包内 resources/scripts，只读）/ custom（scripts_dir，可写）。**你写脚本只落 custom**：
@@ -33,6 +33,13 @@ IDENTITY = ["symbol"]                  # 板锁身份键；路径可换源用 []
 - list_symbols(query) → [{symbol, display}]；索引首用全量+TTL 日级，搜索不穿透交易所。
 - ticker(params) → {last, change, change_pct}。
 - 单槽上限 max_bars_per_slot=50000（截旧+dropped）；**别内嵌巨量数据**，优先自拉；save >100KB 告警。
+
+## 最小模板
+
+> 模板唯一来源：内置数据源 `datasource/mock_btc`（确定性合成、可回溯、带 ticker）。
+> 加载技能时源码原样内联到下面；改模板只改那份脚本，别在技能里另抄。
+
+<!-- include:datasource/mock_btc -->
 
 ## 数据家族范式
 多数据集/多周期 = 单脚本 + 非身份 params 键分片（dataset/interval）。**禁止拆多脚本**（板锁全等校验会拒）。

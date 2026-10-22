@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentkline"
-version = "0.6.0"
+version = "0.6.1"
 description = "AgentKline — a self-hosted, scriptable, agent-ready K-line trading board (Vela chart engine + MCP)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,6 +18,7 @@ dependencies = [
     "mcp>=1.0.0,<2",
     "ccxt>=4.0.0",
     "pyyaml>=6.0",
+    "agentkline-engine-core>=0.1,<1",
 ]
 
 [project.optional-dependencies]
@@ -27,8 +28,19 @@ dev = ["requests>=2.0.0", "playwright>=1.40"]
 # Web 服务（FastAPI + 前端 + /mcp Streamable HTTP）
 agentkline = "agentkline.api.app:main_entry"
 
+[project.entry-points."agentkline.engines"]
+builtin = "agentkline.engines.builtin:BuiltinEngine"
+
+[tool.uv.sources]
+# 引擎框架是本地 distribution（同仓分目录），不走 PyPI
+agentkline-engine-core = { path = "engine/core", editable = true }
+
 [tool.setuptools]
-packages = ["agentkline", "agentkline.core", "agentkline.api", "agentkline.indicators"]
+packages = [
+    "agentkline", "agentkline.core", "agentkline.api", "agentkline.indicators",
+    "agentkline.engines", "agentkline.engines.builtin",
+    "agentkline.backtest",
+]
 
 [tool.setuptools.package-data]
 agentkline = ["resources/*.json", "resources/scripts/*/*.py"]

@@ -1,0 +1,18 @@
+{
+  "api": 1,
+  "engine": "builtin",
+  "bars": {
+    "path": "btc_1d_200.csv",
+    "format": "csv"
+  },
+  "strategy": {
+    "path": "strategy_ma.py"
+  },
+  "run": {
+    "initial_cash": 10000,
+    "fee_bps": 5,
+    "slippage_bps": 5,
+    "direction": "short_only"
+  },
+  "timeframe": "1d"
+}
