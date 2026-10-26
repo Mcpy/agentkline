@@ -6,6 +6,7 @@ FastAPI 与 MCP server 共用此层，不依赖任何传输协议。
 import csv
 import hashlib
 import logging
+import sqlite3
 import time
 from bisect import bisect_left, bisect_right
 from datetime import datetime
@@ -16,6 +17,7 @@ from .state import StateManager
 from .script_engine import ScriptEngine
 from .datasource import DataSourceManager
 from .results import normalize_result, next_result_id, summarize, slice_section
+from .store import Store
 from ..backtest import runner as engine_runner
 
 logger = logging.getLogger("agentkline.service")
@@ -32,15 +34,27 @@ def _to_ms(v):
 class AgentKlineService:
     """AgentKline 业务核心"""
 
-    VERSION = "0.6.2"
+    VERSION = "0.6.3"
 
-    def __init__(self, scripts_dir: str, limits: dict = None):
+    def __init__(self, scripts_dir: str, limits: dict = None, data_dir: str = None):
         limits = limits or {}
         self.state = StateManager()
         self.script_engine = ScriptEngine(scripts_dir)
         self.datasource = DataSourceManager(self.state, self.script_engine, self)
         from .watchlist import WatchlistManager
         self.watchlist = WatchlistManager(self, poll_s=limits.get("quotes_poll_s", 5))
+        # v0.6.3 现场库：给 data_dir 才落盘（测试/一次性实例保持纯内存）
+        self.data_dir = Path(data_dir).expanduser() if data_dir else None
+        self.store = None
+        if self.data_dir:
+            try:
+                self.store = Store(self.data_dir / "state.db", app_version=self.VERSION)
+            except (OSError, sqlite3.Error):
+                # 目录不可写/磁盘故障：降级纯内存，别让一块烂盘把服务挡在门外
+                logger.exception("现场库打开失败，本次运行降级为纯内存（不落盘）")
+            else:
+                self.state.restore(self.store)
+                self.watchlist.attach(self.store)
         # R8 性能三件套限额（config limits 可覆盖）
         self.max_window = int(limits.get("max_window", 5000))
         # (board, tf) -> 已确认没有更早数据时的最早时间戳；有新增历史会自动失效
@@ -103,6 +117,26 @@ class AgentKlineService:
             if x.get("symbol") == symbol:
                 return x.get("display")
         return None
+
+    def restore_market(self):
+        """v0.6.3 重启恢复：按 source_lock 逐槽重拉 K 线并起轮询（后台线程调用）。
+        源不可达不阻塞启动：该槽保持配置，轮询线程后续自愈。"""
+        if self.store is None:
+            return
+        boards = [b for b in self.state.list_boards() if b.get("locked")]
+        logger.info("恢复行情：%d 个锁定板", len(boards))
+        for b in boards:
+            board = self.state.get_board(b["id"])
+            if board is None:
+                continue
+            for tf in list(board.timeframes.keys()):
+                try:
+                    r = self._configure_slot(b["id"], tf)
+                    if r.get("error"):
+                        logger.warning("恢复槽 %s:%s 失败: %s", b["id"], tf, r["error"])
+                except Exception as exc:
+                    logger.warning("恢复槽 %s:%s 异常: %s", b["id"], tf, exc)
+        logger.info("行情恢复结束")
 
     # ============ 画板 ============
     def create_board(self, board_id, name=None, intervals=None, symbol=None,
@@ -189,6 +223,11 @@ class AgentKlineService:
             return {"error": f"LOCK_INCOMPLETE: 脚本 IDENTITY 键 {missing} 未在 params 提供（如 symbol）"}
         board = self.state.get_board(board_id)
         board.source_lock = {"script": script, "identity": {k: params[k] for k in id_keys}}
+        if self.store is not None:
+            # 锁是板配置的一部分（重启后按它重拉行情），改完立即落盘
+            self.state._p_board(board)
+            self.state._p(self.store.log_event, "board_lock",
+                          {"board": board_id, "script": script}, board_id)
         self._bc({"type": "board_locked", "board_id": board_id,
                   "source_lock": board.source_lock})
         return None
@@ -663,6 +702,13 @@ class AgentKlineService:
         except Exception:
             return ""
 
+    def _next_result_id(self, strategy_id: str) -> str:
+        """结果 id 全局唯一：/api/result/{id} 不带 board 参数，跨板撞 id 会取错结果。"""
+        existing = {}
+        for b in self.state.boards.values():
+            existing.update(dict.fromkeys(b.results))
+        return next_result_id(existing, strategy_id)
+
     def import_result(self, payload):
         """导入一份外部/引擎结果：校验、补算口径、冻结、广播。"""
         if not isinstance(payload, dict):
@@ -683,22 +729,47 @@ class AgentKlineService:
         if out.get("error"):
             return out
         res = out["result"]
-        res["result_id"] = next_result_id(board.results, res["strategy"]["id"])
+        res["result_id"] = self._next_result_id(res["strategy"]["id"])
         r = self.state.add_result(board_id, res)
         if r.get("error"):
             return r
         summary = summarize(res)
+        self._bc_result_created(board_id, tf, summary, r)
+        out_body = {"status": "ok", "result": summary,
+                    "warnings": out.get("warnings") or []}
+        if r.get("evicted"):
+            out_body["evicted"] = r["evicted"]
+        return out_body
+
+    def _bc_result_created(self, board_id, tf, summary, add_out):
+        """结果落库后的广播：先删被自动淘汰的旧结果，再宣布新结果。"""
+        from .results import MAX_RESULTS_PER_BOARD
+        for ev in add_out.get("evicted") or []:
+            self._bc({"type": "result_deleted", "board_id": board_id, "timeframe": tf,
+                      "result_id": ev["result_id"], "evicted": True,
+                      "display_name": ev.get("display_name"),
+                      "created_at": ev.get("created_at"),
+                      "limit": MAX_RESULTS_PER_BOARD})
         self._bc({"type": "result_created", "board_id": board_id,
                   "timeframe": tf, "result": summary})
-        return {"status": "ok", "result": summary,
-                "warnings": out.get("warnings") or []}
 
     def list_results(self, board_id=None, timeframe=None):
         rows = self.state.list_results(board_id, timeframe)
-        return {"board_id": board_id, "count": len(rows), "results": rows}
+        out = {"board_id": board_id, "count": len(rows), "results": rows}
+        if board_id:
+            from .results import MAX_RESULTS_PER_BOARD
+            board = self.state.get_board(board_id)
+            used = len(board.results) if board else 0
+            out["retention"] = {
+                "limit": MAX_RESULTS_PER_BOARD, "count": used,
+                "warn_at": max(1, MAX_RESULTS_PER_BOARD - 10),
+                "evict_next": max(0, used - MAX_RESULTS_PER_BOARD + 1),
+            }
+        return out
 
     def get_result(self, result_id, section="summary", offset=0, limit=200):
-        res = self.state.get_result(result_id)
+        res = (self.state.get_result(result_id) if section == "summary"
+               else self.state.hydrate_result(result_id))
         if not res:
             return {"error": f"Result '{result_id}' not found"}
         return slice_section(res, section, offset, limit)
@@ -978,14 +1049,13 @@ class AgentKlineService:
         if out.get("error"):
             return out
         res = out["result"]
-        res["result_id"] = next_result_id(board.results, res["strategy"]["id"])
+        res["result_id"] = self._next_result_id(res["strategy"]["id"])
         r = self.state.add_result(board_id, res)
         if r.get("error"):
             return r
         summary = summarize(res)
-        self._bc({"type": "result_created", "board_id": board_id,
-                  "timeframe": tf, "result": summary})
-        return {
+        self._bc_result_created(board_id, tf, summary, r)
+        body = {
             "status": "ok",
             "result": summary,
             "warnings": out.get("warnings") or [],
@@ -996,6 +1066,9 @@ class AgentKlineService:
                     "clipped": clipped,
                     "requested": {"start": start_ms, "end": end_ms, "limit": want}},
         }
+        if r.get("evicted"):
+            body["evicted"] = r["evicted"]
+        return body
 
     # ============ 划线 drawings（0.5.2：每板一份，showOn 管跨周期） ============
     def add_drawing(self, board_id, timeframe, drawing):

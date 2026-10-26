@@ -927,6 +927,13 @@ def test(port: int, token: str = None):
     for bid in ["lk", "bare", "nobfboard", "bigb", "symboard", "ivb", "radb", "pf1", "pf2", "pf3"]:  # slowb 断言不残留，清理段不删
         r = s.delete(f"{base}/api/board/{bid}")
         check(f"delete {bid}", r.status_code == 200, r.text)
+    # e2e 自己写的压测脚本不留在仓库（save_script 无删除 API，直接清文件）
+    try:
+        os.remove(os.path.join(os.environ.get("AGENTKLINE_SCRIPTS_DIR")
+                               or os.path.join(os.path.dirname(__file__), "scripts"),
+                               "indicator", "tenp.py"))
+    except OSError:
+        pass
 
     print(f"\n{'='*60}\nResults: {passed} passed, {failed} failed, {passed+failed} total\n{'='*60}\n")
     return failed == 0

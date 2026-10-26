@@ -576,11 +576,16 @@ def normalize_result(payload, board_id, timeframe, bars=None, version="0.6.0",
 
 
 def summarize(result: dict) -> dict:
-    """摘要：不含 equity/trades/fills/benchmark 大数组。"""
+    """摘要：不含 equity/trades/fills/benchmark 大数组。
+
+    v0.6.3：摘要态（从现场库读出的 listing 条目）本身没有大数组，
+    计数键已在库里；不要再按空数组覆盖成 0。"""
     out = {k: v for k, v in result.items()
            if k not in ("equity", "trades", "fills", "benchmark")}
-    out["equity_points"] = len((result.get("equity") or {}).get("times") or [])
-    out["trade_count"] = len(result.get("trades") or [])
+    if "equity_points" not in out:
+        out["equity_points"] = len((result.get("equity") or {}).get("times") or [])
+    if "trade_count" not in out:
+        out["trade_count"] = len(result.get("trades") or [])
     return out
 
 

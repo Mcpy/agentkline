@@ -1,10 +1,16 @@
 """
 AgentKline - 内存状态管理
 管理画板、时间周期、K线、指标、副图
+
+v0.6.3：内存是运行时真源，落盘是镜像。变更收口在本类的方法末尾，
+store 由 service 注入（None = 纯内存，测试/一次性实例走这条）。
 """
+import logging
 import math
 from typing import Optional
 from datetime import datetime
+
+logger = logging.getLogger("agentkline.state")
 
 
 def _clean(obj):
@@ -108,11 +114,106 @@ class Board:
 
 
 class StateManager:
-    """全局状态管理器（内存）"""
+    """全局状态管理器（内存 + 可选现场库镜像）"""
 
     def __init__(self):
         self.boards: dict[str, Board] = {}
         self.current_board_id: Optional[str] = None
+        self.store = None          # Store | None（service 注入/restore 设置）
+        self.persist_errors = 0    # 落盘失败计数（只记日志，不阻断内存操作）
+
+    # ========== 现场库（v0.6.3） ==========
+
+    def _p(self, fn, *args, **kw):
+        """落盘调用收口：磁盘故障降级为日志，内存态继续服务。"""
+        if self.store is None:
+            return
+        try:
+            fn(*args, **kw)
+        except Exception:
+            self.persist_errors += 1
+            logger.exception("现场库写入失败: %s", getattr(fn, "__name__", fn))
+
+    def _p_board(self, board: Board):
+        self._p(self.store.upsert_board, {
+            "id": board.id, "name": board.name, "intervals": board.intervals,
+            "current_tf": board.current_timeframe, "source_lock": board.source_lock,
+            "created_at": board.created_at,
+        })
+
+    def _p_tf(self, board: Board, tf_state: TimeframeState):
+        self._p(self.store.upsert_timeframe, board.id, tf_state.interval,
+                tf_state.symbol, tf_state.subplots)
+
+    def restore(self, store) -> None:
+        """启动恢复：板/周期/指标/画线/结果摘要/雷达行。K 线与缓存由数据源重取。"""
+        self.store = store
+        for row in store.load_boards():
+            board = Board(row["id"], row["name"], row["intervals"])
+            tf_rows = store.load_timeframes(row["id"])
+            for t in tf_rows:
+                tf_state = board.ensure_tf(t["tf"])
+                tf_state.symbol = t.get("symbol") or ""
+                tf_state.subplots = t.get("subplots") or {}
+                if t["tf"] not in board.intervals:
+                    board.intervals.append(t["tf"])
+            board.intervals.sort(key=tf_rank)
+            if row.get("current_tf"):
+                board.ensure_tf(row["current_tf"])
+                if row["current_tf"] not in board.intervals:
+                    board.intervals.append(row["current_tf"])
+                    board.intervals.sort(key=tf_rank)
+                board.current_timeframe = row["current_tf"]
+            board.source_lock = row.get("source_lock")
+            board.created_at = row.get("created_at") or board.created_at
+            for inst in store.load_indicators(row["id"]):
+                board.ind_registry[inst["inst_id"]] = inst
+                self._restore_blob_cache(board, inst)
+            for drawing in store.load_drawings(row["id"]):
+                board.drawings[drawing["id"]] = drawing
+            for summary in store.load_result_summaries(row["id"]):
+                board.results[summary["result_id"]] = summary
+            self.boards[board.id] = board
+            logger.info("恢复画板 %s: %d 周期 / %d 指标 / %d 画线 / %d 结果",
+                        board.id, len(board.timeframes), len(board.ind_registry),
+                        len(board.drawings), len(board.results))
+        last = store.get_meta("last_board_id")
+        self.current_board_id = last if last in self.boards else next(iter(self.boards), None)
+        if self.boards:
+            logger.info("现场恢复完成: %d 板 / %d 结果", len(self.boards),
+                        sum(len(b.results) for b in self.boards.values()))
+            self._p(self.store.log_event, "restore", {
+                "boards": len(self.boards),
+                "results": sum(len(b.results) for b in self.boards.values())})
+
+    def _restore_blob_cache(self, board: Board, inst: dict) -> None:
+        """冻结 blob 的物化缓存不在盘上（缓存是派生），从实例自带的 blob 值重建。"""
+        if inst.get("kind") != "blob" or not isinstance(inst.get("blob"), dict):
+            return
+        blob = inst["blob"]
+        targets = (list(board.timeframes) if inst.get("scope") == "board"
+                   else [inst.get("tf") or board.current_timeframe])
+        for tf in [t for t in targets if t]:
+            board.ensure_tf(tf).ind_cache[inst["inst_id"]] = {
+                "values": _clean(blob.get("values")),
+                "lines": _clean(blob.get("lines")),
+                "markers": _clean(blob.get("markers")),
+                "times": None, "levels": None, "polylines": None,
+            }
+
+    def hydrate_result(self, result_id: str) -> Optional[dict]:
+        """摘要态结果按需补产物（净值/交易/成交/基准）；取不到原样返回。"""
+        res = self.get_result(result_id)
+        if res is None or "equity" in res or self.store is None:
+            return res
+        full = self.store.load_result(result_id)
+        if not full:
+            return res
+        for board in self.boards.values():
+            if result_id in board.results:
+                board.results[result_id] = full
+                return full
+        return res
 
     # ========== 画板管理 ==========
 
@@ -123,6 +224,12 @@ class StateManager:
         self.boards[board_id] = board
         if self.current_board_id is None:
             self.current_board_id = board_id
+        if self.store is not None:
+            self._p_board(board)
+            for tf in board.intervals:
+                self._p(self.store.upsert_timeframe, board_id, tf, "", {})
+            self._p(self.store.set_meta, "last_board_id", self.current_board_id or "")
+            self._p(self.store.log_event, "board_create", {"board": board_id}, board_id)
         return {"id": board_id, "name": board.name, "intervals": board.intervals}
 
     def list_boards(self) -> list[dict]:
@@ -146,6 +253,8 @@ class StateManager:
         if board_id not in self.boards:
             return {"error": f"Board '{board_id}' not found"}
         self.current_board_id = board_id
+        if self.store is not None:
+            self._p(self.store.set_meta, "last_board_id", board_id)
         return {"id": board_id, "name": self.boards[board_id].name}
 
     def update_board(self, board_id: str, data: dict) -> dict:
@@ -154,6 +263,7 @@ class StateManager:
         board = self.boards[board_id]
         if "name" in data:
             board.name = data["name"]
+            self._p_board(board)
         return {"id": board_id, "name": board.name}
 
     def delete_board(self, board_id: str) -> dict:
@@ -162,6 +272,10 @@ class StateManager:
         del self.boards[board_id]
         if self.current_board_id == board_id:
             self.current_board_id = next(iter(self.boards), None)
+        if self.store is not None:
+            self._p(self.store.delete_board, board_id)
+            self._p(self.store.set_meta, "last_board_id", self.current_board_id or "")
+            self._p(self.store.log_event, "board_delete", {"board": board_id}, board_id)
         return {"status": "ok"}
 
     def get_board(self, board_id: str) -> Optional[Board]:
@@ -170,14 +284,31 @@ class StateManager:
     # ========== 结果实例（v0.6.0） ==========
 
     def add_result(self, board_id: str, result: dict) -> dict:
+        """登记结果；满上限自动淘汰最旧（v0.6.3：不再拒跑，evicted 回传给上层提示）。"""
         from .results import MAX_RESULTS_PER_BOARD
         board = self.boards.get(board_id)
         if not board:
             return {"error": f"Board '{board_id}' not found"}
-        if len(board.results) >= MAX_RESULTS_PER_BOARD:
-            return {"error": f"RESULT_LIMIT: 每板最多 {MAX_RESULTS_PER_BOARD} 条结果，请先删除旧结果"}
+        evicted = []
+        while len(board.results) >= MAX_RESULTS_PER_BOARD:
+            oldest_id = min(board.results, key=lambda k: board.results[k].get("created_at") or 0)
+            oldest = board.results.pop(oldest_id)
+            evicted.append({"result_id": oldest_id,
+                            "display_name": oldest.get("display_name") or oldest_id,
+                            "created_at": oldest.get("created_at")})
+            if self.store is not None:
+                self._p(self.store.delete_result, oldest_id)
+                self._p(self.store.log_event, "result_evict",
+                        {"result_id": oldest_id, "board": board_id}, board_id)
         board.results[result["result_id"]] = result
-        return {"status": "ok", "result_id": result["result_id"]}
+        if self.store is not None:
+            self._p(self.store.insert_result, board_id, result)
+            self._p(self.store.log_event, "result_create",
+                    {"result_id": result["result_id"], "board": board_id}, board_id)
+        out = {"status": "ok", "result_id": result["result_id"]}
+        if evicted:
+            out["evicted"] = evicted
+        return out
 
     def list_results(self, board_id: str = None, timeframe: str = None) -> list[dict]:
         from .results import summarize
@@ -208,10 +339,15 @@ class StateManager:
         for board in ([b] if b else self.boards.values()):
             if board and result_id in board.results:
                 del board.results[result_id]
+                if self.store is not None:
+                    self._p(self.store.delete_result, result_id)
+                    self._p(self.store.log_event, "result_delete",
+                            {"result_id": result_id, "board": board.id}, board.id)
                 return {"status": "ok", "result_id": result_id, "board_id": board.id}
         return {"error": f"Result '{result_id}' not found"}
 
     def rename_result(self, result_id: str, display_name: str, board_id: str = None) -> dict:
+        from .results import summarize
         r = self.get_result(result_id, board_id)
         if not r:
             return {"error": f"Result '{result_id}' not found"}
@@ -219,6 +355,8 @@ class StateManager:
         if not name:
             return {"error": "RESULT_INVALID: display_name 不能为空"}
         r["display_name"] = name
+        if self.store is not None:
+            self._p(self.store.update_result_summary, result_id, summarize(r))
         return {"status": "ok", "result_id": result_id, "display_name": name}
 
     # ========== 时间周期管理 ==========
@@ -232,6 +370,9 @@ class StateManager:
         board.timeframes[interval] = TimeframeState(interval)
         board.intervals.append(interval)
         board.intervals.sort(key=tf_rank)  # 短→长排序（优化点2）
+        if self.store is not None:
+            self._p_tf(board, board.timeframes[interval])
+            self._p_board(board)
         return {"status": "ok", "interval": interval, "intervals": board.intervals}
 
     def delete_timeframe(self, board_id: str, tf: str) -> dict:
@@ -245,6 +386,9 @@ class StateManager:
             board.intervals.remove(tf)
         if board.current_timeframe == tf:
             board.current_timeframe = board.intervals[0] if board.intervals else None
+        if self.store is not None:
+            self._p(self.store.delete_timeframe, board_id, tf)
+            self._p_board(board)
         return {"status": "ok", "default_timeframe": board.current_timeframe}
 
     def list_timeframes(self, board_id: str) -> dict:
@@ -261,6 +405,8 @@ class StateManager:
         if tf not in board.timeframes:
             return {"error": f"Timeframe '{tf}' not found"}
         board.current_timeframe = tf
+        if self.store is not None:
+            self._p_board(board)
         return {"status": "ok", "timeframe": tf}
 
     def get_default_timeframe(self, board_id: str) -> Optional[str]:
@@ -316,6 +462,8 @@ class StateManager:
         if not board:
             return {"error": f"Board '{board_id}' not found"}
         board.ind_registry[inst["inst_id"]] = inst
+        if self.store is not None:
+            self._p(self.store.upsert_indicator, board_id, inst)
         return {"status": "ok", "inst_id": inst["inst_id"]}
 
     def get_instance(self, board_id: str, inst_id: str) -> Optional[dict]:
@@ -331,6 +479,8 @@ class StateManager:
         if not board or inst_id not in board.ind_registry:
             return {"error": f"Indicator '{inst_id}' not found"}
         board.ind_registry[inst_id].update(patch)
+        if self.store is not None:
+            self._p(self.store.upsert_indicator, board_id, board.ind_registry[inst_id])
         return {"status": "ok"}
 
     def delete_instance(self, board_id: str, inst_id: str) -> dict:
@@ -343,6 +493,8 @@ class StateManager:
             tf.ind_cache.pop(inst_id, None)
         if not existed:
             return {"error": f"Indicator '{inst_id}' not found"}
+        if self.store is not None:
+            self._p(self.store.delete_indicator, board_id, inst_id)
         return {"status": "ok"}
 
     def tf_instances(self, board_id: str, timeframe: str) -> list[dict]:
@@ -402,6 +554,8 @@ class StateManager:
         if name in tf_state.subplots:
             return {"error": f"Subplot '{name}' already exists"}
         tf_state.subplots[name] = {"name": name, "height": height, "title": title}
+        if self.store is not None:
+            self._p_tf(board, tf_state)
         return {"status": "ok", "name": name}
 
     def update_subplot(self, board_id: str, timeframe: str, name: str,
@@ -417,6 +571,8 @@ class StateManager:
             sp["height"] = height
         if title is not None:
             sp["title"] = title
+        if self.store is not None:
+            self._p_tf(board, tf_state)
         return sp
 
     def delete_subplot(self, board_id: str, timeframe: str, name: str) -> dict:
@@ -427,6 +583,8 @@ class StateManager:
         if not tf_state or name not in tf_state.subplots:
             return {"error": f"Subplot '{name}' not found"}
         del tf_state.subplots[name]
+        if self.store is not None:
+            self._p_tf(board, tf_state)
         # 同时删除 target 为该副图的所有指标实例（登记处+各tf缓存一次删净）
         for inst in [i for i in board.ind_registry.values() if i.get("target") == name]:
             self.delete_instance(board_id, inst["inst_id"])
@@ -460,8 +618,7 @@ class StateManager:
             return []
         return [self._insert_drawing(board, d, timeframe) for d in drawings]
 
-    @staticmethod
-    def _insert_drawing(board, drawing: dict, timeframe: str = None) -> dict:
+    def _insert_drawing(self, board, drawing: dict, timeframe: str = None) -> dict:
         import uuid
         did = drawing.get("id") or uuid.uuid4().hex[:8]
         d = {**drawing, "id": did}
@@ -471,6 +628,8 @@ class StateManager:
             if band:
                 d["showOn"] = [band]
         board.drawings[did] = d
+        if self.store is not None:
+            self._p(self.store.upsert_drawing, board.id, d)
         return d
 
     def delete_drawing(self, board_id: str, drawing_id: str) -> dict:
@@ -480,6 +639,8 @@ class StateManager:
         if drawing_id not in board.drawings:
             return {"error": f"Drawing '{drawing_id}' not found"}
         del board.drawings[drawing_id]
+        if self.store is not None:
+            self._p(self.store.delete_drawing, board_id, drawing_id)
         return {"status": "ok"}
 
     def delete_drawings(self, board_id: str, ids: list[str]) -> dict:
@@ -492,6 +653,8 @@ class StateManager:
             if did in board.drawings:
                 del board.drawings[did]
                 deleted.append(did)
+                if self.store is not None:
+                    self._p(self.store.delete_drawing, board_id, did)
             else:
                 missing.append(did)
         return {"status": "ok", "deleted": deleted, "missing": missing}
@@ -503,6 +666,8 @@ class StateManager:
         if drawing_id not in board.drawings:
             return {"error": f"Drawing '{drawing_id}' not found"}
         board.drawings[drawing_id] = {**board.drawings[drawing_id], **patch, "id": drawing_id}
+        if self.store is not None:
+            self._p(self.store.upsert_drawing, board_id, board.drawings[drawing_id])
         return {"status": "ok", "drawing": board.drawings[drawing_id]}
 
     def list_drawings(self, board_id: str, timeframe: str = None) -> list[dict]:

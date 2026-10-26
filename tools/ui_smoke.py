@@ -61,11 +61,14 @@ def _get(url: str, timeout: float = 2.0):
         return json.loads(r.read())
 
 
-def _post(url: str, payload: dict, timeout: float = 30.0):
+def _post(url: str, payload: dict, timeout: float = 30.0, token: str = None):
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -104,6 +107,8 @@ class TempServer:
         self.web_port = _free_port()
         self.agent_port = _free_port()
         self.base = f"http://127.0.0.1:{self.web_port}"
+        self.agent_base = f"http://127.0.0.1:{self.agent_port}"
+        self.token = "ui-smoke-token"   # 临时实例自带 token（exec 组只在 agent 端口）
         self.log_path = self.tmp / "server.log"
         self.log = open(self.log_path, "w", encoding="utf-8")
         env = os.environ.copy()
@@ -113,6 +118,8 @@ class TempServer:
             "AGENTKLINE_AGENT_HOST": "127.0.0.1",
             "AGENTKLINE_AGENT_PORT": str(self.agent_port),
             "AGENTKLINE_SCRIPTS_DIR": str(self.tmp / "scripts"),
+            "AGENTKLINE_DATA_DIR": str(self.tmp / "data"),
+            "AGENTKLINE_TOKEN": self.token,
         })
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "agentkline.api.app"],
@@ -253,7 +260,8 @@ def _wait_until(fn, timeout=6.0):
 
 
 # ---------------------------------------------------------------- checks
-def run_checks(page, base: str) -> tuple[int, int]:
+def run_checks(page, base: str, agent_base: str = None,
+               token: str = None) -> tuple[int, int]:
     passed = failed = 0
 
     def check(name: str, ok: bool, detail="") -> None:
@@ -542,7 +550,9 @@ def run_checks(page, base: str) -> tuple[int, int]:
     detail_idx = page.locator("#wb-overview .res-trade-detail .res-tc-idx").first
     idx0 = detail_idx.inner_text() if detail_idx.count() else ""
 
-    page.locator("#result-stats .res-stat-btn").click()
+    # v0.6.3 用户裁决：统计卡「口径」按钮删除；信任区仍可从详情 details 展开
+    ab_gone = page.locator("#result-stats .res-stat-btn").count() == 0
+    page.locator("#wb-overview .res-trust > summary").click()
     page.wait_for_timeout(300)
     trust_open = page.evaluate("() => !!document.querySelector('#wb-overview .res-trust')?.open")
 
@@ -576,11 +586,11 @@ def run_checks(page, base: str) -> tuple[int, int]:
         miss = page.evaluate("([t,p]) => window.__akChartClick ? window.__akChartClick(t,p) : null",
                              [tm, max(p0, p1) + abs(p1 - p0) * 5 + 1])
         miss_ok = page.locator("#wb-overview .res-trade-detail .res-tc-idx").first.inner_text()
-    check("B1：点行选中/亏损标记/口径入口/交易盒点选",
+    check("B1：点行选中/亏损标记/口径区可展开（按钮已删）/交易盒点选",
           row_n > 0 and sel_n == 1 and idx0.startswith("#") and bad_loss == 0
-          and trust_open and calls1 - calls0 >= 5
+          and ab_gone and trust_open and calls1 - calls0 >= 5
           and hit is True and hit_idx == "#1" and miss is False and miss_ok == "#1",
-          f"rows={row_n} sel={sel_n} idx={idx0} bad_loss={bad_loss} trust={trust_open} "
+          f"rows={row_n} sel={sel_n} idx={idx0} bad_loss={bad_loss} ab_gone={ab_gone} trust={trust_open} "
           f"clicks={calls1 - calls0} box={hit}/{hit_idx} boxmiss={miss}/{miss_ok}")
 
     # 11) 0.6.2 B2：水下填充（净值 ↔ 高水位）与交易盒（买点↔卖点对角矩形）
@@ -667,6 +677,45 @@ def run_checks(page, base: str) -> tuple[int, int]:
         print("  [dbg] csv download failed:", e)
     check("B3：明细 CSV 导出", csv_ok and csv_rows >= 11, f"ok={csv_ok} rows={csv_rows}")
 
+    # 15) 0.6.3 保留策略：结果栏常驻提示（用户必须知道超出会自动淘汰）
+    rt = page.locator("#result-retention")
+    rt_visible = rt.is_visible()
+    rt_text = rt.inner_text() if rt_visible else ""
+    check("0.6.3：结果栏常驻保留策略提示",
+          rt_visible and "100" in rt_text and rt.get_attribute("title") not in (None, ""),
+          f"visible={rt_visible} text={rt_text[:60]}")
+
+    # 16) 0.6.3：灌到上限 → 警示文案；再导一条 → 自动淘汰 + toast 明示
+    small = {"equity": {"times": [1700000000000, 1700086400000],
+                        "values": [10000, 10010]},
+             "run": {"initial_cash": 10000},
+             "strategy": {"id": "strategy/smoke_fill"}}
+
+    def _fill(n: int) -> None:
+        # 导入属 exec 组（仅 agent 端口）；用临时实例自己的 token
+        for _ in range(n):
+            _post(f"{agent_base}/api/result",
+                  {"payload": {**small, "board_id": BOARD_ID, "timeframe": "1d"}},
+                  timeout=20, token=token)
+
+    cur = _get(f"{base}/api/results?board_id={BOARD_ID}", timeout=10)["count"]
+    _fill(max(0, 100 - cur))
+    page.reload()
+    _wait_app(page)
+    warn_text = page.locator("#result-retention").inner_text()
+    warn_cls = page.locator("#result-retention").get_attribute("class") or ""
+    _fill(1)
+    toast_text = ""
+    try:
+        page.wait_for_selector(".toast", timeout=10000)
+        toast_text = page.locator(".toast").last.inner_text()
+    except Exception:  # noqa: BLE001
+        pass
+    check("0.6.3：到上限转警示并说明将删最旧",
+          "100/100" in warn_text and "warn" in warn_cls, f"text={warn_text[:60]} cls={warn_cls}")
+    check("0.6.3：自动淘汰有 toast 明示",
+          "自动删除" in toast_text and "100" in toast_text, f"toast={toast_text[:80]}")
+
     return passed, failed
 
 
@@ -705,7 +754,7 @@ def main() -> int:
             _wait_app(page)
 
             print("\nUI smoke（9 条）")
-            passed, failed = run_checks(page, server.base)
+            passed, failed = run_checks(page, server.base, server.agent_base, server.token)
 
             # Console errors are a hard failure, but not a numbered check.
             noise = [e for e in page_errors if "favicon" not in e]

@@ -1,6 +1,6 @@
 # AgentKline API 文档
 
-> 版本：v0.6.2 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server（API 自 v0.4.0 起保持兼容）
+> 版本：v0.6.3 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server（API 自 v0.4.0 起保持兼容）
 > 破坏性硬切版本：无兼容层。旧路径（/api/ohlcv、/api/load-csv、/history、datasource 端点、indicator/update 杂交路径）一律 404/405。
 > 机器可读附录：`python scripts/gen_api_ref.py` 可从运行中服务生成 REST 路由表 + MCP 工具表（防漂移）。
 
@@ -274,6 +274,8 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
 - 返回：`{status, result: <结果摘要>, warnings, run: {engine, elapsed_ms, bars, from, to, warmup_bars, backfilled, clipped, requested}}`；
   `clipped=true` 表示请求的开始时间早于数据源最早一根，实际从 `run.from` 开始。
 - 结果不覆盖：重跑生成新 `result_id`；查询走 `/api/results`、`/api/result/{id}?section=summary|equity|trades|fills`。
+- 结果保留（v0.6.3）：每板保留最近 100 条，超出自动删除最旧一条（含净值与交易）；`run_backtest`/`POST /api/result`
+  响应带 `evicted:[{result_id, display_name, created_at}]`，`GET /api/results` 带 `retention:{limit, count, warn_at, evict_next}`。
 - 出错：400 + `{"error": "CODE: 说明"}`，码与 CLI 一致（`ENGINE_NOT_FOUND`/`API_MISMATCH`/`SCRIPT_NOT_FOUND`/
   `MAIN_MISSING`/`PARAMS_INVALID`/`PROTECTION_*`/`TARGET_*`/`RUN_TIMEOUT`/`ENGINE_CRASH`）。
 

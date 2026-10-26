@@ -16,6 +16,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 WEB_DIST = BASE_DIR / "web_dist"
 # v0.4.3：custom 根可 env 固定（pip/venv 重建免疫）；缺省=BASE_DIR/scripts（源码运行=仓库根，包外安全）
 SCRIPTS_DIR = Path(os.environ.get("AGENTKLINE_SCRIPTS_DIR") or (BASE_DIR / "scripts"))
+# v0.6.3 现场库目录（画板/结果/雷达落盘）；env 可覆盖，缺省 ~/.agentkline
+DATA_DIR = Path(os.environ.get("AGENTKLINE_DATA_DIR")
+                or (Path.home() / ".agentkline")).expanduser()
 SNAPSHOT_DIR = BASE_DIR / "snapshots"
 SNAPSHOT_DIR.mkdir(exist_ok=True)
 
@@ -103,7 +106,8 @@ def load_config() -> dict:
 
 
 CONFIG = load_config()
-service = AgentKlineService(str(SCRIPTS_DIR), (CONFIG.get("limits") or {}))
+service = AgentKlineService(str(SCRIPTS_DIR), (CONFIG.get("limits") or {}),
+                            data_dir=str(DATA_DIR))
 service.notify = _sync_notify
 service._ws_active = lambda: bool(ws_manager.active)
 service.snapshot_dir = SNAPSHOT_DIR

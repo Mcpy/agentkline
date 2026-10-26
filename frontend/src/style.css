@@ -869,6 +869,12 @@ div.vela-attribution a { color: var(--text-dim); text-decoration: underline; }
     color: var(--text-dim); font-size: 11px; cursor: pointer; flex-shrink: 0;
 }
 .result-detail:hover { color: var(--text); background: var(--bg-input); }
+/* v0.6.3 保留策略提示：常驻小字，接近上限转警示色（用户必须知道会自动淘汰） */
+.res-retention {
+    margin-left: auto; margin-right: 8px; font-size: 10px; line-height: 1.2;
+    color: var(--text-faint); white-space: nowrap; cursor: default; flex-shrink: 0;
+}
+.res-retention.warn { color: #f0a020; }
 
 /* ---- 工作坞 ---- */
 .workbench {
@@ -1146,11 +1152,7 @@ body.wb-resizing { cursor: ns-resize; user-select: none; }
 }
 .bt-foot { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
 
-/* 0.6.2 B1：统计卡「口径」入口 + 亏损行标记 */
-.res-stat-btn { margin-left: 6px; font-size: 10px; line-height: 1; padding: 2px 7px; border-radius: 9px;
-    border: 1px solid var(--border); background: transparent; color: var(--text-dim); cursor: pointer; }
-.res-stat-btn:hover { color: var(--text); border-color: var(--accent); }
-.res-stat-btn.warn { color: #f0a020; border-color: currentColor; }
+/* 0.6.2 B1：亏损行标记 */
 .res-trade-row.loss:not(.sel) td:first-child { box-shadow: inset 2px 0 0 rgba(246, 70, 93, .5); }
 .res-trade-row.loss td.res-t-pnl .v { color: var(--down); }
 

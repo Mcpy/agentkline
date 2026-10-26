@@ -29,7 +29,7 @@ try {
 let _tradesOpen = true;
 try { _tradesOpen = localStorage.getItem('ak_trade_open') !== '0'; } catch (e) { /* 默认展开 */ }
 let _syncSeq = 0;
-let _trustOpen = false;   // 尾部「信任区」是否展开（由统计卡「口径」按钮唤起）
+let _trustOpen = false;   // 尾部「信任区」details 是否展开（用户手动开合，重渲染保留）
 
 const fmtPct = (v) => {
     const n = Number(v);
@@ -136,6 +136,7 @@ function _trustHint(a) {
     if (asm.fill_rule) parts.push(t('result.trust.fill', { fill: _asmValue('fill_rule', asm.fill_rule) }));
     const fee = a.run && a.run.fee;
     if (fee != null) parts.push(t('result.trust.fee', { fee: `${+(Number(fee) * 100).toFixed(3)}%` }));
+    if (Number(asm.leverage) > 1) parts.push(`${asm.leverage}x`);
     return parts.join(' · ');
 }
 
@@ -528,6 +529,36 @@ function rememberScene() {
     SCENES[sceneKey()] = { visible: [...state.resultVisible], active: state.resultActive };
 }
 
+// v0.6.3 保留策略提示：让用户知道结果会被自动淘汰（不是静默删除）
+let _retention = null;   // {limit,count,warn_at,evict_next} ← /api/results
+
+function renderRetention() {
+    const el = document.getElementById('result-retention');
+    if (!el) return;
+    const rt = _retention;
+    const has = (state.results || []).length > 0;
+    if (!rt || !has) {
+        el.style.display = 'none';
+        el.textContent = '';
+        el.classList.remove('warn');
+        return;
+    }
+    const n = Number(rt.limit) || 100;
+    const c = Number(rt.count) || 0;
+    el.style.display = '';
+    el.title = t('result.retention_title', { n });
+    if (c >= n) {
+        el.textContent = t('result.retention_full', { c, n });
+        el.classList.add('warn');
+    } else if (c >= (Number(rt.warn_at) || n - 10)) {
+        el.textContent = t('result.retention_warn', { c, n, left: n - c });
+        el.classList.add('warn');
+    } else {
+        el.textContent = t('result.retention', { n });
+        el.classList.remove('warn');
+    }
+}
+
 export function clearResultsScene() {
     _syncSeq++;
     state.results = [];
@@ -550,6 +581,7 @@ export async function syncResultsForScene() {
     if (seq !== _syncSeq || sceneKey() !== `${board}|${tf}`) return;
     if (!data || data.error) { clearResultsScene(); return; }
     state.results = data.results || [];
+    _retention = data.retention || null;
     const known = new Set(state.results.map(r => r.result_id));
     const mem = SCENES[sceneKey()];
     let vis = ((mem && mem.visible) || []).filter(id => known.has(id));
@@ -732,6 +764,7 @@ export function renderResultBar() {
     const stats = document.getElementById('result-stats');
     if (!bar || !chips || !stats) return;
     bar.style.display = '';
+    renderRetention();
     chips.textContent = '';
     state.results.forEach(r => {
         const id = r.result_id;
@@ -789,12 +822,6 @@ export function renderResultBar() {
         btn.style.display = a ? '' : 'none';
         btn.onclick = () => openWorkbench('overview');
     }
-    const asm = a.execution_assumptions || {};
-    const ab = _el('button', `res-stat-btn${Number(asm.leverage) > 1 ? ' warn' : ''}`,
-        t('result.assumptions_btn'));
-    ab.title = t('result.assumptions_title');
-    ab.addEventListener('click', (e) => { e.stopPropagation(); openAssumptions(a.result_id); });
-    stats.appendChild(ab);
 }
 
 function _metricRows(s) {
@@ -1081,18 +1108,6 @@ export function fillOverview() {
     el.appendChild(trust);
 }
 
-// 「口径」入口：展开信任区并滚到可见（统计卡与结果详情共用一处）
-export function openAssumptions(id) {
-    if (id && id !== state.resultActive) selectResult(id);
-    _trustOpen = true;
-    openWorkbench('overview');
-    fillOverview();
-    const el = document.querySelector('#wb-overview .res-trust');
-    if (!el) return;
-    el.open = true;
-    if (el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
-}
-
 // 图上交易点点击（0.6.2 B1，B2-fix 改为「交易盒内」命中）：
 // Vela 的 labels 没有官方点击回调，这里用「十字线所在 bar 时间 + 十字线价格 + 容器 click」做命中；
 // 盒子的对角 = 买点(entry_time, entry_price) / 卖点(exit_time, exit_price)，与图上画的矩形完全一致，
@@ -1186,9 +1201,17 @@ export function onResultEvent(msg) {
     const r = msg.result || {};
     const bid = msg.board_id || (r.data && r.data.board);
     const tf = msg.timeframe || (r.data && r.data.timeframe);
+    // v0.6.3：结果被自动淘汰必须让人看见（跨画板也提示，不静默丢东西）
+    if (msg.type === 'result_deleted' && msg.evicted) {
+        toast(t('result.evicted', {
+            name: msg.display_name || msg.result_id,
+            n: Number(msg.limit) || (_retention && _retention.limit) || 100,
+        }));
+    }
     if (bid !== state.currentBoard || tf !== state.currentTimeframe) return;
     if (msg.type === 'result_created' && r.result_id) {
         state.results = [r, ...(state.results || []).filter(x => x.result_id !== r.result_id)];
+        _retention = { ...(_retention || { limit: 100, warn_at: 90 }), count: state.results.length };
         if (!state.resultVisible.includes(r.result_id) && state.resultVisible.length < MAX_VISIBLE) {
             state.resultVisible = [...state.resultVisible, r.result_id];
         }
@@ -1211,6 +1234,7 @@ export function onResultEvent(msg) {
         refreshResultLayer();
     } else if (msg.type === 'result_deleted' && msg.result_id) {
         state.results = (state.results || []).filter(x => x.result_id !== msg.result_id);
+        _retention = { ...(_retention || { limit: 100, warn_at: 90 }), count: state.results.length };
         state.resultVisible = state.resultVisible.filter(x => x !== msg.result_id);
         delete state.resultDetail[msg.result_id];
         if (state.resultActive === msg.result_id) state.resultActive = state.resultVisible[0] || null;

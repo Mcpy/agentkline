@@ -61,6 +61,9 @@ async def _serve():
     import threading as _th
     _th.Thread(target=service.warmup_symbol_index, daemon=True, name="index-warmup").start()
     service.datasource.start_polling()
+    # v0.6.3：现场库恢复后，后台按 source_lock 重拉各槽 K 线（不阻塞启动）
+    if service.store is not None:
+        _th.Thread(target=service.restore_market, daemon=True, name="restore-market").start()
     s_web = uvicorn.Server(uvicorn.Config(web_app, host=cfg["web_host"], port=cfg["web_port"],
                                           log_level="warning"))
     s_agent = uvicorn.Server(uvicorn.Config(agent_app, host=cfg["agent_host"], port=cfg["agent_port"],
@@ -70,6 +73,8 @@ async def _serve():
     finally:
         service.datasource.stop_all()
         service.watchlist.stop()
+        if service.store is not None:   # v0.6.3：收尾 checkpoint WAL，正常停机不留 -wal 尾巴
+            service.store.close()
         logger.info("AgentKline stopped.")
 
 

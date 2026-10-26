@@ -3,10 +3,14 @@ v0.4.1 雷达：WatchlistManager。
 结构第一天 groups[] → rows[]（0.4.2 分组 UI 零重构接入；0.4.1 仅默认组）。
 三态分发：visible（行=当前锁定板→quote 心跳事件）/ hidden（有板非当前→缓存+未读计数）/ watch（无板→仅面板）。
 quotes 轮询默认 5s（config limits.quotes_poll_s 可调）；行级失败不炸整轮，连续 10 次失败标 stale。
+v0.6.3：分组与关注行落现场库（quotes 是行情缓存，不落盘）。
 """
+import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+logger = logging.getLogger("agentkline.watchlist")
 
 
 class WatchlistManager:
@@ -18,6 +22,41 @@ class WatchlistManager:
         self._timer = None
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=8)
+        self.store = None       # v0.6.3：现场库（attach 注入）
+
+    def attach(self, store):
+        """恢复雷达分组/关注行，并接管后续写盘。"""
+        self.store = store
+        try:
+            saved = store.load_watchlist()
+        except Exception:
+            logger.exception("雷达恢复失败，保留空分组")
+            return
+        if not saved:
+            return
+        groups = []
+        for g in saved:
+            groups.append({"id": g["id"], "name": g["name"], "rows": g.get("rows") or []})
+        if not any(g["id"] == "default" for g in groups):
+            groups.insert(0, {"id": "default", "name": "默认", "rows": []})
+        with self._lock:
+            self.groups = groups
+            for g in groups:
+                for row in g["rows"]:
+                    self.quotes.setdefault(
+                        self.key(row["source"], row["symbol"]),
+                        {"price": None, "change_pct": None, "ts": None,
+                         "state": "watch", "fails": 0, "stale": False})
+        if any(g["rows"] for g in groups):
+            self._ensure_polling()
+
+    def _persist(self):
+        if self.store is None:
+            return
+        try:
+            self.store.save_watchlist(self.groups)
+        except Exception:
+            logger.exception("雷达写盘失败（内存态继续）")
 
     # ---------- 行管理 ----------
     @staticmethod
@@ -46,6 +85,7 @@ class WatchlistManager:
                                    {"price": None, "change_pct": None, "ts": None,
                                     "state": "watch", "fails": 0, "stale": False})
         self._ensure_polling()
+        self._persist()
         self._bc_changed()
         return {"status": "ok", "group_id": g["id"], "rows": len(g["rows"])}
 
@@ -65,6 +105,7 @@ class WatchlistManager:
             self.quotes.pop(self.key(source, symbol), None)
             if not hit:
                 return {"error": "ROW_NOT_FOUND: 雷达无此行"}
+        self._persist()
         self._bc_changed()
         return {"status": "ok", "rows": len(hit["rows"])}
 
@@ -79,6 +120,7 @@ class WatchlistManager:
             import uuid
             gid = f"grp_{uuid.uuid4().hex[:8]}"
             self.groups.append({"id": gid, "name": name, "rows": []})
+        self._persist()
         self._bc_changed()
         return {"status": "ok", "group_id": gid, "name": name}
 
@@ -95,6 +137,7 @@ class WatchlistManager:
             if any(x["name"] == name and x["id"] != group_id for x in self.groups):
                 return {"error": f"GROUP_EXISTS: 组名 {name} 已存在"}
             g["name"] = name
+        self._persist()
         self._bc_changed()
         return {"status": "ok", "group_id": group_id, "name": name}
 
@@ -110,6 +153,7 @@ class WatchlistManager:
             for x in g["rows"]:
                 self.quotes.pop(self.key(x["source"], x["symbol"]), None)
             self.groups = [x for x in self.groups if x["id"] != group_id]
+        self._persist()
         self._bc_changed()
         return {"status": "ok", "deleted_rows": deleted}
 
@@ -133,6 +177,7 @@ class WatchlistManager:
                 to["rows"].append(row)
             else:
                 to["rows"].insert(max(0, int(index)), row)
+        self._persist()
         self._bc_changed()
         return {"status": "ok", "group_id": to_group_id}
 
