@@ -12,6 +12,7 @@ import { t, localizeBoardName } from './i18n.js';
 import { showContextMenu } from './menu.js';
 import { openIndicatorLibrary } from './indicator_library.js';
 import { effectiveStyle } from './visual_spec.js';   // V1：芯片色点与图上生效色同源
+import { onChartClick } from './results.js';           // 0.6.2 B1/B2：图上交易盒/标记点击
 import {
     renderChartCore, applyDataUpdateCore, updateIndicatorSeriesCore,
     setVisibleTimeRangeCore, resizeAllChartsCore,
@@ -421,9 +422,13 @@ function _renderOhlcLatest() {
     const { bar, prev } = _ohlcBarByTime(null);
     _renderOhlcFromBar(bar, prev);
 }
+let _hoverMs = null;    // 十字线所在 bar 的时间（ms）
+let _hoverPrice = null; // 十字线价格（交易盒命中用）
 (function bindOhlcRow() {
     onCrosshair((p) => {
         const o = p && p.ohlc;
+        _hoverMs = (o && o.time != null) ? o.time : null;
+        _hoverPrice = (p && p.paneKind === 'price' && Number.isFinite(p.price)) ? Number(p.price) : null;
         if (o && o.time != null) {
             _ohlcHoverTime = o.time;
             const hit = _ohlcBarByTime(o.time);
@@ -433,6 +438,27 @@ function _renderOhlcLatest() {
         _ohlcHoverTime = null;          // 移出画布：回落到最新一根
         _renderOhlcLatest();
     });
+    // Vela 的 labels 无点击回调 → 用「悬停 bar 时间 + 容器 click」命中交易点。
+    // 拖拽/长按不算点击：pointerdown 记起点，pointermove 超过 4px 标脏，只有「原地按下即松开」才算单击。
+    let _press = null;
+    document.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) { _press = null; return; }
+        _press = { x: e.clientX, y: e.clientY, t: performance.now(), dragged: false };
+    }, true);
+    document.addEventListener('pointermove', (e) => {
+        if (!_press || _press.dragged) return;
+        if (Math.hypot(e.clientX - _press.x, e.clientY - _press.y) > 4) _press.dragged = true;
+    }, true);
+    document.addEventListener('click', (e) => {
+        const el = e.target instanceof Element ? e.target : null;
+        const press = _press;
+        _press = null;
+        if (!el || !el.closest('#main-chart') || _hoverMs == null) return;
+        if (!el.closest('canvas')) return;                       // 工具栏/图例等 DOM 不算图上点击
+        if (press && (press.dragged || performance.now() - press.t > 700)) return;   // 拖拽/长按
+        try { window.__akClickCalls = (window.__akClickCalls || 0) + 1; } catch (err) { /* 调试计数 */ }
+        onChartClick(e.clientX, e.clientY, _hoverMs, _hoverPrice);
+    }, true);
 })();
 
 // ============ 图例 ============

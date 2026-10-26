@@ -34,6 +34,9 @@ Vela 的公开 API 已覆盖图表、指标、画线、标记、事件和截图�
 | `pane.heightWeight` | 布局权重（PoC 验证的旋钮，非公开文档面） | pane 高度不适配 | 保持默认高度 | 人工布局检查 |
 | `#main-chart` 内 legend 行（文字 `VRVP` 的 span→row div） | VPVR 图例行隐藏：保留 DOM（设置面板仍能定位）只把该行 `display:none`；MutationObserver 防 Vela 重建 | 图例重新出现（行可见） | 结构变了就不再隐藏，chip/设置仍可用 | UI smoke #5 |
 | `handle.nativeType` / `pane.indicators` | 识别 volume/subplot 组 | volume 不移位、显隐/组挂载异常 | 回退到 title 判断 | e2e + 视觉 |
+| `renderer.onCrosshairMove` | 十字线通道：OHLC 行读数 + 0.6.2 交易点点击命中 | 十字线不更新、OHLC 停在旧值、点交易点无反应 | 无；OHLC 回落到最新一根，点击不命中（不报错） | UI smoke #10 + 人工 |
+| emit 载荷「隐藏 series 对 + fills + polyline」（结果层交易盒） | 0.6.2 B2：Vela 没有 time×price 矩形的通用图元（`boxes` 只服务表格）；用 `visible:false` 的常值 series 对（持仓段=进/出价格，段外 `{time,value:null}`）+ `fills` 逐段填充，视觉上就是买点↔卖点对角矩形。按「多/空 × 选中/未选中」发 4 对（8 条隐藏 series + 4 条 fill）：选中 0.16、其余 0.06；选中盒子另发一条 `closed:true` 的 polyline 描边（fill 图元没有 stroke，只能靠折线画四边）。**隐藏 series 仍会被 fills 的 id 查找解析到**（这是该方案成立的前提） | 交易盒/描边不出现、或选中样式不生效 | 无（去掉 series 对即退回纯标记） | UI smoke #11 |
+| emit 载荷 `fills` + 双 series（结果层水下填充） | 0.6.2 B2：净值与高水位两条 series 之间填充；HWM 必须是每根 bar 一个 `{time,value}` 点，**窗口外也要给 `value:null` 的对象**（给裸 `null` 会在 `history:complete` 触发 Vela `applyModel` 读 `time` 崩溃） | 水下填充消失 / 回补历史时 console 报 `Cannot read properties of null (reading 'time')` | 无（去掉 HWM/fill 即退回单条净值线） | UI smoke #11 |
 
 公开面（升级时按普通回归即可）：`chart.indicators()`、`chart.panes.list()/move()`、`chart.drawings`、`chart.marks`、`chart.on()`、`chart.renderer.set()`、`chart.renderer.screenshot()`、`chart.setVisibleRange()` 等。
 
@@ -56,8 +59,9 @@ Vela 的公开 API 已覆盖图表、指标、画线、标记、事件和截图�
    python -m playwright install chromium   # 已有 Chrome 可设 AK_CHROMIUM
    python tools/ui_smoke.py
    ```
-   6 条全绿：指标库打开/搜索、加实例、收藏刷新、最近使用顺序、VPVR 图层开关（含参数保留）、越界贴边。
-4. **API e2e**：临时实例上 `python test_e2e.py --port 18766`，174/174。
+   11 条全绿：指标库打开/搜索、加实例、收藏刷新、最近使用顺序、VPVR 图层开关（含参数保留）、越界贴边、
+   指标对齐、+回测、定位历史、0.6.2 B1 的「点行/口径/图上点选」、0.6.2 B2 的「水下 + 持仓带」。
+4. **API e2e**：临时实例上 `python test_e2e.py --port 18766`，196/196。
 5. **人工**：打开 live，拖动价格轴让最新价越界 → 顶部/底部出现 `▲/▼`；恢复区间 → 原生标签回来且无重复；指标库收藏/最近使用正常。
 6. **更新本页**：内部面有增删/改名时同步改表，并在 UI smoke 或 regression 里补对应用例。
 
@@ -79,3 +83,17 @@ Vela 的公开 API 已覆盖图表、指标、画线、标记、事件和截图�
 2. 只允许写在 `vela_adapter.js`，且必须 `try/catch` + 可降级；异常不能进入渲染循环。
 3. 同步更新本页表格 + 至少一条回归（UI smoke 或 regression 页）。
 4. 禁止手改 `vela.global.min.js`；版本升级走「换 bundle + 回归」，不 fork。
+
+## 6. 交易点点击（0.6.2 B1，B2-fix 改为交易盒内命中）
+
+- 事实：结果交易点用的是 **labels**（`abovebar/belowbar` 点形状 + B/S 文本），Vela 没有 labels 的点击回调；`chart.on()` 也没有 label 事件。
+- 方案：**十字线时间 + 十字线价格 + 容器 click** 命中——`renderer.onCrosshairMove` 记录 `ohlc.time` 与 `price`（仅 `paneKind === 'price'`），在 `#main-chart` 捕获 click，交给 `results.onChartBarClick(ms, price)`。
+- 命中规则（优先级从高到低）：
+  1. **B/S 标记 ±6px 圆形**：标记中心 = `priceToY(bar.high/low) ∓ 14px`（与 Vela label 绘制公式一致，`abovebar` 上移 14、`belowbar` 下移 14），x = `coords.timeToX`；只对屏幕内（`0 ≤ x ≤ widthPx`、`0 ≤ y ≤ pane 高`）的标记生效。
+  2. **交易盒内**：`entry_time ≤ ms ≤ exit_time` 且 `price ∈ [min(entry_price, exit_price), max(...)]`，与图上矩形完全一致；盒外不再误触。嵌套/重叠取时长最短的一笔。
+- 坐标换算的坑：画布原点 ≠ `#main-chart` 原点（左侧画线工具栏占一条 gutter，约 44px），必须用「与 `coords.widthPx` 最接近的那个 canvas」的 `getBoundingClientRect()` 做偏移，否则整体偏一条工具栏。
+- 降级：十字线通道失效时不报错，只是点盒子没反应；明细表点行仍可定位（`focusTradeRange`）。**注意**：点击其它 pane（成交量/净值）时 `price` 为 null，不走盒命中，按“空白”处理。
+- 边界：多结果同屏只命中**当前激活**结果；盒子的价格上下沿就是成交价，不含持仓期间的最大浮盈/浮亏。
+- 拖拽与单击分离：`pointerdown` 记起点，`pointermove` 超过 4px 标脏，只有「在 canvas 上原地按下即松开、且 <700ms」才当作点击；拖拽平移/长按不会误清选中，点工具栏等 DOM 也不触发。
+- 选中态刷新：切换选中**不能**走 `refreshResultLayer()`——它会 `remountGroup(RES)` 重建净值/HWM/水下填充并重排 pane，点击有百毫秒级延迟；改用 `refreshResultMarksOnly()`（`reEmit(RES_MARK)` + `renderer.scheduler.invalidate(4)`），实测 5–10ms，描边/填充立刻更新。点空白（不在标记也不在盒子内）取消选中，走同一条轻量路径。
+- 回归：UI smoke #10 接线（`__akClickCalls`）+ 盒内点选 + 盒外不误选；#11 水下/交易盒/描边（8 条隐藏 series + 4 条 fill + 1 条 polyline）；#12 点空白取消选中。标记命中另有调试钩子 `__akMarkerPoints()` / `__akHitTest(x,y)` / `__akMarkerHits`（视口相关，冒烟只断言接线与盒命中，标记用钩子人工核）。

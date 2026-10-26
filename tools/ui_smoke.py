@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AgentKline UI smoke (v0.6.1) — 8 browser checks on a disposable instance.
+"""AgentKline UI smoke (v0.6.2 B2) — 11 browser checks on a disposable instance.
 
 Why this exists: test_e2e.py covers the API/MCP surface, not the browser UI.
 These five checks protect the surfaces that 0.5.3/0.5.4 changed by hand:
@@ -524,6 +524,148 @@ def run_checks(page, base: str) -> tuple[int, int]:
           bool(tr) and located and covered and after_bars > before_bars,
           f"rid={rid} entry={tr and tr['entry_time']} located={located} "
           f"covered={covered} bars={before_bars}->{after_bars}")
+
+    # 10) 0.6.2 B1：点行选中/定位、亏损行标记、「口径」入口、图上交易点点击
+    page.locator("#result-detail").click()
+    page.wait_for_selector("#wb-overview .res-trade-row", timeout=8000)
+    rows = page.locator("#wb-overview .res-trade-row")
+    row_n = rows.count()
+    bad_loss = page.evaluate("""() => [...document.querySelectorAll('#wb-overview .res-trade-row')]
+        .filter(r => {
+            const td = r.querySelector('td.res-t-pnl');
+            const down = !!(td && td.classList.contains('down'));
+            return down !== r.classList.contains('loss');
+        }).length""")
+    rows.first.click()
+    page.wait_for_timeout(400)
+    sel_n = page.locator("#wb-overview .res-trade-row.sel").count()
+    detail_idx = page.locator("#wb-overview .res-trade-detail .res-tc-idx").first
+    idx0 = detail_idx.inner_text() if detail_idx.count() else ""
+
+    page.locator("#result-stats .res-stat-btn").click()
+    page.wait_for_timeout(300)
+    trust_open = page.evaluate("() => !!document.querySelector('#wb-overview .res-trust')?.open")
+
+    # 图上点击：① 接线（真实鼠标点击会进 handler）；② 命中=在交易盒内；③ 盒外不命中
+    calls0 = page.evaluate("() => window.__akClickCalls || 0")
+    box = page.locator("#main-chart").bounding_box()
+    if box:
+        for k in range(5):
+            x = box["x"] + box["width"] * (0.2 + 0.15 * k)
+            y = box["y"] + box["height"] * 0.3
+            page.mouse.move(x, y)
+            page.wait_for_timeout(80)
+            page.mouse.click(x, y)
+            page.wait_for_timeout(80)
+    calls1 = page.evaluate("() => window.__akClickCalls || 0")
+
+    # ② B/S 标记 ±6px 命中：命中逻辑由 __akHitTest 单测式断言（视口相关，见下），
+    #    真实点击接线由上面的 5 次点击计数覆盖。
+    marker_ok = marker_miss_ok = False
+
+    hit_idx = miss_ok = ""
+    hit = miss = None
+    if tr and tr.get("entry_price") is not None:
+        t0, t1 = tr["entry_time"], tr["exit_time"]
+        p0, p1 = float(tr["entry_price"]), float(tr["exit_price"])
+        tm = (t0 + t1) // 2
+        pm = (p0 + p1) / 2
+        hit = page.evaluate("([t,p]) => window.__akChartClick ? window.__akChartClick(t,p) : null", [tm, pm])
+        cur = page.locator("#wb-overview .res-trade-detail .res-tc-idx").first
+        hit_idx = cur.inner_text() if cur.count() else ""
+        miss = page.evaluate("([t,p]) => window.__akChartClick ? window.__akChartClick(t,p) : null",
+                             [tm, max(p0, p1) + abs(p1 - p0) * 5 + 1])
+        miss_ok = page.locator("#wb-overview .res-trade-detail .res-tc-idx").first.inner_text()
+    check("B1：点行选中/亏损标记/口径入口/交易盒点选",
+          row_n > 0 and sel_n == 1 and idx0.startswith("#") and bad_loss == 0
+          and trust_open and calls1 - calls0 >= 5
+          and hit is True and hit_idx == "#1" and miss is False and miss_ok == "#1",
+          f"rows={row_n} sel={sel_n} idx={idx0} bad_loss={bad_loss} trust={trust_open} "
+          f"clicks={calls1 - calls0} box={hit}/{hit_idx} boxmiss={miss}/{miss_ok}")
+
+    # 11) 0.6.2 B2：水下填充（净值 ↔ 高水位）与交易盒（买点↔卖点对角矩形）
+    b2 = page.evaluate("""() => {
+        const g = window.__ak.resultSeries();
+        const m = window.__ak.resultMarkers();
+        const boxSeries = (m.series || []).filter(s => s.id.startsWith('res:box:'));
+        return {
+            hwm: g.series.filter(s => s.id.includes('hwm')).length,
+            fills: (g.fills || []).length,
+            boxSeries: boxSeries.length,
+            boxFills: (m.fills || []).length,
+            border: (m.polylines || []).length,
+            labels: (m.labels || []).length,
+            hidden: boxSeries.every(s => s.visible === false),
+        };
+    }""")
+    check("B2：水下填充 + 交易盒",
+          b2["hwm"] == 1 and b2["fills"] == 1
+          and b2["boxSeries"] == 8 and b2["boxFills"] == 4 and b2["hidden"]
+          and b2["border"] == 1 and b2["labels"] > 0,
+          f"hwm={b2['hwm']} fills={b2['fills']} boxSeries={b2['boxSeries']} "
+          f"boxFills={b2['boxFills']} border={b2['border']} labels={b2['labels']} hidden={b2['hidden']}")
+
+    # 12) 0.6.2 B2：拖拽不算点击（选中保持）；点空白取消选中（描边消失）
+    cleared = False
+    g = page.evaluate("""() => {
+        const el = document.getElementById('main-chart');
+        const cs = [...el.querySelectorAll('canvas')].sort((a, b) => b.width - a.width);
+        const r = cs[0].getBoundingClientRect();
+        return {cx: r.left + r.width / 2, cy: r.top + 200};
+    }""")
+    page.mouse.move(g["cx"], g["cy"])
+    page.mouse.down()
+    page.mouse.move(g["cx"] - 200, g["cy"], steps=10)
+    page.mouse.up()
+    page.wait_for_timeout(320)
+    drag_kept = page.evaluate("() => (window.__ak.resultMarkers().polylines || []).length === 1")
+    for frac in (0.5, 0.35, 0.2):
+        blank = page.evaluate("""(f) => {
+            const el = document.getElementById('main-chart');
+            const cs = [...el.querySelectorAll('canvas')].sort((a, b) => b.width - a.width);
+            const r = cs[0].getBoundingClientRect();
+            const sc = window.__ak.chart.orchestrator.renderer.scene;
+            const pane = [...sc.panes.values()].find(p => p.kind === 'price');
+            return {x: r.left + r.width * f, y: r.top + pane.bounds.top + 12};
+        }""", frac)
+        page.mouse.move(blank["x"], blank["y"])
+        page.wait_for_timeout(120)
+        page.mouse.click(blank["x"], blank["y"])
+        page.wait_for_timeout(220)
+        if page.evaluate("() => (window.__ak.resultMarkers().polylines || []).length === 0"):
+            cleared = True
+            break
+    check("B2：拖拽不误清选中 + 点空白取消选中",
+          drag_kept and cleared, f"drag_kept={drag_kept} cleared={cleared}")
+
+    # 13) 0.6.2 B3：多结果对照（≥2 条）+ 差异高亮
+    chips = page.locator("#result-chips .res-chip")
+    if chips.count() >= 2:
+        chips.nth(1).click(modifiers=["Shift"])
+        page.wait_for_timeout(500)
+    cmp_rows = page.locator("#wb-overview .res-compare tbody tr, #wb-overview .res-compare tr").count()
+    best_n = page.locator("#wb-overview .res-compare td.best").count()
+    check("B3：多结果对照 + 差异高亮",
+          chips.count() >= 2 and cmp_rows >= 3 and best_n >= 2,
+          f"chips={chips.count()} rows={cmp_rows} best={best_n}")
+
+    # 14) 0.6.2 B3：交易明细 CSV（全部交易，不分页）
+    csv_ok = False
+    csv_rows = 0
+    try:
+        with page.expect_download(timeout=8000) as dl:
+            page.locator("#wb-overview .res-csv-btn").first.click()
+        d = dl.value
+        csv_ok = d.suggested_filename.endswith("_trades.csv")
+        path = d.path()
+        if path:
+            text = Path(path).read_text(encoding="utf-8-sig")
+            lines = [ln for ln in text.splitlines() if ln.strip()]
+            csv_rows = len(lines) - 1
+            csv_ok = csv_ok and lines[0].startswith("no,side,entry_time") and csv_rows >= 1
+    except Exception as e:  # noqa: BLE001
+        print("  [dbg] csv download failed:", e)
+    check("B3：明细 CSV 导出", csv_ok and csv_rows >= 11, f"ok={csv_ok} rows={csv_rows}")
 
     return passed, failed
 

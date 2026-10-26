@@ -22,6 +22,7 @@ export const state = {
         resultActive: null,
         resultDetail: {},   // result_id -> {summary, equity:{times,values}, trades:[]}
         resultMarksOn: true,
+        resultSelTrade: '',   // 当前选中的交易 id（结果层描边用）
         uiTimezone: 'Asia/Shanghai',   // v0.6.0：界面时间显示时区（/api/config ui.timezone 覆盖；browser=跟随本机）
     };
 

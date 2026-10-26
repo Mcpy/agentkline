@@ -2,7 +2,7 @@
  "schema": 1,
  "engine": {
   "id": "builtin",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "api": 1,
   "caps": {
    "signal": true,

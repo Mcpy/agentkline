@@ -8,7 +8,8 @@ import { formatTimeCN, isIntraday } from './format.js';
 import { showContextMenu } from './menu.js';
 import { toast } from './search.js';
 import { openDialog } from './dialog.js';
-import { refreshResultLayer, resultColor, focusTradeRange, tfMs } from './vela_adapter.js';
+import { refreshResultLayer, refreshResultMarksOnly, resultColor, focusTradeRange, tfMs,
+         hitTradeMarker, tradeMarkerPoints } from './vela_adapter.js';
 import { addActivity } from './activity.js';
 import { openWorkbench, renderWorkbench, updateWorkbenchStatus } from './workbench.js';
 import { openBacktestDialog } from './backtest.js';
@@ -28,6 +29,7 @@ try {
 let _tradesOpen = true;
 try { _tradesOpen = localStorage.getItem('ak_trade_open') !== '0'; } catch (e) { /* 默认展开 */ }
 let _syncSeq = 0;
+let _trustOpen = false;   // 尾部「信任区」是否展开（由统计卡「口径」按钮唤起）
 
 const fmtPct = (v) => {
     const n = Number(v);
@@ -66,6 +68,12 @@ const ASM_LABEL = {
     lot_policy: 'result.asm.lot_policy',
     corporate_actions: 'result.asm.corporate_actions',
     shorting: 'result.asm.shorting',
+    direction: 'result.asm.direction',
+    fee_bps: 'result.asm.fee_bps',
+    slippage_bps: 'result.asm.slippage_bps',
+    calendar: 'result.asm.calendar',
+    bars_per_year: 'result.asm.bars_per_year',
+    annualization: 'result.asm.annualization',
 };
 const ASM_VALUE = {
     fill_rule: {
@@ -73,19 +81,29 @@ const ASM_VALUE = {
         open: 'result.v.open', mid: 'result.v.mid', vwap: 'result.v.vwap',
     },
     bar_close_policy: {
-        closed_only: 'result.v.closed_only', any_tick: 'result.v.any_tick', open_only: 'result.v.open_only',
+        closed_only: 'result.v.closed_only', closed_bars_only: 'result.v.closed_bars_only',
+        any_tick: 'result.v.any_tick', open_only: 'result.v.open_only',
     },
     intrabar_mode: {
         conservative: 'result.v.conservative', optimistic: 'result.v.optimistic', none: 'result.v.intrabar_none',
     },
     protection_rule: {
-        gap_then_intrabar: 'result.v.gap_then_intrabar', intrabar_only: 'result.v.intrabar_only',
-        close_only: 'result.v.prot_close_only',
+        gap_then_intrabar: 'result.v.gap_then_intrabar',
+        gap_open_then_intrabar_trigger: 'result.v.gap_open_then_intrabar_trigger',
+        intrabar_only: 'result.v.intrabar_only', close_only: 'result.v.prot_close_only',
     },
     funding_mode: { not_modeled: 'result.v.not_modeled', modeled: 'result.v.modeled' },
     lot_policy: { continuous: 'result.v.continuous', integer: 'result.v.integer', fixed: 'result.v.fixed' },
     corporate_actions: { not_applied: 'result.v.not_applied', applied: 'result.v.applied' },
-    shorting: { unsupported: 'result.v.unsupported', supported: 'result.v.supported' },
+    shorting: {
+        unsupported: 'result.v.unsupported', supported: 'result.v.supported',
+        synthetic_no_borrow: 'result.v.synthetic_no_borrow', none: 'result.v.unsupported',
+    },
+    direction: {
+        long_only: 'result.v.long_only', short_only: 'result.v.short_only', both: 'result.v.both',
+    },
+    calendar: { bar_clock: 'result.v.bar_clock', exchange_calendar: 'result.v.exchange_calendar' },
+    annualization: { observed_bar_density: 'result.v.observed_bar_density', fixed_365: 'result.v.fixed_365' },
 };
 const HASH_LABEL = {
     agentkline_version: 'result.h.version',
@@ -100,6 +118,7 @@ function _asmValue(k, v) {
     const hit = (ASM_VALUE[k] || {})[String(v)];
     if (hit) return t(hit);
     if (k === 'leverage') return `${v}x`;
+    if (k === 'fee_bps' || k === 'slippage_bps') return `${v} bp`;
     return String(v);
 }
 const _verdictLabel = (v) => (VERDICT_LABEL[v] ? t(VERDICT_LABEL[v]) : (v || '—'));
@@ -191,15 +210,20 @@ function _monthKey(ms) {
 }
 
 // 选中一笔：只更新详情卡 + 列表/图高亮，不动 K 线；跳转统一走「在图上定位」
-function _selectTrade(tr) {
+function _selectTrade(tr, locate = false) {
     const ctx = _tradeCtx;
     if (!ctx) return;
     _tradeSel[ctx.rid] = _tid(tr);
+    state.resultSelTrade = _tid(tr);   // 结果层用它给选中盒子描边、其余降透明度
     document.querySelectorAll('#wb-overview .res-trade-row').forEach(r => {
         r.classList.toggle('sel', r.dataset.tid === _tid(tr));
     });
     _renderTradeDetail();
     _renderTradeChart();
+    const _t0 = performance.now();
+    refreshResultMarksOnly();
+    try { window.__akSelMs = performance.now() - _t0; } catch (e) { /* 计时把手 */ }
+    if (locate) _locateTrade(tr);   // 点行即定位（0.6.2 B1）
 }
 
 // 唯一的 K 线定位入口：详情卡上的「在图上定位」按钮
@@ -669,6 +693,39 @@ export async function renameResult(id) {
     refreshResultLayer();
 }
 
+function _csvCell(v) {
+    if (v == null) return '';
+    const str = String(v);
+    return /[",\n\r]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+}
+
+// 交易明细 CSV：全部交易（不分页），UTF-8 BOM 便于 Excel 直接打开
+export function exportTradesCsv() {
+    const ctx = _tradeCtx;
+    if (!ctx || !ctx.trades.length) return false;
+    const head = ['no', 'side', 'entry_time', 'entry_price', 'exit_time', 'exit_price',
+                  'holding_bars', 'size', 'notional', 'fee', 'pnl', 'pnl_pct',
+                  'entry_reason', 'exit_reason'];
+    const rows = ctx.trades.map((tr, i) => [
+        i + 1, tr.side, tr.entry_time, tr.entry_price, tr.exit_time, tr.exit_price,
+        tr.holding_bars, tr.size, tr.notional, tr.fee, tr.pnl, tr.pnl_pct,
+        tr.entry_reason, tr.exit_reason,
+    ]);
+    const text = [head, ...rows].map(r => r.map(_csvCell).join(',')).join('\r\n');
+    const blob = new Blob(['\ufeff' + text], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = activeSummary();
+    const base = ((a && (a.display_name || a.result_id)) || 'result').replace(/[\\/:*?"<>|]/g, '_');
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${base}_${state.currentTimeframe}_trades.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return true;
+}
+
 export function renderResultBar() {
     const bar = document.getElementById('result-bar');
     const chips = document.getElementById('result-chips');
@@ -732,6 +789,12 @@ export function renderResultBar() {
         btn.style.display = a ? '' : 'none';
         btn.onclick = () => openWorkbench('overview');
     }
+    const asm = a.execution_assumptions || {};
+    const ab = _el('button', `res-stat-btn${Number(asm.leverage) > 1 ? ' warn' : ''}`,
+        t('result.assumptions_btn'));
+    ab.title = t('result.assumptions_title');
+    ab.addEventListener('click', (e) => { e.stopPropagation(); openAssumptions(a.result_id); });
+    stats.appendChild(ab);
 }
 
 function _metricRows(s) {
@@ -819,6 +882,15 @@ export function fillOverview() {
         });
         const sum = _el('summary', null, t('result.trades_detail'));
         sum.appendChild(_el('span', 'res-trades-count', t('result.t.count', { n: listTrades.length })));
+        const csv = _el('button', 'res-csv-btn', 'CSV');
+        csv.type = 'button';
+        csv.title = t('result.t.csv_hint');
+        csv.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            exportTradesCsv();
+        });
+        sum.appendChild(csv);
         if (!units.base || !units.quote) {
             const warn = _el('span', 'res-trades-unitwarn', t('result.t.unit_unknown'));
             warn.title = t('result.t.unit_unknown_hint');
@@ -841,7 +913,7 @@ export function fillOverview() {
             table.appendChild(hr);
             pageTrades.forEach((tr, i) => {
                 const row = document.createElement('tr');
-                row.className = 'res-trade-row';
+                row.className = `res-trade-row${Number(tr.pnl) < 0 ? ' loss' : ''}`;
                 row.tabIndex = 0;
                 row.dataset.tid = _tid(tr);
                 row.title = t('result.t.jump_hint');
@@ -859,9 +931,9 @@ export function fillOverview() {
                 pnl.append(_el('div', 'v', tr.pnl == null ? '—' : fmtNum(tr.pnl)),
                            _el('div', 'p', fmtPct(tr.pnl_pct)));
                 row.appendChild(pnl);
-                row.addEventListener('click', () => _selectTrade(tr));
+                row.addEventListener('click', () => _selectTrade(tr, true));
                 row.addEventListener('keydown', (e) => {
-                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); _selectTrade(tr); }
+                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); _selectTrade(tr, true); }
                 });
                 table.appendChild(row);
             });
@@ -883,6 +955,7 @@ export function fillOverview() {
                 prev.addEventListener('click', () => {
                     _tradePage[rid] = page - 1;
                     delete _tradeSel[rid];
+                    state.resultSelTrade = '';
                     fillOverview();
                 });
                 const next = _el('button', 'res-page-btn', '›');
@@ -891,6 +964,7 @@ export function fillOverview() {
                 next.addEventListener('click', () => {
                     _tradePage[rid] = page + 1;
                     delete _tradeSel[rid];
+                    state.resultSelTrade = '';
                     fillOverview();
                 });
                 pager.append(prev, _el('span', 'res-page-info', t('result.t.page', { i: page + 1, n: pageCount })), next);
@@ -942,13 +1016,21 @@ export function fillOverview() {
         [t('result.compare.name'), t('result.m.total_return'), t('result.m.mdd'), t('result.m.sharpe'), t('result.m.trades'), '']
             .forEach(h => hr.appendChild(_el('th', null, h)));
         table.appendChild(hr);
+        // 差异高亮：每列取最优（收益/夏普越高越好，回撤越接近 0 越好），只在 ≥2 条时标
+        const nums = vis.map(r => r.stats || {});
+        const bestOf = (key) => {
+            const vals = nums.map(s => Number(s[key])).filter(Number.isFinite);
+            return vals.length >= 2 ? Math.max(...vals) : null;
+        };
+        const bestRet = bestOf('total_return'), bestMdd = bestOf('max_drawdown'), bestSharpe = bestOf('sharpe');
+        const cellCls = (v, best) => (best != null && Number.isFinite(Number(v)) && Number(v) === best ? 'best' : '');
         vis.forEach(r => {
             const tr = document.createElement('tr');
             const s = r.stats || {};
             tr.appendChild(_el('td', null, r.display_name || r.result_id));
-            tr.appendChild(_el('td', tone(s.total_return), fmtPct(s.total_return)));
-            tr.appendChild(_el('td', tone(s.max_drawdown), fmtPct(s.max_drawdown)));
-            tr.appendChild(_el('td', null, fmtNum(s.sharpe)));
+            tr.appendChild(_el('td', `${tone(s.total_return)} ${cellCls(s.total_return, bestRet)}`.trim(), fmtPct(s.total_return)));
+            tr.appendChild(_el('td', `${tone(s.max_drawdown)} ${cellCls(s.max_drawdown, bestMdd)}`.trim(), fmtPct(s.max_drawdown)));
+            tr.appendChild(_el('td', cellCls(s.sharpe, bestSharpe), fmtNum(s.sharpe)));
             tr.appendChild(_el('td', null, String(s.trade_count == null ? 0 : s.trade_count)));
             const xd = _el('td', 'res-cmp-x', '');
             const x = _el('span', 'res-x', '×');
@@ -964,6 +1046,8 @@ export function fillOverview() {
 
     const trust = document.createElement('details');
     trust.className = 'res-trust';
+    trust.open = _trustOpen;
+    trust.addEventListener('toggle', () => { _trustOpen = trust.open; });
     const sum = _el('summary', null, t('result.trust'));
     sum.appendChild(_el('span', 'res-trust-hint', _trustHint(a)));
     trust.appendChild(sum);
@@ -996,6 +1080,107 @@ export function fillOverview() {
     trust.appendChild(body);
     el.appendChild(trust);
 }
+
+// 「口径」入口：展开信任区并滚到可见（统计卡与结果详情共用一处）
+export function openAssumptions(id) {
+    if (id && id !== state.resultActive) selectResult(id);
+    _trustOpen = true;
+    openWorkbench('overview');
+    fillOverview();
+    const el = document.querySelector('#wb-overview .res-trust');
+    if (!el) return;
+    el.open = true;
+    if (el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+}
+
+// 图上交易点点击（0.6.2 B1，B2-fix 改为「交易盒内」命中）：
+// Vela 的 labels 没有官方点击回调，这里用「十字线所在 bar 时间 + 十字线价格 + 容器 click」做命中；
+// 盒子的对角 = 买点(entry_time, entry_price) / 卖点(exit_time, exit_price)，与图上画的矩形完全一致，
+// 因此点在盒子里的任意位置都算选中，盒外（含上方/下方空白）不再误触。
+export function onChartBarClick(timeMs, priceMs) {
+    const a = activeSummary();
+    if (!a || timeMs == null) return false;
+    const d = (state.resultDetail || {})[a.result_id] || {};
+    const trades = Array.isArray(d.trades) ? d.trades : [];
+    if (!trades.length) return false;
+    const inBox = (tr) => {
+        const t0 = Number(tr.entry_time), t1 = Number(tr.exit_time);
+        if (!Number.isFinite(t0) || !Number.isFinite(t1)) return false;
+        if (Number(timeMs) < t0 || Number(timeMs) > t1) return false;
+        const p0 = Number(tr.entry_price), p1 = Number(tr.exit_price);
+        // 拿不到十字线价格时退回「只按时间」，保证键盘/无指针场景仍可用
+        if (!Number.isFinite(priceMs) || !Number.isFinite(p0) || !Number.isFinite(p1)) return true;
+        return Number(priceMs) >= Math.min(p0, p1) && Number(priceMs) <= Math.max(p0, p1);
+    };
+    const hits = trades.filter(inBox);
+    if (!hits.length) return false;
+    // 嵌套/重叠时取最短的那笔（内层优先）
+    hits.sort((x, y) => (Number(x.exit_time) - Number(x.entry_time))
+        - (Number(y.exit_time) - Number(y.entry_time)));
+    return _openTrade(a, trades, hits[0]);
+}
+
+// 选中一笔并打开概览详情（图点击/表点击共用）
+function _openTrade(a, trades, hit) {
+    const idx = trades.indexOf(hit);
+    if (idx < 0) return false;
+    _tradePage[a.result_id] = Math.floor(idx / TRADE_PAGE);
+    _tradeSel[a.result_id] = _tid(hit);
+    state.resultSelTrade = _tid(hit);
+    _tradesOpen = true;
+    openWorkbench('overview');
+    fillOverview();
+    const _t0 = performance.now();
+    refreshResultMarksOnly();
+    try { window.__akSelMs = performance.now() - _t0; } catch (e) { /* 计时把手 */ }
+    const host = document.querySelector('#wb-overview .res-trade-detail');
+    if (host && host.scrollIntoView) host.scrollIntoView({ block: 'nearest' });
+    return true;
+}
+
+function _activeTrades() {
+    const a = activeSummary();
+    if (!a) return [];
+    const d = (state.resultDetail || {})[a.result_id] || {};
+    return Array.isArray(d.trades) ? d.trades : [];
+}
+
+// 图上点击总入口：先按 B/S 标记 ±6px 命中，再退到「交易盒内」命中
+export function onChartClick(clientX, clientY, timeMs, price) {
+    const a = activeSummary();
+    if (!a) return false;
+    const trades = _activeTrades();
+    if (!trades.length) return false;
+    const mk = hitTradeMarker(clientX, clientY, trades);
+    if (mk) {
+        try { window.__akMarkerHits = (window.__akMarkerHits || 0) + 1; } catch (e) { /* 调试计数 */ }
+        return _openTrade(a, trades, mk);
+    }
+    // 只有带价格（点在主图价格区）才做盒命中；其它 pane 的点击按“空白”处理
+    if (Number.isFinite(price) && onChartBarClick(timeMs, price)) return true;
+    // 点空白（不在任何盒子/标记上）= 取消选中，详情回到本页小结
+    return clearTradeSelection();
+}
+
+// 取消选中：清掉行高亮与结果层描边，详情回到小结
+export function clearTradeSelection() {
+    const a = activeSummary();
+    if (!a || !state.resultSelTrade) return false;
+    const rid = a.result_id;
+    state.resultSelTrade = '';
+    delete _tradeSel[rid];
+    document.querySelectorAll('#wb-overview .res-trade-row.sel').forEach(r => r.classList.remove('sel'));
+    _renderTradeDetail();
+    refreshResultMarksOnly();
+    return true;
+}
+
+try {
+    window.__akChartClick = (ms, price) => onChartBarClick(ms, price);
+    window.__akMarkerPoints = () => tradeMarkerPoints(_activeTrades());
+    window.__akHitTest = (x, y) => hitTradeMarker(x, y, _activeTrades());
+    window.__akSelTrade = () => state.resultSelTrade || '';
+} catch (e) { /* 调试把手 */ }
 
 export function onResultEvent(msg) {
     const r = msg.result || {};

@@ -53,6 +53,10 @@ def main(params, ohlcv):
 - `target`：与 `ohlcv` **等长**的数组，元素是有限数；`1`=满仓多、`0`=空仓、`-1`=满仓空、中间连续（0.5、-0.3 合法）。
   超出 `[-1,1]` 会被裁剪并记 warning；含 NaN/Inf 报 `TARGET_NONFINITE`。
 - `reason`：可选，等长字符串数组，用于成交归因（`entry_reason`/`exit_reason`）；空串合法。
+  **内容是自由文本，由脚本自己定义**（内置模板用 `golden_cross`/`dead_cross`/`warmup`）；平台只校验长度，
+  原样存进成交与结果，UI 和归因 skill 直接引用，不做翻译、不做枚举校验。
+  平台自己会写这几种：`flip`（反手拆单）、`stop_loss`/`take_profit`（保护触发）、`end_of_backtest`（区间末强平）、
+  `target_flat`（脚本没给 reason 的平仓）。
 - 返回裸数组也可以（等价于只给 target），但推荐显式 dict。
 - 不要 async、不要 `*args`，main 必须正好两个位置参数。
 

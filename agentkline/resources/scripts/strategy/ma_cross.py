@@ -38,6 +38,9 @@ def main(params, ohlcv):
             continue
         f = sum(closes[i - fast + 1:i + 1]) / fast
         s = sum(closes[i - slow + 1:i + 1]) / slow
+        # 注意：这里给每根 bar 打的是「趋势状态」标签，不是「交叉那一根」的事件标签。
+        # 因为本策略只在 f>s 与 f<=s 翻转时换仓，落到成交上的 entry/exit reason 恰好就是金叉/死叉；
+        # 若改成趋势中途加减仓，就应把标签改成事件式（只在翻转那根写 golden_cross），否则会误导归因。
         if f > s:
             targets.append(1.0)
             reasons.append("golden_cross")

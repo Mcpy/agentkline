@@ -387,13 +387,161 @@ function _ensureType(type, title, paneHint, overlay, legend) {
 // ---- v0.6.0 结果净值：一个 RES 组、多条 series；多结果按共同起点归一 100 ----
 function _resultDetail(id) { return (state.resultDetail || {})[id] || null; }
 
+// 0.6.2 B2-fix：B/S 标记的圆形命中（±6px）。
+// 位置与 Vela 的 label 绘制一致：abovebar 在 bar.high 上方 14px，belowbar 在 bar.low 下方 14px；
+// x 用 coords.timeToX（与 emitBackground 同一套时间→像素换算）。
+const MARKER_R = 6;
+function _markerPoints(trades) {
+    const r = chart && chart.orchestrator && chart.orchestrator.renderer;
+    const co = r && r.coords, sc = r && r.scene;
+    if (!co || !sc) return [];
+    let pane = null;
+    const panes = sc.panes;
+    if (panes instanceof Map) panes.forEach(v => { if (!pane && v.kind === 'price' && !v.collapsed) pane = v; });
+    if (!pane || !pane.scale || !pane.bounds) return [];
+    const bars = sc.bars || [];
+    const barOf = (t) => {
+        const n = bars.length;
+        let lo = 0, hi = n - 1;
+        while (lo <= hi) {
+            const mid = (lo + hi) >> 1;
+            if (bars[mid].time < t) lo = mid + 1;
+            else if (bars[mid].time > t) hi = mid - 1;
+            else return bars[mid];
+        }
+        return null;
+    };
+    const out = [];
+    for (const tr of trades) {
+        for (const [t, isEntry] of [[tr.entry_time, true], [tr.exit_time, false]]) {
+            const ts = Number(t);
+            if (!Number.isFinite(ts)) continue;
+            const bar = barOf(ts);
+            if (!bar) continue;
+            const x = co.timeToX(ts);
+            const base = co.priceToY(isEntry ? bar.low : bar.high, pane.scale, pane.bounds);
+            const y = base + (isEntry ? 14 : -14);
+            const visible = x >= 0 && x <= (co.widthPx || 0) && y >= 0 && y <= pane.bounds.height;
+            out.push({ x, y, visible, trade: tr, entry: isEntry });
+        }
+    }
+    return out;
+}
+
+// 画布原点 ≠ 容器原点（左侧画线工具栏占一条 gutter），所以用承载图形的 canvas 矩形换算
+function _chartCanvasRect() {
+    const el = document.getElementById('main-chart');
+    const r = chart && chart.orchestrator && chart.orchestrator.renderer;
+    if (!el || !r) return null;
+    const w = r.coords && r.coords.widthPx;
+    let best = null, bestD = Infinity;
+    el.querySelectorAll('canvas').forEach(cv => {
+        const b = cv.getBoundingClientRect();
+        if (!b.width || !b.height) return;
+        const d = Math.abs(b.width - (w || b.width));
+        if (d < bestD) { bestD = d; best = b; }
+    });
+    return best;
+}
+
+export function hitTradeMarker(clientX, clientY, trades) {
+    const pts = _markerPoints(trades || []);
+    const rect = _chartCanvasRect();
+    if (!rect || !pts.length) return null;
+    const px = clientX - rect.left, py = clientY - rect.top;
+    let best = null, bestD = MARKER_R + 1e-6;
+    for (const p of pts) {
+        if (!p.visible) continue;
+        const d = Math.hypot(px - p.x, py - p.y);
+        if (d <= MARKER_R && d < bestD) { bestD = d; best = p.trade; }
+    }
+    return best;
+}
+
+// 调试/冒烟用：标记的页面坐标（与命中同一套换算），可直接喂给鼠标
+export function tradeMarkerPoints(trades) {
+    const rect = _chartCanvasRect();
+    return _markerPoints(trades || []).map(p => ({
+        x: p.x + (rect ? rect.left : 0), y: p.y + (rect ? rect.top : 0),
+        visible: p.visible, entry: p.entry,
+        trade_id: p.trade && p.trade.id, entry_time: p.trade && p.trade.entry_time,
+    }));
+}
+
+// #rrggbb → rgba()：结果色带透明度，用于水下填充
+function _rgba(hex, alpha) {
+    const h = String(hex || '').replace('#', '');
+    if (h.length !== 6) return `rgba(120,123,134,${alpha})`;
+    const n = parseInt(h, 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+}
+
 // 结果交易点：Vela 原生 labels（abovebar/belowbar + 点形状 + 文本），
 // 不改 chart.marks 的底部泳道；label 的 tooltip 带 reason。
 function _resultMarkerSeries() {
-    if (state.resultMarksOn === false) return { series: [], labels: [], fills: [], priceLines: [], polylines: [] };
+    const empty = { series: [], labels: [], fills: [], priceLines: [], polylines: [], backgrounds: [] };
+    if (state.resultMarksOn === false) return empty;
     const d = _resultDetail(state.resultActive);
     const trades = (d && Array.isArray(d.trades)) ? d.trades : [];
-    if (!trades.length) return { series: [], labels: [], fills: [], priceLines: [], polylines: [] };
+    if (!trades.length) return empty;
+    // 0.6.2 B2-fix：交易盒 = 买点(entry_time, entry_price) 与卖点(exit_time, exit_price) 为对角。
+    // Vela 的 emit 只支持「两条 series 之间填充」，所以每个方向发一对常值 series
+    // （持仓区间内 = 进/出价格，区间外 null），fill 逐段画出来就是矩形。
+    const bars = _alignBars();
+    const times = bars.map(b => b.timestamp);
+    const boxes = [], fills2 = [], borderPolys = [];
+    // 选中态：选中的盒子加深 + 描边，其余降低透明度（选中态由结果层 state.resultSelTrade 驱动）
+    const selId = String(state.resultSelTrade || '');
+    const isSel = (tr) => selId && String(tr.id) === selId;
+    const LONG = [38, 166, 154], SHORT = [239, 83, 80];
+    const combos = [
+        ['long', false, 0.06], ['long', true, 0.16],
+        ['short', false, 0.06], ['short', true, 0.16],
+    ];
+    combos.forEach(([side, wantSel, alpha]) => {
+        const inTr = (t) => trades.find(tr => tr.side === side && tr.entry_time && tr.exit_time
+            && Number(tr.entry_time) <= t && t <= Number(tr.exit_time)
+            && (wantSel ? isSel(tr) : !isSel(tr)));
+        const pin = [], pout = [];
+        times.forEach(t => {
+            const tr = inTr(t);
+            pin.push({ time: t, value: tr && Number.isFinite(Number(tr.entry_price)) ? Number(tr.entry_price) : null });
+            pout.push({ time: t, value: tr && Number.isFinite(Number(tr.exit_price)) ? Number(tr.exit_price) : null });
+        });
+        const key = `${side}${wantSel ? ':sel' : ''}`;
+        const idIn = `res:box:${key}:in`, idOut = `res:box:${key}:out`;
+        boxes.push(
+            { id: idIn, title: '', paneId: '', kind: 'line', points: pin, visible: false,
+              style: { color: 'rgba(0,0,0,0)', width: 0, lineStyle: 'solid' } },
+            { id: idOut, title: '', paneId: '', kind: 'line', points: pout, visible: false,
+              style: { color: 'rgba(0,0,0,0)', width: 0, lineStyle: 'solid' } },
+        );
+        const rgb = side === 'short' ? SHORT : LONG;
+        fills2.push({
+            id: `res:box:${key}:fill`, paneId: '',
+            fromSeriesId: idIn, toSeriesId: idOut,
+            color: `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha})`,
+        });
+    });
+    // 选中那笔的描边：闭合折线（Vela fill 图元没有 stroke，用 polyline 画四边）
+    const selTr = trades.find(tr => isSel(tr) && tr.entry_time && tr.exit_time
+        && Number.isFinite(Number(tr.entry_price)) && Number.isFinite(Number(tr.exit_price)));
+    if (selTr) {
+        const t0 = Number(selTr.entry_time), t1 = Number(selTr.exit_time);
+        const p0 = Number(selTr.entry_price), p1 = Number(selTr.exit_price);
+        const rgb = selTr.side === 'short' ? SHORT : LONG;
+        borderPolys.push({
+            id: `res:box:${selId}:border`, paneId: '',
+            points: [
+                { xloc: 'bar_time', x: t0, price: p0 },
+                { xloc: 'bar_time', x: t1, price: p0 },
+                { xloc: 'bar_time', x: t1, price: p1 },
+                { xloc: 'bar_time', x: t0, price: p1 },
+            ],
+            closed: true, curved: false,
+            lineColor: `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`, lineWidth: 1.5, lineStyle: 'solid',
+        });
+    }
     const labels = [];
     trades.forEach((tr, i) => {
         const pnl = Number(tr.pnl);
@@ -410,8 +558,9 @@ function _resultMarkerSeries() {
             tooltip: String(tr.exit_reason || ''),
         });
     });
-    if (!labels.length) return { series: [], labels: [], fills: [], priceLines: [], polylines: [] };
-    return { series: [], labels, fills: [], priceLines: [], polylines: [] };
+    if (!labels.length) return { ...empty, backgrounds: [], boxes, fills: fills2, polylines: borderPolys };
+    return { series: boxes, labels, fills: fills2, priceLines: [], polylines: borderPolys,
+             backgrounds: [], boxes };
 }
 
 // v0.6.0 结果净值：一个 RES 组、多条 series；多结果按共同起点归一 100。
@@ -443,6 +592,8 @@ function _resultSeries() {
     if (!bars.length) return { series, fills: [], priceLines, polylines: [] };
     const barTimes = bars.map(b => b.timestamp);
     const multi = ids.length > 1;
+    const fills = [];
+    const activeId = ids.includes(state.resultActive) ? state.resultActive : ids[0];
     let common = -Infinity;
     if (multi) ids.forEach(id => {
         const t = _resultDetail(id).equity.times;
@@ -477,8 +628,33 @@ function _resultSeries() {
             style: { color: resultColor(id), width: id === state.resultActive ? 2 : 1.2,
                      lineStyle: 'solid' },
         });
+        // 0.6.2 B2：水下曲线 = 净值与高水位之间填充（只给激活结果，避免多结果糊成一片）
+        if (id === activeId) {
+            const hwmPts = new Array(barTimes.length);
+            let k = 0, hwm = -Infinity;
+            for (let i = 0; i < barTimes.length; i++) {
+                const bt = barTimes[i];
+                while (k + 1 < times.length && times[k + 1] <= bt) k++;
+                const v = Number(vals[k]);
+                if (bt < startTime || bt > last || !Number.isFinite(v)) { hwmPts[i] = { time: bt, value: null }; continue; }
+                hwm = Math.max(hwm, v);
+                hwmPts[i] = { time: bt, value: multi ? (hwm / base) * 100 : hwm };
+            }
+            series.push({
+                id: 'res:hwm:' + id,
+                title: t('result.hwm'),
+                paneId: '', kind: 'line', points: hwmPts, visible: true,
+                style: { color: '#c7cad1', width: 1.3, lineStyle: 'dashed' },
+            });
+            fills.push({
+                id: 'res:uw:' + id,
+                paneId: '',
+                fromSeriesId: 'res:' + id,
+                toSeriesId: 'res:hwm:' + id,
+                color: _rgba(resultColor(id), 0.10),
+            });
+        }
     });
-    const activeId = ids.includes(state.resultActive) ? state.resultActive : ids[0];
     const a = _resultDetail(activeId);
     const baseline = multi ? 100
         : Number(((a && a.summary && a.summary.run) || {}).initial_cash)
@@ -488,14 +664,15 @@ function _resultSeries() {
                           title: multi ? '100' : t('result.baseline'),
                           color: '#787b86', lineStyle: 'dashed', width: 1 });
     }
-    return { series, fills: [], priceLines, polylines: [] };
+    return { series, fills, priceLines, polylines: [], backgrounds: [] };
 }
 function _emitOne(groupKey, ctx) {
     const g = (groupKey === RES) ? _resultSeries()
         : (groupKey === RES_MARK) ? _resultMarkerSeries()
         : _groupSeries(groupKey);
     ctx.emit({ series: g.series, fills: g.fills, priceLines: g.priceLines,
-               polylines: g.polylines, labels: g.labels || [] });
+               polylines: g.polylines, labels: g.labels || [],
+               backgrounds: g.backgrounds || [], boxes: g.boxes || [] });
 }
 function reEmit(groupKey) {
     Object.entries(_emitGroups).forEach(([k, ctx]) => { if (k.startsWith(groupKey + '#')) _emitOne(groupKey, ctx); });
@@ -975,6 +1152,14 @@ export function syncResultLayer() {
     _layoutPanes();
 }
 export function refreshResultLayer() { syncResultLayer(); syncMarks(); _layoutPanes(); }
+
+// 只刷新结果标记层（选中态描边/填充色变化用）：换数据不重挂载，emit + invalidate 立即重绘。
+// 重挂载（remountGroup）会重建净值/HWM/水下填充，切换选中时明显卡顿，所以单列一条轻量路径。
+export function refreshResultMarksOnly() {
+    if (!chart) return;
+    try { reEmit(RES_MARK); } catch (e) {}
+    try { chart.renderer.scheduler.invalidate(4); } catch (e) {}
+}
 // 重挂载一个组：emit 补丁不触发 native 渲染器重绘（V1 定论）→ remove+add，mount 必然重绘。
 //   remove+add 同一同步帧内完成，Vela 批渲染 ⇒ 无感知闪烁。
 function remountGroup(groupKey) {
