@@ -13,6 +13,8 @@ import { refreshResultLayer, refreshResultMarksOnly, resultColor, focusTradeRang
 import { addActivity } from './activity.js';
 import { openWorkbench, renderWorkbench, updateWorkbenchStatus } from './workbench.js';
 import { openBacktestDialog } from './backtest.js';
+import { bindStrip, revealActive } from './scroll_strip.js';
+import { copyText } from './clipboard.js';
 
 const MAX_VISIBLE = 8;
 const TRADE_PAGE = 10;
@@ -758,6 +760,52 @@ export function exportTradesCsv() {
     return true;
 }
 
+// ---- v0.6.4 收尾：把结果的参数存为方案 / 复用 ----
+// 参数复制格式（v1）：带脚本与来源，粘贴时只认 script+params，来源仅作提示
+export function paramPayload(r) {
+    const st = r.strategy || {};
+    const out = { ak: 'ak.params', v: 1, script: st.id || '',
+                  params: st.params || {} };
+    const d = r.data || {};
+    if (d.symbol || d.timeframe) out.from = { symbol: d.symbol, timeframe: d.timeframe };
+    if (r.batch && r.batch.id) out.batch = r.batch.id;
+    return out;
+}
+
+export async function copyParams(r) {
+    const text = JSON.stringify(paramPayload(r), null, 0);
+    const ok = await copyText(text);
+    toast(ok ? t('result.copy_ok') : t('result.copy_fail'));
+}
+
+async function _savePresetFromResult(r) {
+    const st = r.strategy || {};
+    const params = st.params || {};
+    const brief = Object.entries(params).map(([k, v]) => `${k}=${v}`).join(' ');
+    const name = await openDialog({
+        title: t('result.preset_name'),
+        value: `${r.display_name || t('result.preset_default')} ${brief}`.trim(),
+        confirmText: t('result.save_preset'),
+    });
+    if (!name) return;
+    try {
+        const resp = await fetch('/api/presets', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                board_id: (r.data || {}).board, script: st.id,
+                timeframe: (r.data || {}).timeframe,
+                name, params, origin_result_id: r.result_id,
+            }),
+        });
+        const j = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(j.error || j.detail || `HTTP ${resp.status}`);
+        toast(t('result.preset_saved', { name: j.preset.name }));
+    } catch (e) {
+        toast(`${t('result.preset_fail')}: ${e.message}`);
+    }
+}
+
 export function renderResultBar() {
     const bar = document.getElementById('result-bar');
     const chips = document.getElementById('result-chips');
@@ -765,6 +813,7 @@ export function renderResultBar() {
     if (!bar || !chips || !stats) return;
     bar.style.display = '';
     renderRetention();
+    bindStrip(chips);
     chips.textContent = '';
     state.results.forEach(r => {
         const id = r.result_id;
@@ -778,8 +827,20 @@ export function renderResultBar() {
         const x = _el('span', 'res-x', '×');
         x.title = t('result.remove_from_chart');
         x.addEventListener('click', (e) => { e.stopPropagation(); hideResult(id); });
-        chip.append(dot, name, pct, x);
-        chip.title = `${statusLabel(r.status)} · ${(r.data && r.data.timeframe) || ''} · ${(r.data && r.data.actual && r.data.actual.bars) || 0} ${t('result.bars')}\n${t('result.chip_hint')}`;
+        chip.append(dot, name, pct);
+        let extra = '';
+        if (r.batch && Number(r.batch.total) > 1) {
+            chip.appendChild(_el('span', 'res-batch-tag',
+                `${Number(r.batch.index) + 1}/${r.batch.total}`));
+            extra = `\n${_paramsText(r)}`;
+        }
+        if (r.freshness && r.freshness.stale) {
+            const tag = _el('span', 'res-stale-tag', t('result.stale_tag'));
+            tag.title = t(`result.stale_reason.${r.freshness.reason || 'NO_DATA'}`);
+            chip.appendChild(tag);
+        }
+        chip.appendChild(x);
+        chip.title = `${statusLabel(r.status)} · ${(r.data && r.data.timeframe) || ''} · ${(r.data && r.data.actual && r.data.actual.bars) || 0} ${t('result.bars')}${extra}\n${t('result.chip_hint')}`;
         chip.addEventListener('click', (e) => {
             if (e.shiftKey) addCompare(id);
             else selectResult(id);
@@ -787,14 +848,27 @@ export function renderResultBar() {
         chip.addEventListener('dblclick', () => openWorkbench('overview'));
         chip.addEventListener('contextmenu', (e) => {
             e.preventDefault();
-            showContextMenu(e.clientX, e.clientY, [
+            const items = [
                 { label: t('result.detail'), onClick: () => { selectResult(id); openWorkbench('overview'); } },
+            ];
+            if (r.strategy && r.strategy.params && Object.keys(r.strategy.params).length) {
+                items.push(
+                    { label: t('result.save_preset'), onClick: () => _savePresetFromResult(r) },
+                    { label: t('result.copy_params'), onClick: () => copyParams(r) },
+                    { label: t('result.rerun_params'), onClick: () => openBacktestDialog({
+                        script: r.strategy.id, params: r.strategy.params,
+                    }) },
+                );
+            }
+            items.push(
                 { label: t('result.rename'), onClick: () => renameResult(id) },
                 { label: t('result.delete'), danger: true, onClick: () => deleteResult(id) },
-            ]);
+            );
+            showContextMenu(e.clientX, e.clientY, items);
         });
         chips.appendChild(chip);
     });
+    revealActive(chips);
 
     stats.textContent = '';
     const a = activeSummary();
@@ -806,14 +880,15 @@ export function renderResultBar() {
     }
     const s = a.stats || {};
     const rows = [
-        [t('result.m.total_return'), fmtPct(s.total_return), tone(s.total_return)],
-        [t('result.m.mdd'), fmtPct(s.max_drawdown), tone(s.max_drawdown)],
-        [t('result.m.sharpe'), fmtNum(s.sharpe), ''],
-        [t('result.m.win'), fmtPctPlain(s.win_rate), ''],
-        [t('result.m.trades'), String(s.trade_count == null ? 0 : s.trade_count), ''],
+        ['total_return', t('result.m.total_return'), fmtPct(s.total_return), tone(s.total_return)],
+        ['max_drawdown', t('result.m.mdd'), fmtPct(s.max_drawdown), tone(s.max_drawdown)],
+        ['sharpe', t('result.m.sharpe'), fmtNum(s.sharpe), ''],
+        ['win', t('result.m.win'), fmtPctPlain(s.win_rate), ''],
+        ['trades', t('result.m.trades'), String(s.trade_count == null ? 0 : s.trade_count), ''],
     ];
-    rows.forEach(([k, v, cls]) => {
+    rows.forEach(([key, k, v, cls]) => {
         const item = _el('span', 'res-stat');
+        item.dataset.k = key;
         item.append(_el('span', 'k', k), _el('span', `v ${cls}`, v));
         stats.appendChild(item);
     });
@@ -844,6 +919,93 @@ function _metricRows(s) {
     ];
 }
 
+
+// ---- v0.6.4 对照表（可排序）+ 批次表 ----
+let _cmpSort = { key: 'total_return', dir: -1 };   // dir=-1 降序（收益/夏普越大越好）
+
+function _paramsText(r) {
+    const p = (r.batch && r.batch.params) || (r.strategy && r.strategy.params) || {};
+    const keys = Object.keys(p);
+    if (!keys.length) return '';
+    return keys.map(k => `${k}=${p[k]}`).join(' ');
+}
+
+function _cmpVal(r, key) {
+    if (key === 'name') return String(r.display_name || r.result_id);
+    if (key === 'params') return _paramsText(r);
+    const v = Number((r.stats || {})[key]);
+    return Number.isFinite(v) ? v : null;
+}
+
+function _renderCompare(el, vis) {
+    const cmp = _el('div', 'res-compare');
+    cmp.appendChild(_el('div', 'res-sec-title', t('result.compare')));
+    const hasParams = vis.some(r => _paramsText(r));
+    const cols = [
+        { key: 'name', label: t('result.compare.name'), text: true, get: r => r.display_name || r.result_id },
+        ...(hasParams ? [{ key: 'params', label: t('result.compare.params'), text: true, get: r => _paramsText(r) }] : []),
+        { key: 'total_return', label: t('result.m.total_return'), fmt: fmtPct, tone: true },
+        { key: 'max_drawdown', label: t('result.m.mdd'), fmt: fmtPct, tone: true },
+        { key: 'sharpe', label: t('result.m.sharpe'), fmt: fmtNum },
+        { key: 'trade_count', label: t('result.m.trades'), get: r => String(((r.stats || {}).trade_count) ?? 0), noSort: false },
+    ];
+    const rows = vis.slice().sort((x, y) => {
+        const a = _cmpVal(x, _cmpSort.key), b = _cmpVal(y, _cmpSort.key);
+        if (a == null && b == null) return 0;
+        if (a == null) return 1;
+        if (b == null) return -1;
+        const d = typeof a === 'string' ? a.localeCompare(b) : a - b;
+        return d * _cmpSort.dir;
+    });
+    const bestOf = (key) => {
+        const vals = vis.map(r => Number((r.stats || {})[key])).filter(Number.isFinite);
+        return vals.length >= 2 ? Math.max(...vals) : null;
+    };
+    const bestRet = bestOf('total_return'), bestMdd = bestOf('max_drawdown'), bestSharpe = bestOf('sharpe');
+    const table = document.createElement('table');
+    const hr = document.createElement('tr');
+    cols.forEach(c => {
+        const th = _el('th', _cmpSort.key === c.key ? `sort-${_cmpSort.dir > 0 ? 'asc' : 'desc'}` : '', c.label);
+        th.title = t('result.sort_hint');
+        th.addEventListener('click', () => {
+            if (_cmpSort.key === c.key) _cmpSort.dir = -_cmpSort.dir;
+            else _cmpSort = { key: c.key, dir: c.text ? 1 : -1 };
+            fillOverview();
+        });
+        hr.appendChild(th);
+    });
+    hr.appendChild(_el('th', '', ''));
+    table.appendChild(hr);
+    rows.forEach(r => {
+        const s = r.stats || {};
+        const tr = document.createElement('tr');
+        cols.forEach(c => {
+            const td = _el('td', '', c.get ? c.get(r) : (c.fmt ? c.fmt(s[c.key]) : String(s[c.key] ?? '')));
+            const toneCls = c.tone ? tone(s[c.key]) : '';
+            if (toneCls) td.classList.add(toneCls);
+            if (c.key === 'total_return') tr.appendChild(_tdTone(td, s.total_return, bestRet));
+            else if (c.key === 'max_drawdown') tr.appendChild(_tdTone(td, s.max_drawdown, bestMdd));
+            else if (c.key === 'sharpe') tr.appendChild(_tdTone(td, s.sharpe, bestSharpe));
+            else tr.appendChild(td);
+        });
+        const xd = _el('td', 'res-cmp-x', '');
+        const x = _el('span', 'res-x', '×');
+        x.title = t('result.remove_from_chart');
+        x.addEventListener('click', (e) => { e.stopPropagation(); hideResult(r.result_id); });
+        xd.appendChild(x);
+        tr.appendChild(xd);
+        tr.addEventListener('click', () => selectResult(r.result_id));
+        table.appendChild(tr);
+    });
+    cmp.appendChild(table);
+    el.appendChild(cmp);
+}
+
+function _tdTone(td, v, best) {
+    if (best != null && Number.isFinite(Number(v)) && Number(v) === best) td.classList.add('best');
+    return td;
+}
+
 export function fillOverview() {
     const el = document.getElementById('wb-overview');
     if (!el) return;
@@ -862,6 +1024,13 @@ export function fillOverview() {
         _el('span', 'res-ov-sub', `${a.strategy && a.strategy.id ? a.strategy.id : ''} · ${a.engine && a.engine.id ? a.engine.id : ''}`),
     );
     const actions = _el('div', 'res-ov-actions');
+    if (a.strategy && a.strategy.params && Object.keys(a.strategy.params).length) {
+        const sb = _el('button', 'btn-primary', t('result.save_preset'));
+        sb.addEventListener('click', () => _savePresetFromResult(a));
+        const cb = _el('button', 'btn-ghost', t('result.copy_params'));
+        cb.addEventListener('click', () => copyParams(a));
+        actions.append(sb, cb);
+    }
     const rb = _el('button', 'btn-ghost', t('result.rename'));
     rb.addEventListener('click', () => renameResult(a.result_id));
     const db = _el('button', 'btn-ghost danger', t('result.delete'));
@@ -1027,6 +1196,14 @@ export function fillOverview() {
         _renderTradeChart();
     }
 
+    if (a.freshness && a.freshness.stale) {
+        const stale = _el('div', 'res-warn res-stale');
+        stale.appendChild(_el('div', 'res-warn-title', t('result.stale_warn')));
+        stale.appendChild(_el('div', 'res-warn-line',
+            `· ${t(`result.stale_reason.${a.freshness.reason || 'NO_DATA'}`)} · ${t('result.stale_note')}`));
+        el.appendChild(stale);
+    }
+
     if ((a.warnings || []).length) {
         const warn = _el('div', 'res-warn');
         warn.appendChild(_el('div', 'res-warn-title', t('result.warnings')));
@@ -1035,41 +1212,7 @@ export function fillOverview() {
     }
 
     const vis = (state.results || []).filter(r => state.resultVisible.includes(r.result_id));
-    if (vis.length > 1) {
-        const cmp = _el('div', 'res-compare');
-        cmp.appendChild(_el('div', 'res-sec-title', t('result.compare')));
-        const table = document.createElement('table');
-        const hr = document.createElement('tr');
-        [t('result.compare.name'), t('result.m.total_return'), t('result.m.mdd'), t('result.m.sharpe'), t('result.m.trades'), '']
-            .forEach(h => hr.appendChild(_el('th', null, h)));
-        table.appendChild(hr);
-        // 差异高亮：每列取最优（收益/夏普越高越好，回撤越接近 0 越好），只在 ≥2 条时标
-        const nums = vis.map(r => r.stats || {});
-        const bestOf = (key) => {
-            const vals = nums.map(s => Number(s[key])).filter(Number.isFinite);
-            return vals.length >= 2 ? Math.max(...vals) : null;
-        };
-        const bestRet = bestOf('total_return'), bestMdd = bestOf('max_drawdown'), bestSharpe = bestOf('sharpe');
-        const cellCls = (v, best) => (best != null && Number.isFinite(Number(v)) && Number(v) === best ? 'best' : '');
-        vis.forEach(r => {
-            const tr = document.createElement('tr');
-            const s = r.stats || {};
-            tr.appendChild(_el('td', null, r.display_name || r.result_id));
-            tr.appendChild(_el('td', `${tone(s.total_return)} ${cellCls(s.total_return, bestRet)}`.trim(), fmtPct(s.total_return)));
-            tr.appendChild(_el('td', `${tone(s.max_drawdown)} ${cellCls(s.max_drawdown, bestMdd)}`.trim(), fmtPct(s.max_drawdown)));
-            tr.appendChild(_el('td', cellCls(s.sharpe, bestSharpe), fmtNum(s.sharpe)));
-            tr.appendChild(_el('td', null, String(s.trade_count == null ? 0 : s.trade_count)));
-            const xd = _el('td', 'res-cmp-x', '');
-            const x = _el('span', 'res-x', '×');
-            x.title = t('result.remove_from_chart');
-            x.addEventListener('click', (e) => { e.stopPropagation(); hideResult(r.result_id); });
-            xd.appendChild(x);
-            tr.appendChild(xd);
-            table.appendChild(tr);
-        });
-        cmp.appendChild(table);
-        el.appendChild(cmp);
-    }
+    if (vis.length > 1) _renderCompare(el, vis);
 
     const trust = document.createElement('details');
     trust.className = 'res-trust';
@@ -1094,6 +1237,15 @@ export function fillOverview() {
             body.appendChild(_el('div', 'res-kv', `${_asmLabel(k)}：${_asmValue(k, v)}`));
         }
     });
+
+    const fp = (a.data && a.data.fingerprint) || null;
+    if (fp) {
+        const line = _el('div', 'res-kv mono',
+            `${t('result.fp')}：${fp.bars} ${t('result.bars')} · `
+            + `${new Date(fp.from).toLocaleDateString()} → ${new Date(fp.to).toLocaleDateString()}`);
+        line.title = JSON.stringify(fp);
+        body.appendChild(line);
+    }
 
     const repro = a.reproducibility || {};
     body.appendChild(_el('div', 'res-sec-title', t('result.hashes')));
@@ -1196,6 +1348,26 @@ try {
     window.__akHitTest = (x, y) => hitTradeMarker(x, y, _activeTrades());
     window.__akSelTrade = () => state.resultSelTrade || '';
 } catch (e) { /* 调试把手 */ }
+
+// v0.6.4 运镜：AI 通过 focus_result_trade 让用户屏幕定位到指定一笔
+export function onResultFocus(msg) {
+    const id = msg && msg.result_id;
+    if (!id) return;
+    if (msg.board_id && msg.board_id !== state.currentBoard) return;
+    if (msg.timeframe && msg.timeframe !== state.currentTimeframe) return;
+    const idx = Number(msg.trade_index) || 0;
+    selectResult(id);
+    ensureDetails([id]).then(() => {
+        const d = (state.resultDetail || {})[id] || {};
+        const tr = (d.trades || [])[idx];
+        if (!tr) { addActivity('warn', t('result.t.out_of_range')); return; }
+        _tradeSel[id] = _tid(tr);
+        _tradePage[id] = Math.floor(idx / TRADE_PAGE);
+        openWorkbench('overview');
+        fillOverview();
+        _locateTrade(tr);
+    });
+}
 
 export function onResultEvent(msg) {
     const r = msg.result || {};

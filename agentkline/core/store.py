@@ -21,7 +21,7 @@ from .results import summarize
 
 logger = logging.getLogger("agentkline.store")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 EQUITY_CHUNK = 500      # 净值分块：每块 500 点 [[ts,value],…]
 EVENTS_KEEP = 5000      # 事件账本上限（超出裁旧）
 
@@ -63,6 +63,15 @@ _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS events (
            id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,
            board_id TEXT, kind TEXT NOT NULL, payload TEXT)""",
+    # v0.6.4 收尾：参数方案（独立于结果，按 源+标的+周期+策略 作用域）
+    """CREATE TABLE IF NOT EXISTS presets (
+           id TEXT PRIMARY KEY,
+           source TEXT NOT NULL, symbol TEXT NOT NULL, timeframe TEXT NOT NULL DEFAULT '',
+           script TEXT NOT NULL, name TEXT NOT NULL, params TEXT NOT NULL, note TEXT,
+           origin TEXT, is_default INTEGER NOT NULL DEFAULT 0,
+           created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS presets_scope
+           ON presets(source, symbol, timeframe, script, name)""",
 )
 
 
@@ -357,6 +366,83 @@ class Store:
 
     def count_results(self) -> int:
         return int(self._rows("SELECT COUNT(*) AS n FROM results")[0]["n"])
+
+    # ---------- 参数方案（v0.6.4 收尾） ----------
+    def list_presets(self, source=None, symbol=None, script=None,
+                     timeframe=None) -> list[dict]:
+        sql = "SELECT * FROM presets WHERE 1=1"
+        args = []
+        for col, val in (("source", source), ("symbol", symbol),
+                         ("script", script), ("timeframe", timeframe)):
+            if val is not None:
+                sql += f" AND {col}=?"
+                args.append(val)
+        sql += " ORDER BY is_default DESC, updated_at DESC"
+        return [self._preset_row(r) for r in self._rows(sql, tuple(args))]
+
+    def get_preset(self, preset_id: str) -> Optional[dict]:
+        rows = self._rows("SELECT * FROM presets WHERE id=?", (preset_id,))
+        return self._preset_row(rows[0]) if rows else None
+
+    @staticmethod
+    def _preset_row(row) -> dict:
+        return {"id": row["id"], "source": row["source"], "symbol": row["symbol"],
+                "timeframe": row["timeframe"] or "", "script": row["script"],
+                "name": row["name"], "params": _loads(row["params"], {}) or {},
+                "note": row["note"], "origin": _loads(row["origin"], None),
+                "is_default": bool(row["is_default"]),
+                "created_at": row["created_at"], "updated_at": row["updated_at"]}
+
+    def insert_preset(self, preset: dict) -> None:
+        now = int(time.time() * 1000)
+        self._write(
+            """INSERT INTO presets(id,source,symbol,timeframe,script,name,params,note,
+                                  origin,is_default,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (preset["id"], preset["source"], preset["symbol"],
+             preset.get("timeframe") or "", preset["script"], preset["name"],
+             _dumps(preset.get("params") or {}), preset.get("note"),
+             None if preset.get("origin") is None else _dumps(preset["origin"]),
+             1 if preset.get("is_default") else 0, now, now))
+
+    def update_preset(self, preset_id: str, patch: dict) -> None:
+        allowed = ("name", "params", "note", "is_default")
+        fields, args = [], []
+        for key in allowed:
+            if key in patch:
+                val = patch[key]
+                if key == "params":
+                    val = _dumps(val or {})
+                elif key == "is_default":
+                    val = 1 if val else 0
+                fields.append(f"{key}=?")
+                args.append(val)
+        if not fields:
+            return
+        fields.append("updated_at=?")
+        args.append(int(time.time() * 1000))
+        args.append(preset_id)
+        self._write(f"UPDATE presets SET {', '.join(fields)} WHERE id=?", tuple(args))
+
+    def set_default_preset(self, preset_id: str) -> bool:
+        preset = self.get_preset(preset_id)
+        if not preset:
+            return False
+        with self._lock:
+            with self._conn:
+                self._conn.execute(
+                    "UPDATE presets SET is_default=0 WHERE source=? AND symbol=? AND timeframe=? AND script=?",
+                    (preset["source"], preset["symbol"], preset["timeframe"], preset["script"]))
+                self._conn.execute(
+                    "UPDATE presets SET is_default=1, updated_at=? WHERE id=?",
+                    (int(time.time() * 1000), preset_id))
+        return True
+
+    def delete_preset(self, preset_id: str) -> None:
+        self._write("DELETE FROM presets WHERE id=?", (preset_id,))
+
+    def count_presets(self) -> int:
+        return int(self._rows("SELECT COUNT(*) AS n FROM presets")[0]["n"])
 
     # ---------- 雷达 ----------
     def save_watchlist(self, groups: list[dict]) -> None:

@@ -1,6 +1,6 @@
 # AgentKline API 文档
 
-> 版本：v0.6.3 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server（API 自 v0.4.0 起保持兼容）
+> 版本：v0.6.4 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server（API 自 v0.4.0 起保持兼容）
 > 破坏性硬切版本：无兼容层。旧路径（/api/ohlcv、/api/load-csv、/history、datasource 端点、indicator/update 杂交路径）一律 404/405。
 > 机器可读附录：`python scripts/gen_api_ref.py` 可从运行中服务生成 REST 路由表 + MCP 工具表（防漂移）。
 
@@ -290,6 +290,34 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
 后端只通过 `ak-engine` 子进程调用引擎（stdin spec / stdout `__AK_RESULT__` + JSON / 超时 killpg），
 插件用 entry point group `agentkline.engines` 注册；内置 `builtin` 随主包安装，第三方引擎单独成包、
 只依赖 `agentkline-engine-core`。详见 `docs/引擎插件开发指南.md`。
+
+### 17.5 参数矩阵 / 运镜 / 旧快照（v0.6.4）
+
+- `POST /api/backtest/matrix`：体同单次回测，另给 `grid={"fast":[5,10],"slow":[30,60]}` 或
+  `params_list=[{...},{...}]`（二选一）；组合上限 60（`limits.matrix_max_runs`）。
+  立即返回 `{job_id,total,runs}`；每个结果带 `batch={id,index,total,params,grid}`。
+- `GET /api/backtest/matrix/{job_id}`：`status=running|done|cancelled`、`done/total/current`、
+  `results:[{index,result_id,params,stats}]`、`errors:[{index,params,error}]`。
+- `POST /api/backtest/matrix/{job_id}/cancel`：当前组跑完即停，已出结果保留。
+- WS：`matrix_started` / `matrix_progress` / `matrix_done`（同 job_id）。
+- `POST /api/result/{result_id}/focus`（agent 端口）：体 `{"trade_index":0}`，把用户屏幕带到该笔
+  （选中结果 → 打开详情 → 选中该笔 → 图上定位）；无浏览器在线返回 `NO_BROWSER`。
+- 结果新增加法字段：`data.fingerprint={from,to,bars,head_close,tail_close}`；
+  `GET /api/results` 每条附 `freshness:{stale,reason}`（`HEAD_MOVED`/`TAIL_MOVED`/`BAR_COUNT`/
+  `PRICE_REVISED`/`NO_DATA`）。结果冻结语义不变：不自动失效、不重算。
+- 归因 skill：`list_skills` 可见 `result-attribution`，`load_skill("result-attribution")` 取全文。
+
+### 17.6 参数方案（v0.6.4 收尾）
+
+- 作用域 `(source, symbol, timeframe, script)`，与回测结果解耦：结果被淘汰/删除，方案仍在；
+  `params` 存完整参数（默认值+覆盖），`origin` 记出处（result_id/batch_id/窗口/统计/指纹）。
+- `GET /api/presets?board_id=&script=`：按标的列出方案（`is_default` 标记当前方案）。
+- `POST /api/presets`：`{board_id, name, params?, script?, timeframe?, note?, origin_result_id?, is_default?}`；
+  给 `origin_result_id` 可自动取该结果的参数与出处。同名 `PRESET_EXISTS`、同作用域同参数
+  `PRESET_DUPLICATE_PARAMS`、未知参数 `PRESET_INVALID`、空板/未锁定 `PRESET_REQUIRES_LOCK`。
+- `PUT /api/presets/{id}`：改名/改参数/备注/设默认（同作用域默认唯一）。
+- `DELETE /api/presets/{id}`：只删方案，不碰结果。
+- MCP 工具：`list_presets` / `save_preset` / `update_preset` / `delete_preset`。
 
 ## 内置数据源（v0.4.4）
 | `datasource/binance` | Binance 直连（requests 非 ccxt 库）：现货+永续全量、K线全周期、批量实时；含股票代币（现货 B 后缀 78 + TradFi 永续 205，display 带官方分类标注） |

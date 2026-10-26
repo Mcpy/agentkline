@@ -642,6 +642,85 @@ def run_backtest(board_id: str, timeframe: Optional[str] = None, engine: str = "
         start_time=start_time, end_time=end_time, limit=limit, timeout=timeout)
 
 
+@api_tool(group="read", path="/api/presets")
+def list_presets(board_id: Optional[str] = None, script: Optional[str] = None):
+    """列出参数方案（按画板标的过滤）。参数方案=命名后的参数集，绑定 源+标的+周期+策略，
+    独立于回测结果存在（结果被淘汰也不丢）。不传 board_id 时列出全部。"""
+    return service.list_presets(board_id, script)
+
+
+@api_tool(group="user_write", method="POST", path="/api/presets", err_status=400)
+def save_preset(board_id: str, name: str, params: Optional[dict] = None,
+                script: Optional[str] = None, timeframe: Optional[str] = None,
+                note: Optional[str] = None, origin_result_id: Optional[str] = None,
+                is_default: bool = False):
+    """把一套参数存为该标的的参数方案。params 按策略声明校验并补全默认值；
+    给 origin_result_id 可自动取该结果的参数并记录出处（窗口/指标/数据指纹）；
+    is_default=true 时设为该 源+标的+周期+策略 下的当前方案。同名会报 PRESET_EXISTS。"""
+    return service.save_preset(board_id, name, params=params, script=script,
+                               timeframe=timeframe, note=note,
+                               origin_result_id=origin_result_id, is_default=is_default)
+
+
+@api_tool(group="user_write", method="PUT", path="/api/presets/{preset_id}", err_status=400)
+def update_preset(preset_id: str, name: Optional[str] = None,
+                  params: Optional[dict] = None, note: Optional[str] = None,
+                  is_default: Optional[bool] = None):
+    """改参数方案：改名/改参数/备注/设为当前方案（is_default=true 会清掉同作用域旧默认）。"""
+    return service.update_preset(preset_id, name=name, params=params, note=note,
+                                 is_default=is_default)
+
+
+@api_tool(group="user_write", method="DELETE", path="/api/presets/{preset_id}", err_status=404)
+def delete_preset(preset_id: str):
+    """删除参数方案（只删方案，不碰回测结果，也不删数据）。"""
+    return service.delete_preset(preset_id)
+
+
+@api_tool(group="exec", method="POST", path="/api/result/{result_id}/focus", err_status=400)
+def focus_result_trade(result_id: str, trade_index: int = 0):
+    """把用户屏幕带到某条结果的某一笔交易：选中该结果、打开详情、选中该笔并在图上定位。
+    需要已打开的 Web UI（无连接返回 NO_BROWSER）；trade_index 从 0 开始，
+    先 get_result(section=trades) 拿顺序。"""
+    return service.focus_result_trade(result_id, trade_index)
+
+
+@api_tool(group="user_write", method="POST", path="/api/backtest/matrix", err_status=400)
+def run_backtest_matrix(board_id: str, timeframe: Optional[str] = None, engine: str = "builtin",
+                        script: Optional[str] = None, source: Optional[str] = None,
+                        grid: Optional[dict] = None, params_list: Optional[list] = None,
+                        direction: str = "long_only", initial_cash: float = 10000.0,
+                        fee_bps: float = 5.0, slippage_bps: float = 5.0,
+                        protection: Optional[dict] = None, start_time: Optional[int] = None,
+                        end_time: Optional[int] = None, limit: int = 20000,
+                        timeout: float = 120.0):
+    """按参数矩阵批量跑回测（同一份数据、串行、进度可查、可取消）。
+    board_id 必填；grid={"fast":[5,10,20],"slow":[30,60]} 或 params_list=[{...},{...}]
+    （二选一）；组合数默认上限 60（limits.matrix_max_runs）。
+    其余参数与单次回测相同；每个结果带 batch={id,index,total,params}。
+    立即返回 {job_id,total,runs}；进度用 matrix_status 查，取消用 matrix_cancel。"""
+    return service.run_matrix(
+        board_id, timeframe=timeframe, engine=engine, script=script, source=source,
+        grid=grid, params_list=params_list, direction=direction,
+        initial_cash=initial_cash, fee_bps=fee_bps, slippage_bps=slippage_bps,
+        protection=protection, start_time=start_time, end_time=end_time,
+        limit=limit, timeout=timeout)
+
+
+@api_tool(group="read", path="/api/backtest/matrix/{job_id}", err_status=404)
+def matrix_status(job_id: str):
+    """查参数矩阵作业：status=running/done/cancelled；done/total/current；
+    已出结果 results:[{index,result_id,params,stats}]；失败组 errors:[{index,params,error}]。"""
+    return service.get_matrix(job_id)
+
+
+@api_tool(group="user_write", method="POST", path="/api/backtest/matrix/{job_id}/cancel",
+          err_status=404)
+def matrix_cancel(job_id: str):
+    """请求取消参数矩阵：当前这一组跑完即停，已出结果保留（不删）。"""
+    return service.cancel_matrix(job_id)
+
+
 # ============ MCP-only（二进制/图片，REST 豁免） ============
 @api_tool(group="exec", method="POST", path="", rest=False, mcp=False)
 def take_snapshot(board_id: Optional[str] = None, timeframe: Optional[str] = None, wait: float = 1.5,

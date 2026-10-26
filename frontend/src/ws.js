@@ -5,7 +5,7 @@ import { log } from './log.js';
 import { renderBoardTabs, renderTimeframeTabs, switchBoard, switchTimeframe, refreshIntervalOptions } from './ui.js';
 import { renderChart, applyDataUpdate, applyPrependUpdate, updateIndicatorSeries, renderSubplots, captureSnapshot, setVisibleTimeRange , applyQuoteTick, refreshIndicatorBar } from './render.js';
 import { refreshSearch } from './search.js';
-import { syncResultsForScene, clearResultsScene, onResultEvent } from './results.js';
+import { syncResultsForScene, clearResultsScene, onResultEvent, onResultFocus } from './results.js';
 import { noteWs, addActivity } from './activity.js';
 import { updateWorkbenchStatus } from './workbench.js';
 // P3：native 双源退役 —— 指标增删改一律走 emit 组差量（syncEmitGroups / updateIndicatorSeries）
@@ -296,6 +296,9 @@ case 'subplot_remove':
             case 'result_updated':
             case 'result_deleted':
                 onResultEvent(msg);
+                break;
+            case 'result_focus':
+                onResultFocus(msg);
                 break;
             case 'pong':
                 break;

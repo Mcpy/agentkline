@@ -12,7 +12,7 @@ export function openDialog(opts = {}) {
     if (_active) return Promise.resolve(null);
     const {
         title = '', message = '', value = null, placeholder = '',
-        confirmText = t('common.ok'), danger = false,
+        confirmText = t('common.ok'), danger = false, textarea = false,
     } = opts;
     const hasInput = value !== null;
     _active = true;
@@ -39,9 +39,10 @@ export function openDialog(opts = {}) {
 
         let input = null;
         if (hasInput) {
-            input = document.createElement('input');
-            input.className = 'dialog-input';
-            input.type = 'text';
+            input = document.createElement(textarea ? 'textarea' : 'input');
+            input.className = textarea ? 'dialog-input dialog-textarea' : 'dialog-input';
+            if (!textarea) input.type = 'text';
+            else input.rows = 4;
             input.value = String(value);
             if (placeholder) input.placeholder = placeholder;
             card.appendChild(input);
@@ -81,7 +82,10 @@ export function openDialog(opts = {}) {
             if (e.key === 'Escape') {
                 e.stopPropagation();
                 close(null);
-            } else if (e.key === 'Enter' && hasInput) {
+            } else if (e.key === 'Enter' && hasInput && !textarea) {
+                e.preventDefault();
+                submit();
+            } else if (e.key === 'Enter' && hasInput && textarea && (e.metaKey || e.ctrlKey)) {
                 e.preventDefault();
                 submit();
             }

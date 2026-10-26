@@ -3,6 +3,9 @@
 | 方法 | 路径 | 摘要 |
 |---|---|---|
 | POST | `/api/backtest` | Run Backtest |
+| POST | `/api/backtest/matrix` | Run Backtest Matrix |
+| GET | `/api/backtest/matrix/{job_id}` | Matrix Status |
+| POST | `/api/backtest/matrix/{job_id}/cancel` | Matrix Cancel |
 | POST | `/api/board` | Create Board |
 | POST | `/api/board/empty` | Create Empty Board |
 | GET | `/api/board/{board_id}` | Switch Board |
@@ -37,11 +40,16 @@
 | GET | `/api/markers` | Get Markers |
 | POST | `/api/markers` | Set Markers |
 | GET | `/api/overview` | Overview |
+| GET | `/api/presets` | List Presets |
+| POST | `/api/presets` | Save Preset |
+| PUT | `/api/presets/{preset_id}` | Update Preset |
+| DELETE | `/api/presets/{preset_id}` | Delete Preset |
 | GET | `/api/quotes` | Get Quotes |
 | POST | `/api/result` | Import Result |
 | GET | `/api/result/{result_id}` | Get Result |
 | PUT | `/api/result/{result_id}` | Rename Result |
 | DELETE | `/api/result/{result_id}` | Delete Result |
+| POST | `/api/result/{result_id}/focus` | Focus Result Trade |
 | GET | `/api/results` | List Results |
 | POST | `/api/run-script` | Run Script |
 | GET | `/api/scripts` | List Scripts |
@@ -127,5 +135,13 @@
 | `list_strategies` | 列出可用策略脚本（strategy/xxx）：id/display/desc/params。 |
 | `strategy_meta` | 读取策略脚本的声明（NAME/DESC/WARMUP/PARAMS/PARAM_META/PROTECTION/BARS_PER_YEAR） |
 | `run_backtest` | 跑一次回测，结果按结果实例登记并广播。 |
+| `list_presets` | 列出参数方案（按画板标的过滤）。参数方案=命名后的参数集，绑定 源+标的+周期+策略， |
+| `save_preset` | 把一套参数存为该标的的参数方案。params 按策略声明校验并补全默认值； |
+| `update_preset` | 改参数方案：改名/改参数/备注/设为当前方案（is_default=true 会清掉同作用域旧默认）。 |
+| `delete_preset` | 删除参数方案（只删方案，不碰回测结果，也不删数据）。 |
+| `focus_result_trade` | 把用户屏幕带到某条结果的某一笔交易：选中该结果、打开详情、选中该笔并在图上定位。 |
+| `run_backtest_matrix` | 按参数矩阵批量跑回测（同一份数据、串行、进度可查、可取消）。 |
+| `matrix_status` | 查参数矩阵作业：status=running/done/cancelled；done/total/current； |
+| `matrix_cancel` | 请求取消参数矩阵：当前这一组跑完即停，已出结果保留（不删）。 |
 | `take_snapshot` | 触发前端截图并返回图片+路径。需有浏览器连着 /ws。 |
 | `get_snapshot` | 读取最新快照（图片+路径）。快照由浏览器截图上传产生。 |

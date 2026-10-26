@@ -65,6 +65,14 @@ TOOL_REST_MAP = {
     "list_strategies": ("get", "/api/strategies"),
     "strategy_meta": ("get", "/api/strategy/meta"),
     "run_backtest": ("post", "/api/backtest"),
+    "run_backtest_matrix": ("post", "/api/backtest/matrix"),
+    "matrix_status": ("get", "/api/backtest/matrix/"),
+    "matrix_cancel": ("post", "/api/backtest/matrix/"),
+    "focus_result_trade": ("post", "/api/result/"),
+    "list_presets": ("get", "/api/presets"),
+    "save_preset": ("post", "/api/presets"),
+    "update_preset": ("put", "/api/presets/"),
+    "delete_preset": ("delete", "/api/presets/"),
     "list_results": ("get", "/api/results"),
     "get_result": ("get", "/api/result/"),
     "rename_result": ("put", "/api/result/"),
@@ -447,7 +455,7 @@ def test(port: int, token: str = None):
     print("🔗 两表面对齐")
     try:
         tools = mcp_tools(base, s)
-        check("MCP 工具数=55", len(tools) == 55, f"got {len(tools)}")
+        check("MCP 工具数=63", len(tools) == 63, f"got {len(tools)}")
         missing = [t for t in tools if t not in TOOL_REST_MAP and t not in MCP_ONLY]
         check("无未映射工具", not missing, str(missing))
         spec = s.get(f"{base}/openapi.json").json()
@@ -472,23 +480,31 @@ def test(port: int, token: str = None):
     r = s.post(f"{base}/api/watchlist/rows", json={"source": "datasource/mock_btc", "symbol": "RAD/USDT"})
     check("加盯幂等 noop", r.json().get("noop") is True, r.text)
     import time as _t
-    _t.sleep(6.5)  # 等一轮 quotes poll（默认 5s）
-    r = s.get(f"{base}/api/quotes")
-    q = [x for x in r.json().get("quotes", []) if x["symbol"] == "RAD/USDT"]
-    check("quotes 心跳有价", bool(q) and q[0]["price"] is not None, r.text[:200])
-    check("无板行=watch 态", bool(q) and q[0]["state"] == "watch", r.text[:200])
+
+    def _wait_quote(sym, predicate, timeout=25.0):
+        """等 quotes 轮询命中（外部源批量请求慢时别用固定 sleep 卡死）。"""
+        end = _t.time() + timeout
+        raw, hit = {}, None
+        while _t.time() < end:
+            raw = s.get(f"{base}/api/quotes").json()
+            rows = [x for x in raw.get("quotes", []) if x["symbol"] == sym]
+            hit = rows[0] if rows else None
+            if hit and predicate(hit):
+                return hit, raw
+            _t.sleep(0.5)
+        return hit, raw
+
+    q, raw = _wait_quote("RAD/USDT", lambda x: x.get("price") is not None)
+    check("quotes 心跳有价", bool(q) and q["price"] is not None, str(raw)[:200])
+    check("无板行=watch 态", bool(q) and q["state"] == "watch", str(raw)[:200])
     r = s.post(f"{base}/api/board", json={"id": "radb", "symbol": "RAD/USDT",
                                           "source": "datasource/mock_btc", "params": {"symbol": "RAD/USDT"}})
     check("雷达行建板即锁", r.status_code == 200, r.text)
-    _t.sleep(6.5)
-    r = s.get(f"{base}/api/quotes")
-    q = [x for x in r.json().get("quotes", []) if x["symbol"] == "RAD/USDT"]
-    check("非当前板=hidden 态", bool(q) and q[0]["state"] == "hidden", r.text[:200])
+    q, raw = _wait_quote("RAD/USDT", lambda x: x.get("state") == "hidden")
+    check("非当前板=hidden 态", bool(q) and q["state"] == "hidden", str(raw)[:200])
     s.get(f"{base}/api/board/radb")
-    _t.sleep(6.5)
-    r = s.get(f"{base}/api/quotes")
-    q = [x for x in r.json().get("quotes", []) if x["symbol"] == "RAD/USDT"]
-    check("当前板=visible 态", bool(q) and q[0]["state"] == "visible", r.text[:200])
+    q, raw = _wait_quote("RAD/USDT", lambda x: x.get("state") == "visible")
+    check("当前板=visible 态", bool(q) and q["state"] == "visible", str(raw)[:200])
     r = s.delete(f"{base}/api/watchlist/rows?source=datasource/mock_btc&symbol=RAD/USDT")
     check("移盯 ok", r.status_code == 200, r.text)
     r = s.delete(f"{base}/api/watchlist/rows?source=datasource/mock_btc&symbol=RAD/USDT")
@@ -741,12 +757,13 @@ def test(port: int, token: str = None):
           all(not ({"caps", "identity", "intervals"} & set(x.keys())) for x in ml),
           str(sorted(ml[0].keys())) if ml else "empty")
 
-    # === 11.4 skills 四卷（v0.4.4 拆分；0.6.1 增策略卷） ===
+    # === 11.4 skills 五卷（v0.4.4 拆分；0.6.1 增策略卷；0.6.4 增归因卷） ===
     print("📚 skills")
     r = s.get(f"{base}/api/skills")
     names = sorted(x["name"] for x in r.json().get("skills", r.json()))
-    check("skills 四卷齐", names == ["ai-walkthrough", "datasource-authoring",
-                                    "indicator-authoring", "strategy-authoring"], str(names))
+    check("skills 五卷齐", names == ["ai-walkthrough", "datasource-authoring",
+                                    "indicator-authoring", "result-attribution",
+                                    "strategy-authoring"], str(names))
     r = s.get(f"{base}/api/skills/datasource-authoring")
     body = r.json().get("content", r.text)
     check("datasource 卷含契约章+内联模板", "datasource 契约" in body and "INTERVALS" in body
@@ -893,6 +910,93 @@ def test(port: int, token: str = None):
               f"{len(cli.get('trades') or [])}")
     except Exception as exc:  # noqa: BLE001
         check("CLI/API 同 spec 逐数一致", False, f"{type(exc).__name__}: {exc}")
+
+    # === 11.5 参数方案（v0.6.4 收尾） ===
+    r = s.post(f"{base}/api/presets", json={
+        "board_id": "btb", "name": "e2e最佳", "origin_result_id": rid1})
+    pj = r.json().get("preset") or {}
+    check("方案：从结果保存（参数+出处）", r.status_code == 200 and pj.get("id")
+          and pj.get("params", {}).get("fast") is not None
+          and (pj.get("origin") or {}).get("result_id") == rid1, r.text[:240])
+    preset_id = pj.get("id")
+    r = s.post(f"{base}/api/presets", json={"board_id": "btb", "name": "e2e最佳",
+                                            "script": "strategy/ma_cross",
+                                            "params": {"fast": 5, "slow": 30}})
+    check("方案：同名拒绝", r.status_code == 400 and "PRESET_EXISTS" in r.text, r.text[:160])
+    r = s.post(f"{base}/api/presets", json={"board_id": "btb", "name": "重复参数",
+                                            "script": "strategy/ma_cross",
+                                            "params": pj.get("params") or {}})
+    check("方案：重复参数拒绝", r.status_code == 400 and "PRESET_DUPLICATE_PARAMS" in r.text,
+          r.text[:160])
+    r = s.post(f"{base}/api/presets", json={"board_id": "btb", "name": "坏参数",
+                                            "script": "strategy/ma_cross",
+                                            "params": {"nope": 1}})
+    check("方案：未知参数拒绝", r.status_code == 400 and "PRESET_INVALID" in r.text, r.text[:160])
+    r = s.put(f"{base}/api/presets/{preset_id}", json={"name": "e2e默认", "is_default": True})
+    check("方案：改名+设默认", r.status_code == 200
+          and (r.json().get("preset") or {}).get("is_default") is True, r.text[:160])
+    listed = s.get(f"{base}/api/presets", params={"board_id": "btb"}).json()
+    check("方案：按板列出", any(p["id"] == preset_id for p in listed.get("presets") or [])
+          and len(listed.get("presets") or []) == 1, str(listed)[:200])
+    r = s.delete(f"{base}/api/presets/{preset_id}")
+    check("方案：删除（不碰结果）", r.status_code == 200
+          and s.get(f"{base}/api/presets", params={"board_id": "btb"}).json().get("count") == 0,
+          r.text[:160])
+
+    # === 11.6 参数矩阵（v0.6.4） ===
+    r = s.post(f"{base}/api/backtest/matrix", json={
+        "board_id": "btb", "timeframe": "1d", "script": "strategy/ma_cross",
+        "direction": "long_only", "initial_cash": 10000, "limit": 300,
+        "grid": {"fast": [5, 10], "slow": [30, 60]},
+    })
+    mj = r.json()
+    job_id = mj.get("job_id")
+    check("矩阵启动 2×2", r.status_code == 200 and mj.get("total") == 4 and job_id, r.text[:200])
+    st = {}
+    for _ in range(120):
+        st = s.get(f"{base}/api/backtest/matrix/{job_id}").json()
+        if st.get("status") != "running":
+            break
+        _tm.sleep(0.3)
+    check("矩阵跑完 4 组", st.get("status") == "done" and st.get("done") == 4
+          and len(st.get("results") or []) == 4, str(st)[:200])
+    batch_ids = set()
+    for row in (st.get("results") or []):
+        rr = s.get(f"{base}/api/result/{row['result_id']}?section=summary").json().get("result") or {}
+        batch_ids.add(((rr.get("batch") or {}).get("id"), (rr.get("data") or {}).get("fingerprint") is not None))
+    check("矩阵结果带 batch+指纹", batch_ids == {(job_id, True)}, str(batch_ids))
+    listed = s.get(f"{base}/api/results", params={"board_id": "btb"}).json()
+    fr = [x.get("freshness") for x in listed.get("results") or []
+          if x.get("batch", {}).get("id") == job_id]
+    check("新结果不标旧快照", len(fr) == 4 and all(f and f.get("stale") is False for f in fr), str(fr))
+    r = s.post(f"{base}/api/backtest/matrix", json={"board_id": "btb", "script": "strategy/ma_cross",
+                                                   "grid": {"nope": [1]}})
+    check("矩阵未知参数被拒", r.status_code == 400 and "MATRIX_INVALID" in r.text, r.text[:160])
+    r = s.post(f"{base}/api/backtest/matrix", json={"board_id": "btb", "script": "strategy/ma_cross",
+                                                   "grid": {"fast": list(range(1, 9)),
+                                                            "slow": list(range(1, 9))}})
+    check("矩阵超上限被拒", r.status_code == 400 and "MATRIX_LIMIT" in r.text, r.text[:160])
+    # 取消：立即取消，最终状态不晚于 done
+    r = s.post(f"{base}/api/backtest/matrix", json={
+        "board_id": "btb", "timeframe": "1d", "script": "strategy/ma_cross",
+        "limit": 300, "grid": {"fast": [5, 10, 15], "slow": [30, 60]}})
+    cj = r.json()
+    s.post(f"{base}/api/backtest/matrix/{cj['job_id']}/cancel")
+    cst = {}
+    for _ in range(60):
+        cst = s.get(f"{base}/api/backtest/matrix/{cj['job_id']}").json()
+        if cst.get("status") != "running":
+            break
+        _tm.sleep(0.2)
+    check("矩阵可取消且不越界", cst.get("status") in ("cancelled", "done")
+          and (cst.get("done") or 0) <= cj.get("total", 0), str(cst)[:160])
+
+    # 运镜：无浏览器必须 NO_BROWSER；有浏览器则 ok
+    r = s.post(f"{base}/api/result/{rid1}/focus", json={"trade_index": 0})
+    body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+    check("运镜工具可用（NO_BROWSER 或 ok）",
+          (r.status_code == 400 and "NO_BROWSER" in r.text)
+          or (r.status_code == 200 and body.get("status") == "ok"), r.text[:160])
 
     # B8 方向：同一份 ±1 目标，both 下必须出现空头
     both_src = ('STRATEGY_MODE = "signal"\nNAME = "e2e_both"\nWARMUP = 2\nPARAMS = {}\n'

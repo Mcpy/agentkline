@@ -3,13 +3,12 @@ import { log } from './log.js';
 import { showContextMenu } from './menu.js';
 import { t, localizeBoardName } from './i18n.js';
 import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoard 删光路径调 renderChart，漏 import 曾致 ReferenceError 断链（老 bug1 回归真根因之一）
+import { bindStrip, revealActive } from './scroll_strip.js';
 
 
     // ============================================================
     // UI 渲染
     // ============================================================
-    const TAB_MAX = 8;  // v0.4.4 C 案：明排上限，溢出收下拉
-
     // v0.4.4 tab 短名：去源 stem → 摘 tag → 去 /USDT → CJK 取首段 / 拉丁取末段
     function shortBoardName(name) {
         // 局部变量禁名 t（与 i18n t 函数 shadow 曾致整渲染链 throw = 板/周期行全空）
@@ -24,36 +23,6 @@ import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoa
         let core = parts.length && /[\u4e00-\u9fa5]/.test(parts[0]) ? parts[0]
                  : (parts[parts.length - 1] || src);
         return (core + (tag ? ' ' + t(tag) : '')).trim() || name || '';
-    }
-
-    function closeOverflow() {
-        const m = document.getElementById('board-overflow-menu');
-        if (m) m.remove();
-    }
-
-    function openOverflowMenu(anchor, overflow) {
-        closeOverflow();
-        const m = document.createElement('div');
-        m.className = 'tf-menu'; m.id = 'board-overflow-menu';
-        overflow.forEach(b => {
-            const row = document.createElement('div');
-            row.className = 'tf-menu-item ov-row';
-            const nm = document.createElement('span');
-            nm.className = 'ov-name' + (b.id === state.currentBoard ? ' ov-cur' : '');
-            nm.textContent = localizeBoardName(b.name || b.id);
-            const x = document.createElement('span');
-            x.className = 'ov-x'; x.textContent = '×'; x.title = t('tab.close_board');
-            x.onclick = (e) => { e.stopPropagation(); closeOverflow(); deleteBoard(b.id); };
-            row.append(nm, x);
-            row.onclick = () => { closeOverflow(); switchBoard(b.id); };
-            m.appendChild(row);
-        });
-        const r = anchor.getBoundingClientRect();
-        m.style.position = 'fixed';
-        m.style.left = Math.max(4, r.right - 260) + 'px';
-        m.style.top = (r.bottom + 4) + 'px';
-        document.body.appendChild(m);
-        setTimeout(() => document.addEventListener('click', closeOverflow, { once: true }), 0);
     }
 
     function tabEl(board) {
@@ -86,24 +55,10 @@ import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoa
 
     function renderBoardTabs() {
         const container = document.getElementById('board-tabs');
+        bindStrip(container);
         container.innerHTML = '';
-        const boards = state.boards;
-        let visible = boards.slice(0, TAB_MAX);
-        const cur = boards.find(b => b.id === state.currentBoard);
-        if (cur && !visible.includes(cur)) {
-            visible = boards.slice(0, TAB_MAX - 1).concat([cur]);  // 当前板永远明排
-        }
-        const overflow = boards.filter(b => !visible.includes(b));
-        visible.forEach(b => container.appendChild(tabEl(b)));
-        if (overflow.length) {
-            const ob = document.createElement('div');
-            ob.className = 'board-tab board-overflow' +
-                (cur && overflow.includes(cur) ? ' on' : '');
-            ob.textContent = `…+${overflow.length} ▾`;
-            ob.title = t('tab.overflow_title');
-            ob.onclick = (e) => { e.stopPropagation(); openOverflowMenu(ob, overflow); };
-            container.appendChild(ob);
-        }
+        state.boards.forEach(b => container.appendChild(tabEl(b)));
+        revealActive(container);
     }
 
     function deleteBoard(boardId) {
@@ -133,6 +88,7 @@ import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoa
 
     function renderTimeframeTabs() {
         const container = document.getElementById('timeframe-tabs');
+        bindStrip(container);
         container.innerHTML = '';
         const board = state.boards.find(b => b.id === state.currentBoard);
         if (!board) return;
@@ -161,6 +117,7 @@ import { openIdCard, renderChart } from './render.js';  // v0.4.2 fix: deleteBoa
             add.onclick = () => openIntervalMenu(add);
             container.appendChild(add);
         }
+        revealActive(container);
     }
 
     async function openIntervalMenu(anchor) {

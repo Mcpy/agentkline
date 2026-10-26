@@ -10,6 +10,7 @@ import { log } from './log.js';
 import { openSettings } from './settings.js';
 import { t, localizeBoardName } from './i18n.js';
 import { showContextMenu } from './menu.js';
+import { bindStrip } from './scroll_strip.js';
 import { openIndicatorLibrary } from './indicator_library.js';
 import { effectiveStyle } from './visual_spec.js';   // V1：芯片色点与图上生效色同源
 import { onChartClick } from './results.js';           // 0.6.2 B1/B2：图上交易盒/标记点击
@@ -44,6 +45,7 @@ function getIndicatorColor(ind) {
 }
 
 // ============ 指标栏（chip 显隐/设置/删除/内置菜单） ============
+let _indChipCount = 0;   // 新增实例时把最后一个 chip 露出来（数量多也不丢新加的）
 function renderIndicatorBar() {
     const bar = document.getElementById('indicator-bar');
     if (!bar) return;
@@ -55,14 +57,22 @@ function renderIndicatorBar() {
     addBtn.onclick = (e) => { e.stopPropagation(); openIndicatorMenu(e); };
     bar.appendChild(addBtn);
 
+    const strip = document.createElement('div');
+    strip.className = 'ind-chips';
+    strip.id = 'indicator-chips';
+    bar.appendChild(strip);
+    bindStrip(strip);
+
     const names = Object.keys(state.indicators || {});
     if (names.length === 0) {
         const empty = document.createElement('span');
         empty.style.cssText = 'font-size:11px;color:#555;';
         empty.textContent = t('ind.none');
-        bar.appendChild(empty);
+        strip.appendChild(empty);
+        _indChipCount = 0;
         return;
     }
+    let lastChip = null;
     names.forEach(name => {
         const ind = state.indicators[name];
         const visible = state.visibility[name] !== false;
@@ -98,8 +108,11 @@ function renderIndicatorBar() {
                 { label: t('ind.delete'), danger: true, onClick: () => deleteIndicator(name) },
             ]);
         };
-        bar.appendChild(chip);
+        strip.appendChild(chip);
+        lastChip = chip;
     });
+    if (names.length > _indChipCount) strip.reveal(lastChip);
+    _indChipCount = names.length;
 }
 
 function toggleIndicator(name) {

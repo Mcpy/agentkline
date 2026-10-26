@@ -4,6 +4,7 @@
 """
 import json
 import shutil
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -124,7 +125,52 @@ def main():
         check("删板级联删结果", store3.count_results() == before - MAX_RESULTS_PER_BOARD)
         check("删板后板数", store3.count_boards() == 1)
 
+        # 参数方案（schema v2，独立于结果）
+        store3.insert_preset({"id": "ps_1", "source": "datasource/mock_btc",
+                              "symbol": "BTC/USDT", "timeframe": "1d",
+                              "script": "strategy/ma_cross", "name": "A",
+                              "params": {"fast": 5}, "is_default": True})
+        store3.insert_preset({"id": "ps_2", "source": "datasource/mock_btc",
+                              "symbol": "BTC/USDT", "timeframe": "1d",
+                              "script": "strategy/ma_cross", "name": "B",
+                              "params": {"fast": 10}, "origin": {"result_id": "bt_x_1"}})
+        rows = store3.list_presets("datasource/mock_btc", "BTC/USDT", "strategy/ma_cross")
+        check("方案：写入+列出", len(rows) == 2 and rows[0]["is_default"] is True, str(rows)[:160])
+        store3.set_default_preset("ps_2")
+        rows = store3.list_presets("datasource/mock_btc", "BTC/USDT", "strategy/ma_cross")
+        dft = {r["id"]: r["is_default"] for r in rows}
+        check("方案：默认唯一切换", dft == {"ps_1": False, "ps_2": True}, str(dft))
+        store3.update_preset("ps_1", {"name": "A2", "params": {"fast": 7}})
+        one = store3.get_preset("ps_1")
+        check("方案：改名+改参数", one["name"] == "A2" and one["params"] == {"fast": 7}, str(one))
+        check("方案：出处保留", (store3.get_preset("ps_2")["origin"] or {}).get("result_id") == "bt_x_1")
+        store3.delete_preset("ps_2")
+        check("方案：删除", store3.count_presets() == 1)
+        store3.close()
+        store = Store(db)
+        check("方案：重启后仍在", store.count_presets() == 1 and
+              store.get_preset("ps_1")["params"] == {"fast": 7})
+        store.close()
+
+        # schema v1 → v2 迁移：旧库没有 presets 表，重开应补表且不丢旧数据
+        mig = tmp / "mig.db"
+        m1 = Store(mig)
+        m1.upsert_board({"id": "mb", "name": "迁移板", "intervals": ["1d"],
+                         "created_at": "2026-01-01T00:00:00"})
+        m1.close()
+        raw = sqlite3.connect(mig)
+        raw.execute("DROP TABLE presets")
+        raw.execute("PRAGMA user_version=1")
+        raw.commit()
+        raw.close()
+        m2 = Store(mig)
+        check("v1→v2 迁移补 presets 表且保留画板",
+              m2.stats()["schema"] == 2 and m2.count_presets() == 0
+              and m2.count_boards() == 1, str(m2.stats()))
+        m2.close()
+
         # 雷达
+        store3 = Store(db)
         store3.save_watchlist([{"id": "default", "name": "默认",
                                 "rows": [{"source": "datasource/mock_btc", "symbol": "BTC/USDT"}]},
                                {"id": "grp_a", "name": "A", "rows": []}])

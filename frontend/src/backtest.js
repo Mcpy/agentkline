@@ -5,6 +5,8 @@
 import { state } from './state.js';
 import { t } from './i18n.js';
 import { toast } from './search.js';
+import { openDialog } from './dialog.js';
+import { copyText } from './clipboard.js';
 import { tfMs } from './vela_adapter.js';
 
 let _engines = null;
@@ -98,16 +100,23 @@ function readParams(container) {
     return out;
 }
 
-export async function openBacktestDialog() {
+export async function openBacktestDialog(opts = {}) {
     if (document.getElementById('bt-overlay')) return;
     let engines = [];
     let strategies = [];
+    let presets = [];
     try {
         [engines, strategies] = await Promise.all([loadEngines(), loadStrategies()]);
     } catch (e) {
         toast(`${t('bt.load_fail')}: ${e.message}`);
         return;
     }
+    if (state.currentBoard) {
+        try {
+            presets = (await fetchJSON('/api/presets')).presets || [];
+        } catch (e) { presets = []; }
+    }
+    let pendingParams = opts.params || null;   // 从结果/方案带进来的参数
     if (!engines.length) { toast(t('bt.no_engine')); return; }
 
     const overlay = el('div', 'overlay dialog-overlay');
@@ -119,6 +128,15 @@ export async function openBacktestDialog() {
     card.appendChild(el('div', 'dialog-msg', t('bt.subtitle')));
     const bodyBox = el('div', 'bt-body');
     card.appendChild(bodyBox);
+
+    // v0.6.4 模式页签：单次 / 参数矩阵（引擎/策略/方向/窗口/成本共用）
+    let mode = 'single';
+    const tabs = el('div', 'bt-tabs');
+    const tabSingle = el('button', 'bt-tab on', t('bt.tab.single'));
+    const tabMatrix = el('button', 'bt-tab', t('bt.tab.matrix'));
+    tabSingle.type = tabMatrix.type = 'button';
+    tabs.append(tabSingle, tabMatrix);
+    bodyBox.appendChild(tabs);
 
     // 引擎
     const engineSel = document.createElement('select');
@@ -145,6 +163,272 @@ export async function openBacktestDialog() {
     if (!strategies.length) {
         stratSel.disabled = true;
     }
+    if (opts.script && strategies.some(x => x.id === opts.script)) stratSel.value = opts.script;
+
+    // 参数方案（v0.6.4 收尾）：选方案即填参数；可把当前参数存为该标的的方案
+    const presetSel = document.createElement('select');
+    presetSel.id = 'bt-preset';
+    const presetManage = el('button', 'btn-ghost', t('bt.preset_manage'));
+    presetManage.type = 'button';
+    const presetImport = el('button', 'btn-ghost', t('bt.import_params'));
+    presetImport.type = 'button';
+    const presetWrap = el('div', 'bt-preset');
+    presetWrap.append(presetSel, presetImport, presetManage);
+    bodyBox.appendChild(row(t('bt.preset'), presetWrap));
+    const pasteHint = el('div', 'bt-hint');
+    pasteHint.style.display = 'none';
+    bodyBox.appendChild(pasteHint);
+    const boardScope = () => {
+        const b = (state.boards || []).find(x => x.id === state.currentBoard);
+        const lock = (b && b.source_lock) || {};
+        return { source: lock.script || '', symbol: (lock.identity || {}).symbol || '' };
+    };
+    // 当前标的 + 当前策略可用的方案（下拉用；管理面板可切全局）
+    const scopedPresets = () => {
+        const sc = boardScope();
+        return presets.filter(p =>
+            (!sc.source || p.source === sc.source)
+            && (!sc.symbol || p.symbol === sc.symbol)
+            && (!stratSel.value || p.script === stratSel.value));
+    };
+    const paintPresets = (selectId = '') => {
+        presetSel.textContent = '';
+        const none = document.createElement('option');
+        none.value = '';
+        none.textContent = t('bt.preset_none');
+        presetSel.appendChild(none);
+        scopedPresets().forEach(p => {
+            const o = document.createElement('option');
+            o.value = p.id;
+            const tf = p.timeframe && p.timeframe !== state.currentTimeframe ? ` · ${p.timeframe}` : '';
+            o.textContent = `${p.is_default ? '★ ' : ''}${p.name}${tf}`;
+            o.title = Object.entries(p.params || {}).map(([k, v]) => `${k}=${v}`).join(' ');
+            presetSel.appendChild(o);
+        });
+        if (selectId) presetSel.value = selectId;
+        else {
+            const def = scopedPresets().find(p => p.is_default);
+            if (def && !pendingParams) { presetSel.value = def.id; pendingParams = def.params || null; }
+        }
+    };
+    const applyParams = (params) => {
+        if (!params) return;
+        paramsBox.querySelectorAll('[data-pname]').forEach(n => {
+            const k = n.dataset.pname;
+            if (!(k in params)) return;
+            const v = params[k];
+            if (n.dataset.type === 'bool') n.checked = !!v;
+            else n.value = String(v);
+        });
+    };
+    presetSel.onchange = () => {
+        const hit = presets.find(p => p.id === presetSel.value);
+        if (!hit) return;
+        pendingParams = hit.params || {};
+        applyParams(pendingParams);
+        if (mode === 'matrix') paintCount();
+    };
+
+    const importParams = async () => {
+        const text = await openDialog({
+            title: t('bt.paste_title'),
+            message: t('bt.paste_hint'),
+            textarea: true,
+            value: '',
+            confirmText: t('bt.paste_ok'),
+        });
+        if (!text) return;
+        let obj = null;
+        try { obj = JSON.parse(String(text).trim()); } catch (e) { obj = null; }
+        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+            errBox.textContent = t('bt.paste_bad');
+            return;
+        }
+        const params = obj.params && typeof obj.params === 'object' ? obj.params : obj;
+        if (!params || Array.isArray(params)) {
+            errBox.textContent = t('bt.paste_bad');
+            return;
+        }
+        let script = typeof obj.script === 'string' ? obj.script : '';
+        if (script && script !== stratSel.value && strategies.some(x => x.id === script)) {
+            const ok = await openDialog({
+                title: t('bt.paste_switch'), message: script,
+                confirmText: t('common.ok'),
+            });
+            if (!ok) return;
+            stratSel.value = script;
+            paintPresets();
+            paintParams();
+        } else if (script && !strategies.some(x => x.id === script)) {
+            errBox.textContent = t('bt.paste_no_script', { script });
+            return;
+        }
+        pendingParams = params;
+        applyParams(params);
+        if (meta && meta.params) {
+            const unknown = Object.keys(params).filter(k => !(k in meta.params));
+            if (unknown.length) {
+                errBox.textContent = t('bt.paste_unknown', { keys: unknown.join(', ') });
+            }
+        }
+        const from = obj.from || {};
+        pasteHint.textContent = from.symbol
+            ? t('bt.paste_from', { symbol: from.symbol, tf: from.timeframe || '' })
+            : '';
+        pasteHint.style.display = pasteHint.textContent ? '' : 'none';
+    };
+    presetImport.onclick = importParams;
+    paintPresets();
+
+    const reloadPresets = async (selectId = '') => {
+        try {
+            presets = (await fetchJSON('/api/presets')).presets || [];
+        } catch (e) { presets = []; }
+        paintPresets(selectId || presetSel.value);
+    };
+
+    // 方案管理：默认看本标的，可切全局并按 标的·周期 分组；设默认 / 复制 / 删除
+    let _presetScope = 'board';
+    const openPresetManager = () => {
+        if (document.getElementById('bt-preset-overlay')) return;
+        const ov = el('div', 'overlay dialog-overlay');
+        ov.id = 'bt-preset-overlay';
+        const card = el('div', 'overlay-card dialog-card bt-preset-manager');
+        card.appendChild(el('h3', '', t('bt.preset_manage')));
+        card.appendChild(el('div', 'dialog-msg', t('bt.preset_manage_hint')));
+        const list = el('div', 'bt-preset-list');
+        card.appendChild(list);
+        let onKey = null;
+        const closeOv = () => {
+            if (onKey) document.removeEventListener('keydown', onKey, true);
+            ov.remove();
+        };
+        const foot = el('div', 'dialog-foot');
+        const closeBtn = el('button', 'btn-primary', t('common.ok'));
+        closeBtn.type = 'button';
+        closeBtn.onclick = closeOv;
+        foot.appendChild(closeBtn);
+        card.appendChild(foot);
+
+        let scope = _presetScope;
+        let query = '';
+        const toolbar = el('div', 'bt-preset-toolbar');
+        const boardBtn = el('button', 'bt-tab', t('bt.preset_scope_board'));
+        const allBtn = el('button', 'bt-tab', t('bt.preset_scope_all'));
+        boardBtn.type = allBtn.type = 'button';
+        const search = document.createElement('input');
+        search.className = 'bt-preset-search';
+        search.placeholder = t('bt.preset_search');
+        toolbar.append(boardBtn, allBtn, search);
+        card.insertBefore(toolbar, list);
+        const syncTabs = () => {
+            boardBtn.classList.toggle('on', scope === 'board');
+            allBtn.classList.toggle('on', scope === 'all');
+        };
+
+        const presetRow = (p) => {
+            const row = el('div', 'bt-preset-item');
+            const info = el('div', 'bt-preset-info');
+            info.appendChild(el('div', 'bt-preset-name',
+                `${p.is_default ? '★ ' : ''}${p.name}`));
+            info.appendChild(el('div', 'bt-hint mono',
+                Object.entries(p.params || {}).map(([k, v]) => `${k}=${v}`).join(' ')));
+            if (scope === 'all') {
+                info.appendChild(el('div', 'bt-preset-scope-meta',
+                    `${p.script}${p.timeframe ? ' · ' + p.timeframe : ''}`));
+            }
+            const acts = el('div', 'bt-preset-acts');
+            const cp = el('button', 'btn-ghost', t('bt.preset_copy'));
+            cp.type = 'button';
+            cp.onclick = async () => {
+                const payload = { ak: 'ak.params', v: 1, script: p.script,
+                                  params: p.params,
+                                  from: { symbol: p.symbol, timeframe: p.timeframe } };
+                const ok = await copyText(JSON.stringify(payload));
+                if (ok) toast(t('bt.preset_copy_ok'));
+                else errBox.textContent = t('result.copy_fail');
+            };
+            acts.appendChild(cp);
+            if (!p.is_default) {
+                const bd = el('button', 'btn-ghost', t('bt.preset_set_default'));
+                bd.type = 'button';
+                bd.onclick = async () => {
+                    try {
+                        await fetchJSON(`/api/presets/${p.id}`, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ is_default: true }),
+                        });
+                        await reloadPresets(scope === 'board' ? p.id : '');
+                        paint();
+                    } catch (e) { errBox.textContent = e.message; }
+                };
+                acts.appendChild(bd);
+            }
+            const del = el('button', 'btn-ghost danger', t('bt.preset_delete'));
+            del.type = 'button';
+            del.onclick = async () => {
+                // 先收起管理面板再弹确认框：两个 overlay 叠着会互相挡点击
+                closeOv();
+                const ok = await openDialog({
+                    title: t('bt.preset_delete'),
+                    message: p.name,
+                    confirmText: t('result.delete'),
+                    danger: true,
+                });
+                if (!ok) { openPresetManager(); return; }
+                try {
+                    await fetchJSON(`/api/presets/${p.id}`, { method: 'DELETE' });
+                    await reloadPresets('');
+                } catch (e) { errBox.textContent = e.message; }
+                openPresetManager();
+            };
+            acts.appendChild(del);
+            row.append(info, acts);
+            return row;
+        };
+
+        const paint = () => {
+            list.textContent = '';
+            const q = query.trim().toLowerCase();
+            const base = scope === 'board' ? scopedPresets() : presets;
+            const rows = base.filter(p => !q
+                || `${p.symbol} ${p.name} ${p.script} ${p.timeframe || ''}`.toLowerCase().includes(q));
+            if (!rows.length) {
+                list.appendChild(el('div', 'bt-hint',
+                    scope === 'board' ? t('bt.preset_empty') : t('bt.preset_empty_all')));
+                return;
+            }
+            if (scope === 'board') {
+                rows.forEach(p => list.appendChild(presetRow(p)));
+                return;
+            }
+            const groups = new Map();
+            rows.forEach(p => {
+                const key = `${p.symbol} · ${p.timeframe || '—'}`;
+                if (!groups.has(key)) groups.set(key, []);
+                groups.get(key).push(p);
+            });
+            [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0])).forEach(([key, items]) => {
+                list.appendChild(el('div', 'bt-preset-group', key));
+                list.appendChild(el('div', 'bt-preset-group-sub',
+                    `${items[0].source} · ${items[0].script}`));
+                items.forEach(p => list.appendChild(presetRow(p)));
+            });
+        };
+
+        boardBtn.onclick = () => { scope = 'board'; _presetScope = scope; syncTabs(); paint(); };
+        allBtn.onclick = () => { scope = 'all'; _presetScope = scope; syncTabs(); paint(); };
+        search.addEventListener('input', () => { query = search.value; paint(); });
+        syncTabs();
+        paint();
+        onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); closeOv(); } };
+        document.addEventListener('keydown', onKey, true);
+        ov.addEventListener('mousedown', (e) => { if (e.target === ov) closeOv(); });
+        document.body.appendChild(ov);
+        ov.appendChild(card);
+    };
+    presetManage.onclick = openPresetManager;
 
     // 方向
     const dirSel = document.createElement('select');
@@ -251,18 +535,29 @@ export async function openBacktestDialog() {
     // 参数（按策略声明动态渲染）
     const paramsBox = el('div', 'bt-params');
     bodyBox.appendChild(paramsBox);
+    const matrixBox = el('div', 'bt-matrix');
+    matrixBox.style.display = 'none';
+    bodyBox.appendChild(matrixBox);
 
+    const prog = el('div', 'bt-progress');
+    prog.style.display = 'none';
+    let progTimer = null;
+    const stopProg = () => {
+        if (progTimer) { clearInterval(progTimer); progTimer = null; }
+    };
     const errBox = el('div', 'bt-err');
     const foot = el('div', 'bt-foot');
     const cancel = el('button', 'btn-ghost', t('common.cancel'));
     const run = el('button', 'btn-primary', t('bt.run'));
     foot.append(cancel, run);
+    card.appendChild(prog);
     card.appendChild(errBox);
     card.appendChild(foot);
     overlay.appendChild(card);
     document.body.appendChild(overlay);
 
     const close = () => {
+        stopProg();
         document.removeEventListener('keydown', onKey, true);
         overlay.remove();
     };
@@ -292,6 +587,7 @@ export async function openBacktestDialog() {
                     const e = j.errors[0];
                     errBox.textContent = `${e.code}: ${e.message}`;
                 }
+                paintMatrix(j);
                 const params = j.params || {};
                 const metaMap = j.param_meta || {};
                 const keys = Object.keys(params);
@@ -306,13 +602,178 @@ export async function openBacktestDialog() {
                                 ? `${metaMap[k].min} ~ ${metaMap[k].max ?? '∞'}` : ''));
                     });
                 }
+                if (pendingParams) applyParams(pendingParams);
             })
             .catch(e => { errBox.textContent = `meta: ${e.message}`; });
     };
-    stratSel.addEventListener('change', paintParams);
+    // ---- 参数矩阵输入（v0.6.4）：多值用逗号分隔，组合数实时预览 ----
+    const MATRIX_MAX = 60;
+    const matrixInputs = () => [...matrixBox.querySelectorAll('input[data-mgrid]')];
+    const readGrid = () => {
+        const grid = {};
+        matrixInputs().forEach(inp => {
+            const raw = inp.value.trim();
+            if (!raw) return;
+            grid[inp.dataset.mgrid] = raw.split(',')
+                .map(x => x.trim()).filter(x => x !== '')
+                .map(x => (Number.isFinite(Number(x)) ? Number(x) : x));
+        });
+        return grid;
+    };
+    const gridCount = (grid) => {
+        const keys = Object.keys(grid);
+        if (!keys.length) return 0;
+        return keys.reduce((n, k) => n * Math.max(1, grid[k].length), 1);
+    };
+    const paintCount = () => {
+        const cnt = document.getElementById('bt-matrix-count');
+        if (!cnt) return;
+        const n = gridCount(readGrid());
+        if (!n) {
+            cnt.textContent = t('bt.matrix.empty');
+            cnt.classList.remove('err');
+            return;
+        }
+        if (n > MATRIX_MAX) {
+            cnt.textContent = t('bt.matrix.limit', { n, max: MATRIX_MAX });
+            cnt.classList.add('err');
+            return;
+        }
+        cnt.textContent = t('bt.matrix.count', { n });
+        cnt.classList.remove('err');
+    };
+    const paintMatrix = (meta) => {
+        matrixBox.textContent = '';
+        if (!meta) return;
+        matrixBox.appendChild(el('div', 'bt-sec', t('bt.matrix.title')));
+        matrixBox.appendChild(el('div', 'bt-hint', t('bt.matrix.hint')));
+        const params = meta.params || {};
+        const metaMap = meta.param_meta || {};
+        const numeric = Object.keys(params).filter(k => {
+            const typ = (metaMap[k] && metaMap[k].type) || typeof params[k];
+            return typ === 'int' || typ === 'float';
+        });
+        if (!numeric.length) {
+            matrixBox.appendChild(el('div', 'bt-hint', t('bt.matrix.no_numeric')));
+        }
+        numeric.forEach(k => {
+            const m = metaMap[k] || {};
+            const inp = document.createElement('input');
+            inp.type = 'text';
+            inp.dataset.mgrid = k;
+            inp.placeholder = `${params[k]} (${t('bt.matrix.values_hint')})`;
+            const bound = m.min != null ? `${m.min} ~ ${m.max ?? '∞'}` : '';
+            matrixBox.appendChild(row(`${m.label || k}${bound ? ` (${bound})` : ''}`, inp));
+            inp.addEventListener('input', paintCount);
+        });
+        const cnt = el('div', 'bt-hint bt-matrix-count');
+        cnt.id = 'bt-matrix-count';
+        matrixBox.appendChild(cnt);
+        paintCount();
+    };
+
+    const runLabel = () => (mode === 'matrix' ? t('bt.run_matrix') : t('bt.run'));
+    const setMode = (m) => {
+        mode = m;
+        tabSingle.classList.toggle('on', m === 'single');
+        tabMatrix.classList.toggle('on', m === 'matrix');
+        paramsBox.style.display = m === 'single' ? '' : 'none';
+        matrixBox.style.display = m === 'matrix' ? '' : 'none';
+        run.textContent = runLabel();
+    };
+    tabSingle.onclick = () => setMode('single');
+    tabMatrix.onclick = () => setMode('matrix');
+
+    stratSel.addEventListener('change', () => { paintPresets(); paintParams(); });
     if (strategies.length) paintParams();
 
+    const runMatrixNow = async () => {
+        errBox.textContent = '';
+        const grid = readGrid();
+        const n = gridCount(grid);
+        if (!n) { errBox.textContent = t('bt.matrix.empty'); return; }
+        if (n > MATRIX_MAX) {
+            errBox.textContent = t('bt.matrix.limit', { n, max: MATRIX_MAX });
+            return;
+        }
+        run.disabled = true;
+        cancel.disabled = true;
+        const old = run.textContent;
+        run.textContent = t('bt.matrix.starting');
+        try {
+            const body = {
+                board_id: state.currentBoard,
+                timeframe: state.currentTimeframe,
+                engine: engineSel.value,
+                script: stratSel.value || null,
+                direction: dirSel.value,
+                initial_cash: parseFloat(cash.value),
+                fee_bps: parseFloat(fee.value),
+                slippage_bps: parseFloat(slip.value),
+                grid,
+                start_time: startMs,
+                end_time: endMs + dayMs - 1,
+                limit: clamp(parseInt(barsIn.value, 10) || MAX_RANGE_BARS, 1, MAX_RANGE_BARS),
+            };
+            const protection = {};
+            if (sl.value !== '') protection.stop_loss_pct = parseFloat(sl.value) / 100;
+            if (tp.value !== '') protection.take_profit_pct = parseFloat(tp.value) / 100;
+            if (Object.keys(protection).length) body.protection = protection;
+            const j = await fetchJSON('/api/backtest/matrix', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const jobId = j.job_id;
+            const pText = el('span', 'bt-progress-text',
+                t('bt.matrix.running', { done: 0, total: j.total }));
+            const pCancel = el('button', 'btn-ghost', t('bt.matrix.cancel'));
+            pCancel.type = 'button';
+            pCancel.onclick = async () => {
+                pCancel.disabled = true;
+                try {
+                    await fetchJSON(`/api/backtest/matrix/${jobId}/cancel`, { method: 'POST' });
+                } catch (e) { /* 由轮询收尾 */ }
+            };
+            prog.textContent = '';
+            prog.append(pText, pCancel);
+            prog.style.display = '';
+            stopProg();
+            progTimer = setInterval(async () => {
+                try {
+                    const st = await fetchJSON(`/api/backtest/matrix/${jobId}`);
+                    const cur = st.current
+                        ? Object.entries(st.current).map(([k, v]) => `${k}=${v}`).join(' ')
+                        : '';
+                    pText.textContent = t('bt.matrix.running',
+                        { done: st.done, total: st.total }) + (cur ? ` · ${cur}` : '');
+                    if (st.status !== 'running') {
+                        stopProg();
+                        const okN = (st.results || []).length;
+                        const errN = (st.errors || []).length;
+                        toast(st.status === 'cancelled'
+                            ? t('bt.matrix.cancelled', { done: st.done, total: st.total })
+                            : t('bt.matrix.done', { ok: okN, err: errN }));
+                        close();
+                    }
+                } catch (e) {
+                    stopProg();
+                    errBox.textContent = e.message;
+                    run.disabled = false;
+                    cancel.disabled = false;
+                    run.textContent = old;
+                }
+            }, 600);
+        } catch (e) {
+            errBox.textContent = e.message;
+            run.disabled = false;
+            cancel.disabled = false;
+            run.textContent = old;
+        }
+    };
+
     run.onclick = async () => {
+        if (mode === 'matrix') { await runMatrixNow(); return; }
         errBox.textContent = '';
         run.disabled = true;
         cancel.disabled = true;

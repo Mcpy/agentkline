@@ -8,6 +8,7 @@ import hashlib
 import logging
 import sqlite3
 import time
+import uuid
 from bisect import bisect_left, bisect_right
 from datetime import datetime
 from pathlib import Path
@@ -34,7 +35,7 @@ def _to_ms(v):
 class AgentKlineService:
     """AgentKline 业务核心"""
 
-    VERSION = "0.6.3"
+    VERSION = "0.6.4"
 
     def __init__(self, scripts_dir: str, limits: dict = None, data_dir: str = None):
         limits = limits or {}
@@ -70,6 +71,10 @@ class AgentKlineService:
         self.DEFAULT_ONLINE_TFS = ["15m", "1h", "4h", "1d", "1w"]  # 实时源建板默认周期
         self.notify: Callable[[dict], None] = lambda msg: None  # 由传输层注入
         self.current_view: dict = {}  # 用户当前视图（前端上报）
+        # v0.6.4 参数矩阵作业（内存态；结果本身落盘，重启只丢 job 不丢结果）
+        self.matrix_max_runs = int(limits.get("matrix_max_runs", 60))
+        self._matrix_jobs: dict[str, dict] = {}
+        self._matrix_lock = _th.Lock()
 
     def _build_index(self, sid):
         """建单源索引（防重入：warmup 与搜索请求撞车不重复建）。返回 True=建成/已有，False=他人构建中。"""
@@ -753,8 +758,58 @@ class AgentKlineService:
         self._bc({"type": "result_created", "board_id": board_id,
                   "timeframe": tf, "result": summary})
 
+    @staticmethod
+    def _data_fingerprint(bars, start_idx=0):
+        """轻量数据指纹（O(1) 校验）：窗口首尾时间 + 根数 + 两端收盘。"""
+        win = bars[start_idx:] if start_idx else bars
+        if not win:
+            return None
+        try:
+            return {"from": int(win[0]["timestamp"]), "to": int(win[-1]["timestamp"]),
+                    "bars": len(win),
+                    "head_close": round(float(win[0]["close"]), 8),
+                    "tail_close": round(float(win[-1]["close"]), 8)}
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _freshness(self, res, cache):
+        """把结果里记的指纹与当前 K 线比对，判断是否“基于旧快照”。"""
+        data = res.get("data") or {}
+        fp = data.get("fingerprint")
+        if not fp:
+            return None            # 0.6.4 之前的结果没有指纹：不猜
+        board_id, tf = data.get("board"), data.get("timeframe")
+        key = (board_id, tf)
+        if key not in cache:
+            bars = self.state.get_ohlcv(board_id, tf) or []
+            cache[key] = ([int(b["timestamp"]) for b in bars], bars)
+        ts, bars = cache[key]
+        if not ts:
+            return {"stale": True, "reason": "NO_DATA"}
+        i0 = bisect_left(ts, int(fp["from"]))
+        if i0 >= len(ts) or ts[i0] != int(fp["from"]):
+            return {"stale": True, "reason": "HEAD_MOVED"}
+        i1 = bisect_right(ts, int(fp["to"])) - 1
+        if i1 < i0 or ts[i1] != int(fp["to"]):
+            return {"stale": True, "reason": "TAIL_MOVED"}
+        if (i1 - i0 + 1) != int(fp.get("bars") or 0):
+            return {"stale": True, "reason": "BAR_COUNT"}
+        try:
+            head = round(float(bars[i0]["close"]), 8)
+            tail = round(float(bars[i1]["close"]), 8)
+        except (KeyError, TypeError, ValueError):
+            return {"stale": True, "reason": "BAR_INVALID"}
+        if head != fp.get("head_close") or tail != fp.get("tail_close"):
+            return {"stale": True, "reason": "PRICE_REVISED"}
+        return {"stale": False, "reason": ""}
+
     def list_results(self, board_id=None, timeframe=None):
         rows = self.state.list_results(board_id, timeframe)
+        cache = {}
+        for row in rows:
+            fr = self._freshness(row, cache)
+            if fr:
+                row["freshness"] = fr
         out = {"board_id": board_id, "count": len(rows), "results": rows}
         if board_id:
             from .results import MAX_RESULTS_PER_BOARD
@@ -795,6 +850,189 @@ class AgentKlineService:
         self._bc({"type": "result_deleted", "board_id": board_id,
                   "timeframe": tf, "result_id": result_id})
         return r
+
+    def focus_result_trade(self, result_id, trade_index=0):
+        """v0.6.4 运镜原语：把用户屏幕带到某条结果的某一笔交易。
+
+        只发广播（选中结果 → 打开详情 → 选中该笔 → 图上定位），不改结果。
+        没有浏览器在线时报 NO_BROWSER（同快照语义，不假装成功）。
+        """
+        res = self.state.hydrate_result(result_id)
+        if not res:
+            return {"error": f"Result '{result_id}' not found"}
+        trades = res.get("trades") or []
+        try:
+            idx = int(trade_index)
+        except (TypeError, ValueError):
+            return {"error": "INPUT_INVALID: trade_index 需为整数"}
+        if idx < 0 or idx >= len(trades):
+            return {"error": f"TRADE_NOT_FOUND: trade_index {idx} 越界（共 {len(trades)} 笔）"}
+        if not self._ws_active():
+            return {"error": "NO_BROWSER: 运镜需要已打开的 Web UI（/ws 无连接）"}
+        tr = trades[idx]
+        data = res.get("data") or {}
+        self._bc({"type": "result_focus", "result_id": result_id, "trade_index": idx,
+                  "board_id": data.get("board"), "timeframe": data.get("timeframe"),
+                  "entry_time": tr.get("entry_time"), "exit_time": tr.get("exit_time"),
+                  "display_name": res.get("display_name")})
+        return {"status": "ok", "result_id": result_id, "trade_index": idx,
+                "trade_count": len(trades), "trade": tr}
+
+    # ============ 参数方案（v0.6.4 收尾：独立于结果的参数集） ============
+    def _preset_scope(self, board_id):
+        """方案作用域 = 数据源 + 标的（取自板锁）；空板没有标的，不能存方案。"""
+        board = self.state.get_board(board_id)
+        if not board:
+            return None, {"error": f"Board '{board_id}' not found"}
+        lock = board.source_lock or {}
+        ident = lock.get("identity") or {}
+        if not (lock.get("script") and ident.get("symbol")):
+            return None, {"error": "PRESET_REQUIRES_LOCK: 参数方案绑定标的，请先在已锁定画板上保存"
+                                   "（空板先配数据源）"}
+        return {"source": lock["script"], "symbol": ident["symbol"],
+                "board_id": board_id, "timeframe": board.current_timeframe or ""}, None
+
+    def _preset_params(self, script, params):
+        """按策略声明校验并补全默认值：存完整参数，应用时可直接填表单。"""
+        meta = self.strategy_meta(script=script)
+        if not meta.get("ok"):
+            return None, {"error": f"PRESET_INVALID: 策略声明不可用（{meta.get('error') or script}）"}
+        defaults = meta.get("params") or {}
+        pmeta = meta.get("param_meta") or {}
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            return None, {"error": "PRESET_INVALID: params 需要对象"}
+        unknown = [k for k in params if k not in defaults]
+        if unknown:
+            return None, {"error": f"PRESET_INVALID: 未知参数 {unknown}（可用: {list(defaults)}）"}
+        clean = {}
+        for k, v in params.items():
+            val, err = self._matrix_cast(k, v, defaults.get(k), pmeta.get(k))
+            if err:
+                return None, {"error": err.replace("MATRIX_INVALID", "PRESET_INVALID")}
+            clean[k] = val
+        return {**defaults, **clean}, None
+
+    def list_presets(self, board_id=None, script=None):
+        if self.store is None:
+            return {"error": "PRESET_UNAVAILABLE: 现场库未启用，参数方案需要落盘"}
+        scope = None
+        if board_id:
+            scope, err = self._preset_scope(board_id)
+            if err:
+                return err
+        rows = self.store.list_presets(
+            scope["source"] if scope else None,
+            scope["symbol"] if scope else None,
+            (script or None))
+        return {"board_id": board_id, "count": len(rows), "presets": rows}
+
+    def save_preset(self, board_id, name, params=None, script=None, timeframe=None,
+                    note=None, origin_result_id=None, is_default=False):
+        if self.store is None:
+            return {"error": "PRESET_UNAVAILABLE: 现场库未启用，参数方案需要落盘"}
+        scope, err = self._preset_scope(board_id)
+        if err:
+            return err
+        origin = None
+        if origin_result_id:
+            res = self.state.hydrate_result(origin_result_id)
+            if not res:
+                return {"error": f"Result '{origin_result_id}' not found"}
+            st = res.get("strategy") or {}
+            if params is None:
+                params = st.get("params") or {}
+            script = script or st.get("id")
+            timeframe = timeframe or ((res.get("data") or {}).get("timeframe") or "")
+            origin = {"result_id": origin_result_id,
+                      "batch_id": (res.get("batch") or {}).get("id"),
+                      "display_name": res.get("display_name"),
+                      "created_at": res.get("created_at"),
+                      "window": (res.get("run") or {}).get("window"),
+                      "stats": res.get("stats"),
+                      "fingerprint": (res.get("data") or {}).get("fingerprint")}
+        script = str(script or "").strip()
+        if not script:
+            return {"error": "PRESET_SCRIPT_REQUIRED: 需要 script（strategy/xxx）或 origin_result_id"}
+        merged, werr = self._preset_params(script, params)
+        if werr:
+            return werr
+        nm = str(name or "").strip()
+        if not nm:
+            return {"error": "PRESET_NAME_EMPTY: 方案名不能为空"}
+        nm = nm[:80]
+        tf = str(timeframe if timeframe is not None
+                 else (self.state.get_board(board_id).current_timeframe or "")) or ""
+        dup = [p for p in self.store.list_presets(scope["source"], scope["symbol"], script, tf)
+               if p["name"] == nm]
+        if dup:
+            return {"error": f"PRESET_EXISTS: 已有同名方案「{nm}」（id={dup[0]['id']}）"}
+        same = [p for p in self.store.list_presets(scope["source"], scope["symbol"], script, tf)
+                if p["params"] == merged]
+        if same:
+            return {"error": f"PRESET_DUPLICATE_PARAMS: 这组参数已存为「{same[0]['name']}」"
+                             f"（id={same[0]['id']}），无需重复保存"}
+        preset = {"id": f"ps_{uuid.uuid4().hex[:8]}", "source": scope["source"],
+                  "symbol": scope["symbol"], "timeframe": tf, "script": script,
+                  "name": nm, "params": merged, "note": note, "origin": origin,
+                  "is_default": bool(is_default)}
+        self.store.insert_preset(preset)
+        if is_default:
+            self.store.set_default_preset(preset["id"])
+        preset = self.store.get_preset(preset["id"])
+        self._bc({"type": "preset_changed", "board_id": board_id, "preset": preset})
+        return {"status": "ok", "preset": preset}
+
+    def update_preset(self, preset_id, name=None, params=None, note=None,
+                      is_default=None):
+        if self.store is None:
+            return {"error": "PRESET_UNAVAILABLE: 现场库未启用，参数方案需要落盘"}
+        preset = self.store.get_preset(preset_id)
+        if not preset:
+            return {"error": f"Preset '{preset_id}' not found"}
+        patch = {}
+        if name is not None:
+            nm = str(name).strip()
+            if not nm:
+                return {"error": "PRESET_NAME_EMPTY: 方案名不能为空"}
+            others = [p for p in self.store.list_presets(
+                preset["source"], preset["symbol"], preset["script"], preset["timeframe"])
+                if p["name"] == nm and p["id"] != preset_id]
+            if others:
+                return {"error": f"PRESET_EXISTS: 已有同名方案「{nm}」（id={others[0]['id']}）"}
+            patch["name"] = nm[:80]
+        if params is not None:
+            merged, err = self._preset_params(preset["script"], params)
+            if err:
+                return err
+            same = [p for p in self.store.list_presets(
+                preset["source"], preset["symbol"], preset["script"], preset["timeframe"])
+                if p["params"] == merged and p["id"] != preset_id]
+            if same:
+                return {"error": f"PRESET_DUPLICATE_PARAMS: 这组参数已存为「{same[0]['name']}」"
+                                 f"（id={same[0]['id']}），无需重复保存"}
+            patch["params"] = merged
+        if note is not None:
+            patch["note"] = note
+        if is_default is not None:
+            patch["is_default"] = bool(is_default)
+        self.store.update_preset(preset_id, patch)
+        if is_default:
+            self.store.set_default_preset(preset_id)
+        preset = self.store.get_preset(preset_id)
+        self._bc({"type": "preset_changed", "board_id": None, "preset": preset})
+        return {"status": "ok", "preset": preset}
+
+    def delete_preset(self, preset_id):
+        if self.store is None:
+            return {"error": "PRESET_UNAVAILABLE: 现场库未启用，参数方案需要落盘"}
+        preset = self.store.get_preset(preset_id)
+        if not preset:
+            return {"error": f"Preset '{preset_id}' not found"}
+        self.store.delete_preset(preset_id)
+        self._bc({"type": "preset_deleted", "preset_id": preset_id})
+        return {"status": "ok", "preset_id": preset_id}
 
     # ============ 引擎回测（v0.6.1 M3：只走 ak-engine 子进程） ============
     def list_strategies(self):
@@ -904,15 +1142,16 @@ class AgentKlineService:
             return None, 0, "INPUT_INVALID: 时间范围内没有可评估的 K 线"
         return window, lead, None
 
-    def run_backtest(self, board_id, timeframe=None, engine="builtin", script=None,
+    def _run_context(self, board_id, timeframe=None, engine="builtin", script=None,
                      source=None, params=None, direction="long_only",
                      initial_cash=10000.0, fee_bps=5.0, slippage_bps=5.0,
                      protection=None, start_time=None, end_time=None, limit=20000,
-                     backfill_budget=20.0, timeout=120.0):
-        """跑一次回测：确定窗口（必要时补历史）→ 子进程 → 校验/补算 → 登记结果 + 广播。
+                     backfill_budget=20.0):
+        """一次回测的「准备段」：校验 → 策略声明 → 补历史 → 冻结窗口。
 
-        窗口：start_time/end_time 可选；缺省 = 最新往回 limit 根（默认 2 万）。
-        历史不够时先按数据源能力回补；再往前没有数据就用现有的。"""
+        v0.6.4：参数矩阵复用同一份 ctx（同一批 bars），保证各组结果可比。
+        返回 ctx 或 {"error": ...}。
+        """
         if direction not in ("long_only", "short_only", "both"):
             return {"error": f"INPUT_INVALID: direction 需为 long_only/short_only/both，收到 {direction!r}"}
         try:
@@ -972,18 +1211,34 @@ class AgentKlineService:
         if eval_idx >= len(bars) - 1:
             return {"error": f"EVAL_WINDOW_EMPTY: 可用 {len(bars)} 根，不够指标预热（WARMUP={warmup}）"}
         clipped = bool(start_ms is not None and int(bars[eval_idx]["timestamp"]) > int(start_ms))
+        return {
+            "board_id": board_id, "tf": tf, "engine": engine,
+            "script": script, "source": source, "src": src, "info": info,
+            "merged_params": merged_params, "merged_prot": merged_prot,
+            "protection_override": protection,
+            "warmup": warmup, "cash": cash, "fee": fee, "slip": slip,
+            "direction": direction, "start_ms": start_ms, "end_ms": end_ms,
+            "want": want, "backfilled": backfilled,
+            "bars": bars, "eval_idx": eval_idx, "clipped": clipped,
+        }
 
+    def _execute_run(self, ctx, params=None, timeout=120.0, display_name=None, batch=None):
+        """用已冻结的 ctx 跑一次引擎并登记结果（单跑与矩阵共用）。"""
+        board_id, tf = ctx["board_id"], ctx["tf"]
+        bars, eval_idx = ctx["bars"], ctx["eval_idx"]
+        cash, fee, slip = ctx["cash"], ctx["fee"], ctx["slip"]
+        merged_params = {**ctx["merged_params"], **(params or {})}
         run_in = {
             "initial_cash": cash, "fee_bps": fee, "slippage_bps": slip,
-            "direction": direction,
+            "direction": ctx["direction"],
             # 窗口前的 warmup 根只给策略预热，不计绩效也不交易
             "eval_start": eval_idx,
             "params": params or {},
         }
-        if protection:
-            run_in["protection"] = protection
-        spec = {"api": 1, "engine": engine, "bars": bars,
-                "strategy": {"source": src}, "run": run_in, "timeframe": tf}
+        if ctx["protection_override"]:
+            run_in["protection"] = ctx["protection_override"]
+        spec = {"api": 1, "engine": ctx["engine"], "bars": bars,
+                "strategy": {"source": ctx["src"]}, "run": run_in, "timeframe": tf}
         try:
             payload = engine_runner.run_spec(spec, timeout=float(timeout))
         except engine_runner.EngineRunError as exc:
@@ -1005,6 +1260,7 @@ class AgentKlineService:
 
         asm = payload.get("assumptions") or {}
         eng = payload.get("engine") or {}
+        info = ctx["info"] or {}
         result_payload = {
             "board_id": board_id,
             "timeframe": tf,
@@ -1019,36 +1275,39 @@ class AgentKlineService:
                 "leverage": 1.0, "bars_per_year": asm.get("bars_per_year"),
             },
             "engine": {
-                "id": str(eng.get("id") or engine),
+                "id": str(eng.get("id") or ctx["engine"]),
                 "version": str(eng.get("version") or ""),
                 "caps": eng.get("caps") if isinstance(eng.get("caps"), dict) else {},
-                "config": {"api": 1, "direction": direction, "fee_bps": fee,
+                "config": {"api": 1, "direction": ctx["direction"], "fee_bps": fee,
                            "slippage_bps": slip, "params": params or {}},
             },
             "strategy": {
-                "id": script or "strategy/inline",
+                "id": ctx["script"] or "strategy/inline",
                 "mode": "signal",
                 "params": merged_params,
                 "warmup": int(info.get("warmup") or 0),
-                "protection": merged_prot,
-                "source": src,
+                "protection": ctx["merged_prot"],
+                "source": ctx["src"],
             },
             "execution_assumptions": asm,
             "data": {"requested": {"from": bars[eval_idx]["timestamp"],
                                    "to": bars[-1]["timestamp"]}},
-            "display_name": (info.get("name") or "").strip() or None,
+            "display_name": display_name or (info.get("name") or "").strip() or None,
             "units": {},
         }
-        lock = board.source_lock or {}
+        lock = self.state.get_board(board_id).source_lock or {}
         out = normalize_result(
             result_payload, board_id, tf, bars=bars, version=self.VERSION,
-            source_sha256=self._script_sha(script) if script else "",
+            source_sha256=self._script_sha(ctx["script"]) if ctx["script"] else "",
             symbol=(lock.get("identity") or {}).get("symbol"),
-            source_script=script or "",
+            source_script=ctx["script"] or "",
         )
         if out.get("error"):
             return out
         res = out["result"]
+        res["data"]["fingerprint"] = self._data_fingerprint(bars, eval_idx)
+        if batch:
+            res["batch"] = batch          # 加法字段：批次归属（随 summary 落盘，不建表）
         res["result_id"] = self._next_result_id(res["strategy"]["id"])
         r = self.state.add_result(board_id, res)
         if r.get("error"):
@@ -1062,13 +1321,244 @@ class AgentKlineService:
             "run": {"engine": result_payload["engine"]["id"],
                     "elapsed_ms": elapsed_ms, "bars": len(bars) - eval_idx,
                     "from": bars[eval_idx]["timestamp"], "to": bars[-1]["timestamp"],
-                    "warmup_bars": eval_idx, "backfilled": backfilled,
-                    "clipped": clipped,
-                    "requested": {"start": start_ms, "end": end_ms, "limit": want}},
+                    "warmup_bars": eval_idx, "backfilled": ctx["backfilled"],
+                    "clipped": ctx["clipped"],
+                    "requested": {"start": ctx["start_ms"], "end": ctx["end_ms"],
+                                  "limit": ctx["want"]}},
         }
         if r.get("evicted"):
             body["evicted"] = r["evicted"]
         return body
+
+    def run_backtest(self, board_id, timeframe=None, engine="builtin", script=None,
+                     source=None, params=None, direction="long_only",
+                     initial_cash=10000.0, fee_bps=5.0, slippage_bps=5.0,
+                     protection=None, start_time=None, end_time=None, limit=20000,
+                     backfill_budget=20.0, timeout=120.0):
+        """跑一次回测：确定窗口（必要时补历史）→ 子进程 → 校验/补算 → 登记结果 + 广播。
+
+        窗口：start_time/end_time 可选；缺省 = 最新往回 limit 根（默认 2 万）。
+        历史不够时先按数据源能力回补；再往前没有数据就用现有的。"""
+        ctx = self._run_context(
+            board_id, timeframe=timeframe, engine=engine, script=script, source=source,
+            params=params, direction=direction, initial_cash=initial_cash,
+            fee_bps=fee_bps, slippage_bps=slippage_bps, protection=protection,
+            start_time=start_time, end_time=end_time, limit=limit,
+            backfill_budget=backfill_budget)
+        if ctx.get("error"):
+            return ctx
+        return self._execute_run(ctx, params, timeout=timeout)
+
+    # ============ 参数矩阵（v0.6.4：同一份数据上跑一组参数） ============
+    @staticmethod
+    def _matrix_cast(key, value, default, meta):
+        """把 grid 值收敛到参数类型并做区间校验；返回 (canonical, err)。"""
+        meta = meta if isinstance(meta, dict) else {}
+        typ = str(meta.get("type") or (type(default).__name__ if default is not None else ""))
+        if typ in ("int", "float"):
+            if isinstance(value, bool):
+                return None, f"MATRIX_INVALID: {key}={value!r} 需要数字"
+            try:
+                num = float(value)
+            except (TypeError, ValueError):
+                return None, f"MATRIX_INVALID: {key}={value!r} 需要数字"
+            if typ == "int":
+                if not num.is_integer():
+                    return None, f"MATRIX_INVALID: {key}={value!r} 需要整数"
+                num = int(num)
+            if meta.get("min") is not None and num < float(meta["min"]):
+                return None, f"MATRIX_INVALID: {key}={value!r} 低于下限 {meta['min']}"
+            if meta.get("max") is not None and num > float(meta["max"]):
+                return None, f"MATRIX_INVALID: {key}={value!r} 高于上限 {meta['max']}"
+            return num, ""
+        if typ == "bool":
+            if isinstance(value, bool):
+                return value, ""
+            s = str(value).strip().lower()
+            if s in ("1", "true", "yes", "on"):
+                return True, ""
+            if s in ("0", "false", "no", "off"):
+                return False, ""
+            return None, f"MATRIX_INVALID: {key}={value!r} 需要布尔"
+        if typ in ("str", "string"):
+            return str(value), ""
+        return value, ""
+
+    def _matrix_expand(self, info, grid, params_list):
+        """展开参数矩阵（默认值基底 + 覆盖）。返回 (combos, err)。"""
+        import itertools
+        base = dict((info or {}).get("params") or {})
+        meta = dict((info or {}).get("param_meta") or {})
+        if params_list is not None:
+            if not isinstance(params_list, list) or not params_list:
+                return None, "MATRIX_EMPTY: params_list 需要非空数组"
+            raw = []
+            for item in params_list:
+                if not isinstance(item, dict):
+                    return None, "MATRIX_INVALID: params_list 的元素需要对象"
+                unknown = [k for k in item if k not in base]
+                if unknown:
+                    return None, (f"MATRIX_INVALID: 未知参数 {unknown}（可用: {list(base) or '无'}）")
+                raw.append(dict(item))
+        else:
+            grid = grid or {}
+            if not isinstance(grid, dict) or not grid:
+                return None, "MATRIX_EMPTY: 至少给 grid 或 params_list"
+            unknown = [k for k in grid if k not in base]
+            if unknown:
+                return None, (f"MATRIX_INVALID: 未知参数 {unknown}（可用: {list(base) or '无'}）")
+            keys = list(grid)
+            for k in keys:
+                if not isinstance(grid[k], list) or not grid[k]:
+                    return None, f"MATRIX_EMPTY: grid.{k} 需要非空数组"
+            raw = [dict(zip(keys, values))
+                   for values in itertools.product(*[grid[k] for k in keys])]
+        if len(raw) > self.matrix_max_runs:
+            return None, (f"MATRIX_LIMIT: 组合 {len(raw)} 超过上限 {self.matrix_max_runs}"
+                          f"（拆小或调 limits.matrix_max_runs）")
+        combos = []
+        for item in raw:
+            combo = {}
+            for k, v in item.items():
+                value, err = self._matrix_cast(k, v, base.get(k), meta.get(k))
+                if err:
+                    return None, err
+                combo[k] = value
+            combos.append(combo)
+        return combos, None
+
+    def _matrix_label(self, ctx, combo):
+        base = ((ctx.get("info") or {}).get("name") or "").strip() \
+            or str(ctx.get("script") or "回测").split("/")[-1]
+        if not combo:
+            return base
+        parts = ", ".join(f"{k}={v}" for k, v in combo.items())
+        return f"{base} · {parts}"[:120]
+
+    def _matrix_prune(self):
+        """作业态内存回收：完成态保留 10 分钟，最多留 20 个。"""
+        now = time.time()
+        alive = []
+        for jid, job in list(self._matrix_jobs.items()):
+            done = job.get("status") in ("done", "cancelled", "failed")
+            if done and now - float(job.get("finished_at") or 0) > 600:
+                self._matrix_jobs.pop(jid, None)
+            else:
+                alive.append((float(job.get("created_at") or 0), jid))
+        if len(self._matrix_jobs) > 20:
+            alive.sort()
+            for _, jid in alive[:max(0, len(alive) - 20)]:
+                self._matrix_jobs.pop(jid, None)
+
+    def run_matrix(self, board_id, timeframe=None, engine="builtin", script=None,
+                   source=None, grid=None, params_list=None, direction="long_only",
+                   initial_cash=10000.0, fee_bps=5.0, slippage_bps=5.0,
+                   protection=None, start_time=None, end_time=None, limit=20000,
+                   backfill_budget=20.0, timeout=120.0):
+        """参数矩阵：一次冻结窗口，串行跑多组参数，结果逐条登记并广播进度。
+
+        返回 {job_id,total,runs:[{index,params,display_name}]}；进度用
+        GET /api/backtest/matrix/{job_id} 或 WS matrix_progress 取。
+        """
+        ctx = self._run_context(
+            board_id, timeframe=timeframe, engine=engine, script=script, source=source,
+            params=None, direction=direction, initial_cash=initial_cash,
+            fee_bps=fee_bps, slippage_bps=slippage_bps, protection=protection,
+            start_time=start_time, end_time=end_time, limit=limit,
+            backfill_budget=backfill_budget)
+        if ctx.get("error"):
+            return ctx
+        combos, err = self._matrix_expand(ctx.get("info"), grid, params_list)
+        if err:
+            return {"error": err}
+        job_id = f"mtx_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+        runs = [{"index": i, "params": c, "display_name": self._matrix_label(ctx, c)}
+                for i, c in enumerate(combos)]
+        job = {
+            "job_id": job_id, "status": "running", "created_at": time.time(),
+            "finished_at": None, "total": len(combos), "done": 0, "current": None,
+            "results": [], "errors": [], "cancel": False,
+            "board_id": board_id, "timeframe": ctx["tf"], "script": ctx["script"] or "",
+            "grid": grid, "params_list": params_list,
+            "ctx": ctx, "combos": combos, "timeout": timeout,
+        }
+        with self._matrix_lock:
+            self._matrix_prune()
+            self._matrix_jobs[job_id] = job
+        self._bc({"type": "matrix_started", "job_id": job_id, "board_id": board_id,
+                  "timeframe": ctx["tf"], "total": len(combos), "runs": runs})
+        th = __import__("threading").Thread(target=self._matrix_worker, args=(job_id,),
+                                            daemon=True, name=f"matrix-{job_id}")
+        th.start()
+        return {"status": "ok", "job_id": job_id, "total": len(combos),
+                "runs": runs, "max_runs": self.matrix_max_runs}
+
+    def _matrix_worker(self, job_id):
+        job = self._matrix_jobs.get(job_id)
+        if not job:
+            return
+        ctx = job["ctx"]
+        total = job["total"]
+        try:
+            for i, combo in enumerate(job["combos"]):
+                if job.get("cancel"):
+                    break
+                job["current"] = combo
+                self._bc({"type": "matrix_progress", "job_id": job_id,
+                          "board_id": job["board_id"], "timeframe": job["timeframe"],
+                          "done": job["done"], "total": total, "current": combo})
+                batch = {"id": job_id, "index": i, "total": total,
+                         "params": combo, "grid": job.get("grid")}
+                try:
+                    body = self._execute_run(ctx, combo, timeout=job.get("timeout") or 120.0,
+                                             display_name=self._matrix_label(ctx, combo),
+                                             batch=batch)
+                except Exception as exc:  # 单组异常不炸整批
+                    body = {"error": f"MATRIX_RUN_FAILED: {exc}"}
+                if body.get("error"):
+                    job["errors"].append({"index": i, "params": combo,
+                                          "error": body["error"]})
+                else:
+                    res = body.get("result") or {}
+                    job["results"].append({"index": i, "result_id": res.get("result_id"),
+                                           "params": combo,
+                                           "stats": res.get("stats") or {}})
+                job["done"] = i + 1
+                self._bc({"type": "matrix_progress", "job_id": job_id,
+                          "board_id": job["board_id"], "timeframe": job["timeframe"],
+                          "done": job["done"], "total": total, "current": combo})
+        finally:
+            job["status"] = "cancelled" if job.get("cancel") else "done"
+            job["finished_at"] = time.time()
+            job["current"] = None
+            self._bc({"type": "matrix_done", "job_id": job_id,
+                      "board_id": job["board_id"], "timeframe": job["timeframe"],
+                      "status": job["status"], "total": total, "done": job["done"],
+                      "result_ids": [r["result_id"] for r in job["results"]],
+                      "errors": job["errors"]})
+
+    def get_matrix(self, job_id):
+        job = self._matrix_jobs.get(job_id)
+        if not job:
+            return {"error": f"MATRIX_JOB_NOT_FOUND: {job_id}"}
+        return {
+            "job_id": job["job_id"], "status": job["status"],
+            "board_id": job["board_id"], "timeframe": job["timeframe"],
+            "script": job["script"], "total": job["total"], "done": job["done"],
+            "current": job["current"], "results": job["results"],
+            "errors": job["errors"], "cancelled": job["status"] == "cancelled",
+            "created_at": job["created_at"], "finished_at": job["finished_at"],
+        }
+
+    def cancel_matrix(self, job_id):
+        job = self._matrix_jobs.get(job_id)
+        if not job:
+            return {"error": f"MATRIX_JOB_NOT_FOUND: {job_id}"}
+        if job["status"] != "running":
+            return {"status": job["status"], "noop": True}
+        job["cancel"] = True
+        return {"status": "ok", "cancelling": True, "done": job["done"],
+                "total": job["total"]}
 
     # ============ 划线 drawings（0.5.2：每板一份，showOn 管跨周期） ============
     def add_drawing(self, board_id, timeframe, drawing):

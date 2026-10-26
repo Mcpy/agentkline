@@ -677,7 +677,71 @@ def run_checks(page, base: str, agent_base: str = None,
         print("  [dbg] csv download failed:", e)
     check("B3：明细 CSV 导出", csv_ok and csv_rows >= 11, f"ok={csv_ok} rows={csv_rows}")
 
-    # 15) 0.6.3 保留策略：结果栏常驻提示（用户必须知道超出会自动淘汰）
+    # 15) 0.6.4 参数矩阵：页签 → 多值预览 → 2 组 → 批次标签（批次表已按用户裁决删除）
+    chips_before = page.locator("#result-chips .res-chip").count()
+    page.locator("#result-add").click()
+    page.wait_for_selector(".bt-card", timeout=8000)
+    page.locator(".bt-tab").nth(1).click()
+    page.wait_for_selector("#bt-overlay input[data-mgrid]", timeout=10000)
+    grid_inputs = page.locator("#bt-overlay input[data-mgrid]")
+    grid_inputs.nth(0).fill("5,10")
+    grid_inputs.nth(1).fill("30")
+    page.wait_for_timeout(200)
+    preview = page.locator("#bt-matrix-count").inner_text()
+    page.fill("#bt-bars", "300")
+    page.locator(".bt-foot .btn-primary").click()
+    page.wait_for_selector(".bt-progress", state="visible", timeout=10000)
+    page.wait_for_function("() => !document.getElementById('bt-overlay')", timeout=120000)
+    page.wait_for_timeout(900)
+    batch_tags = page.locator("#result-chips .res-batch-tag").count()
+    batch_tables = page.locator(".res-batch").count()
+    strip_ok = page.evaluate("""() => ['#result-chips', '#board-tabs', '#timeframe-tabs', '#indicator-chips']
+        .every(s => document.querySelector(s)?.classList.contains('xstrip'))""")
+    check("0.6.4：四类条目横向溢出条就绪（画板/周期/指标/结果）", strip_ok, f"ok={strip_ok}")
+
+    chips_after = page.locator("#result-chips .res-chip").count()
+    check("0.6.4：参数矩阵 2 组 + 批次标签（无批次表）",
+          "2 组" in preview and batch_tags >= 1 and batch_tables == 0
+          and chips_after >= chips_before + 2,
+          f"preview={preview} tags={batch_tags} tables={batch_tables} "
+          f"chips={chips_before}->{chips_after}")
+
+    # 16) 0.6.4 收尾：参数方案（存 → 回测对话框自动套用）
+    saved = _post(f"{base}/api/presets", {"board_id": BOARD_ID,
+                                          "script": "strategy/ma_cross",
+                                          "name": "冒烟方案", "params": {"fast": 5, "slow": 30},
+                                          "is_default": True})
+    page.locator("#result-add").click()
+    page.wait_for_selector(".bt-card", timeout=8000)
+    page.wait_for_selector("#bt-preset", timeout=8000)
+    page.wait_for_selector('[data-pname="fast"]', timeout=10000)
+    page.wait_for_timeout(600)
+    preset_name = page.locator("#bt-preset option:checked").inner_text()
+    fast_v = page.locator('[data-pname="fast"]').input_value()
+    slow_v = page.locator('[data-pname="slow"]').input_value()
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
+    check("0.6.4：参数方案存后自动套用",
+          bool(saved.get("preset")) and "冒烟" in preset_name
+          and fast_v == "5" and slow_v == "30",
+          f"name={preset_name} fast={fast_v} slow={slow_v} saved={bool(saved.get('preset'))}")
+
+    # 16.1) 0.6.4：方案管理器的 本标的/全部 + 搜索
+    page.locator("#result-add").click()
+    page.wait_for_selector(".bt-card", timeout=8000)
+    page.wait_for_timeout(600)
+    page.locator(".bt-preset button", has_text="管理方案").click()
+    page.wait_for_selector(".bt-preset-manager", timeout=5000)
+    mgr_tabs = page.locator(".bt-preset-toolbar .bt-tab").all_inner_texts()
+    mgr_search = page.locator(".bt-preset-search").count()
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
+    page.keyboard.press("Escape")
+    check("0.6.4：方案管理器可切全部/本标的 + 搜索",
+          mgr_tabs == ["本标的", "全部方案"] and mgr_search == 1,
+          f"tabs={mgr_tabs} search={mgr_search}")
+
+    # 17) 0.6.3 保留策略：结果栏常驻提示（用户必须知道超出会自动淘汰）
     rt = page.locator("#result-retention")
     rt_visible = rt.is_visible()
     rt_text = rt.inner_text() if rt_visible else ""
@@ -685,7 +749,7 @@ def run_checks(page, base: str, agent_base: str = None,
           rt_visible and "100" in rt_text and rt.get_attribute("title") not in (None, ""),
           f"visible={rt_visible} text={rt_text[:60]}")
 
-    # 16) 0.6.3：灌到上限 → 警示文案；再导一条 → 自动淘汰 + toast 明示
+    # 18) 0.6.3：灌到上限 → 警示文案；再导一条 → 自动淘汰 + toast 明示
     small = {"equity": {"times": [1700000000000, 1700086400000],
                         "values": [10000, 10010]},
              "run": {"initial_cash": 10000},
