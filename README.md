@@ -118,6 +118,7 @@ See `config.example.yaml`. Highlights:
 
 ## 📚 Docs
 
+- [Docs index](docs/README.md) — development docs vs internal process docs
 - [API reference](docs/dev/API文档.md) — full REST / WS / MCP surface
 - [Developer guide](docs/dev/开发文档.md) — module layout, build & deployment
 - [Script guide](docs/dev/脚本编写指南.md) / [indicator-authoring](skills/indicator-authoring.md) / [datasource-authoring](skills/datasource-authoring.md) — how to write legal indicator & datasource scripts
