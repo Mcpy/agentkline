@@ -721,6 +721,50 @@ def matrix_cancel(job_id: str):
     return service.cancel_matrix(job_id)
 
 
+@api_tool(group="user_write", method="POST", path="/api/backtest/optimize", err_status=400)
+def run_optimization(board_id: str, timeframe: Optional[str] = None, engine: str = "builtin",
+                     script: Optional[str] = None, source: Optional[str] = None,
+                     space: Optional[dict] = None, method: str = "grid",
+                     objective: Optional[dict] = None, constraints: Optional[dict] = None,
+                     budget: Optional[dict] = None, holdout: Optional[dict] = None,
+                     seed: Optional[int] = None, direction: str = "long_only",
+                     initial_cash: float = 10000.0, fee_bps: float = 5.0,
+                     slippage_bps: float = 5.0, protection: Optional[dict] = None,
+                     start_time: Optional[int] = None, end_time: Optional[int] = None,
+                     limit: int = 20000, timeout: float = 120.0):
+    """参数寻优：在同一份冻结数据上按目标/约束搜索参数，Top K 做样本外验证。
+
+    space 每个参数给 {"min","max","step"} 或 {"values":[...]}；
+    method=grid（全组合，组合数不能超预算）/random/bayes（内置 TPE-lite，无需 optuna）；
+    objective={"metric":"sharpe","direction":"max"}（指标白名单见文档）；
+    constraints={"min_trades":10,"max_drawdown":0.4}（不满足的试次不参与评选）；
+    budget={"max_runs":40,"max_seconds":600}；holdout={"ratio":0.3,"top_k":3}（ratio=0 不做样本外）。
+    只把 Top K 的样本外结果登记进结果栏（不带 holdout 时登记 Top K 样本内），
+    完整试次表在作业报告里。立即返回 {job_id,total,...}；进度用 optimization_status。"""
+    return service.run_optimization(
+        board_id, timeframe=timeframe, engine=engine, script=script, source=source,
+        space=space, method=method, objective=objective, constraints=constraints,
+        budget=budget, holdout=holdout, seed=seed, direction=direction,
+        initial_cash=initial_cash, fee_bps=fee_bps, slippage_bps=slippage_bps,
+        protection=protection, start_time=start_time, end_time=end_time,
+        limit=limit, timeout=timeout)
+
+
+@api_tool(group="read", path="/api/backtest/optimize/{job_id}", err_status=404)
+def optimization_status(job_id: str):
+    """查参数寻优作业：status=running/done/cancelled/failed；phase=is/oos/register/done；
+    done/total、current、trials:[{index,params,status,score,is_stats,oos_*}],
+    top/best（含 result_id 与样本内外指标）、warnings、registered_result_ids。"""
+    return service.get_optimization(job_id)
+
+
+@api_tool(group="user_write", method="POST", path="/api/backtest/optimize/{job_id}/cancel",
+          err_status=404)
+def optimization_cancel(job_id: str):
+    """请求取消参数寻优：当前试次跑完即停；已登记的 Top K 结果保留。"""
+    return service.cancel_optimization(job_id)
+
+
 # ============ MCP-only（二进制/图片，REST 豁免） ============
 @api_tool(group="exec", method="POST", path="", rest=False, mcp=False)
 def take_snapshot(board_id: Optional[str] = None, timeframe: Optional[str] = None, wait: float = 1.5,

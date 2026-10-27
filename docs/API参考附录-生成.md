@@ -6,6 +6,9 @@
 | POST | `/api/backtest/matrix` | Run Backtest Matrix |
 | GET | `/api/backtest/matrix/{job_id}` | Matrix Status |
 | POST | `/api/backtest/matrix/{job_id}/cancel` | Matrix Cancel |
+| POST | `/api/backtest/optimize` | Run Optimization |
+| GET | `/api/backtest/optimize/{job_id}` | Optimization Status |
+| POST | `/api/backtest/optimize/{job_id}/cancel` | Optimization Cancel |
 | POST | `/api/board` | Create Board |
 | POST | `/api/board/empty` | Create Empty Board |
 | GET | `/api/board/{board_id}` | Switch Board |
@@ -143,5 +146,8 @@
 | `run_backtest_matrix` | 按参数矩阵批量跑回测（同一份数据、串行、进度可查、可取消）。 |
 | `matrix_status` | 查参数矩阵作业：status=running/done/cancelled；done/total/current； |
 | `matrix_cancel` | 请求取消参数矩阵：当前这一组跑完即停，已出结果保留（不删）。 |
+| `run_optimization` | 参数寻优：在同一份冻结数据上按目标/约束搜索参数，Top K 做样本外验证。 |
+| `optimization_status` | 查参数寻优作业：status=running/done/cancelled/failed；phase=is/oos/register/done； |
+| `optimization_cancel` | 请求取消参数寻优：当前试次跑完即停；已登记的 Top K 结果保留。 |
 | `take_snapshot` | 触发前端截图并返回图片+路径。需有浏览器连着 /ws。 |
 | `get_snapshot` | 读取最新快照（图片+路径）。快照由浏览器截图上传产生。 |

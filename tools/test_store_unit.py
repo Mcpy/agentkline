@@ -125,7 +125,7 @@ def main():
         check("删板级联删结果", store3.count_results() == before - MAX_RESULTS_PER_BOARD)
         check("删板后板数", store3.count_boards() == 1)
 
-        # 参数方案（schema v2，独立于结果）
+        # 参数方案（schema v2 起，v3 增加 script_sha256；独立于结果）
         store3.insert_preset({"id": "ps_1", "source": "datasource/mock_btc",
                               "symbol": "BTC/USDT", "timeframe": "1d",
                               "script": "strategy/ma_cross", "name": "A",
@@ -152,7 +152,7 @@ def main():
               store.get_preset("ps_1")["params"] == {"fast": 7})
         store.close()
 
-        # schema v1 → v2 迁移：旧库没有 presets 表，重开应补表且不丢旧数据
+        # schema v1 → latest 迁移：旧库没有 presets 表，重开应补表且不丢旧数据
         mig = tmp / "mig.db"
         m1 = Store(mig)
         m1.upsert_board({"id": "mb", "name": "迁移板", "intervals": ["1d"],
@@ -164,8 +164,8 @@ def main():
         raw.commit()
         raw.close()
         m2 = Store(mig)
-        check("v1→v2 迁移补 presets 表且保留画板",
-              m2.stats()["schema"] == 2 and m2.count_presets() == 0
+        check("v1→latest 迁移补 presets 表且保留画板",
+              m2.stats()["schema"] == SCHEMA_VERSION and m2.count_presets() == 0
               and m2.count_boards() == 1, str(m2.stats()))
         m2.close()
 

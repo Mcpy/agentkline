@@ -99,6 +99,33 @@ get_result(result_id="<返回值里的 result_id>", section="summary")
 - 参数越界、未知参数、保护键非法都会在跑之前被拒（错误码透传）。
 - 失败时返回 `{"error": "CODE: 说明"}`，按错误码修脚本，不要盲改。
 
+## 参数寻优（0.6.5）
+
+参数不止能手扫，还能按目标自动搜。先确认 `strategy_meta` 的 `PARAMS/PARAM_META` 能表达空间，
+再跑：
+
+```text
+run_optimization(
+  board_id="<板>", timeframe="1d", script="strategy/my_ma",
+  space={"fast": {"min": 5, "max": 30, "step": 1},
+         "slow": {"values": [20, 30, 60]}},
+  method="bayes",                       # grid / random / bayes(内置 TPE-lite)
+  objective={"metric": "sharpe", "direction": "max"},
+  constraints={"min_trades": 10, "max_drawdown": 0.4},
+  budget={"max_runs": 40, "max_seconds": 600},
+  holdout={"ratio": 0.3, "top_k": 3}, seed=42)
+optimization_status(job_id="<返回值>")    # 轮询到 status != running
+```
+
+- `method=grid` 组合数不能超 `budget.max_runs`；拿不准就用 `random`/`bayes`。
+- 只把 Top K 的样本外结果登记进结果栏；完整试次在报告 `trials` 里。
+- 看三件事：`best` 的 IS/OOS 是否都成立；`warnings` 有没有 `OOS_DEGRADED`/`OOS_NO_EDGE`；
+  `overfit_gap` 是否大。**不要只报样本内最优**，也不要把“搜索到的候选”说成全局最优。
+- 候选要复跑：`run_backtest(params=best.params)`，确认与报告逐数一致；满意再
+  `save_preset(params=best.params, origin_result_id=best.result_id)`。
+- 未做 holdout（`ratio=0`）时报告会带 `NO_HOLDOUT` 警告，只能当样本内候选。
+- 策略内容改过后，旧方案会带 `script_changed=true`，用前要提醒用户参数含义可能变了。
+
 ## 常见错误码
 
 | 错误码 | 原因 | 怎么修 |

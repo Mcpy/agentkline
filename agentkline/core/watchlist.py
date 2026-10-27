@@ -19,6 +19,7 @@ class WatchlistManager:
         self.poll_s = poll_s
         self.groups = [{"id": "default", "name": "默认", "rows": []}]
         self.quotes = {}          # row_key -> {price, change_pct, ts, state, fails, stale}（unread 已退役：三态点即全部信息）
+        self._inflight = set()    # v0.6.4：在途抓取（源级/行级）；慢源不阻塞其他源、不无限堆积
         self._timer = None
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=8)
@@ -274,15 +275,63 @@ class WatchlistManager:
             by_src.setdefault(x["source"], []).append(x)
         for src, group in by_src.items():
             if self.svc.script_engine.has_batch_ticker(src):
-                r = self.svc.script_engine.tickers(src, [{"symbol": x["symbol"]} for x in group])
-                if not r.get("error"):
-                    for x, q in zip(group, r.get("quotes") or []):
-                        if q:
-                            self._apply_quote(x, q)
-                        else:
-                            self._mark_fail(x)
-                    continue
-            list(self._pool.map(self._fetch_one, group))
+                self._submit_batch(src, group)
+            else:
+                for row in group:
+                    self._submit_row(row)
+
+    def _track(self, key) -> bool:
+        """同一目标已有在途请求就跳过本轮（慢源不会堆积线程/拖住其他源）。"""
+        with self._lock:
+            if key in self._inflight:
+                return False
+            self._inflight.add(key)
+            return True
+
+    def _untrack(self, key):
+        with self._lock:
+            self._inflight.discard(key)
+
+    def _submit_batch(self, src, group):
+        """批量源异步抓取：一个源慢/挂住也只占自己的线程，不阻塞其他源与下一轮。"""
+        if not self._track(f"src:{src}"):
+            return
+
+        def job():
+            try:
+                r = self.svc.script_engine.tickers(
+                    src, [{"symbol": x["symbol"]} for x in group])
+                if r.get("error"):
+                    for x in group:
+                        self._mark_fail(x)
+                    return
+                for x, q in zip(group, r.get("quotes") or []):
+                    if q:
+                        self._apply_quote(x, q)
+                    else:
+                        self._mark_fail(x)
+            except Exception as exc:  # 单源异常不炸 tick
+                import logging
+                logging.getLogger(__name__).warning("批量 tick 失败 %s: %s", src, exc)
+                for x in group:
+                    self._mark_fail(x)
+            finally:
+                self._untrack(f"src:{src}")
+
+        self._pool.submit(job)
+
+    def _submit_row(self, row):
+        key = f"row:{self.key(row['source'], row['symbol'])}"
+        if not self._track(key):
+            return
+
+        def job():
+            try:
+                self._fetch_one(row)
+            finally:
+                self._untrack(key)
+
+        self._pool.submit(job)
 
     def _apply_quote(self, row, q, keep_pct=False):
         k = self.key(row["source"], row["symbol"])

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""AgentKline UI smoke (v0.6.2 B2) — 11 browser checks on a disposable instance.
+"""AgentKline UI smoke (v0.6.5) — 23 browser checks on a disposable instance.
 
 Why this exists: test_e2e.py covers the API/MCP surface, not the browser UI.
-These five checks protect the surfaces that 0.5.3/0.5.4 changed by hand:
+These checks protect the surfaces that 0.5.3–0.6.5 changed by hand:
 
   1. indicator library opens (75 builtins, fixed nav entries) + search filters
   2. clicking a card adds one instance + "added" count updates
@@ -706,6 +706,35 @@ def run_checks(page, base: str, agent_base: str = None,
           f"preview={preview} tags={batch_tags} tables={batch_tables} "
           f"chips={chips_before}->{chips_after}")
 
+    # 15.1) 0.6.5 参数寻优：页签 → 范围 → 4 组 → 报告 → Top K 结果
+    chips_before_opt = page.locator("#result-chips .res-chip").count()
+    page.locator("#result-add").click()
+    page.wait_for_selector(".bt-card", timeout=8000)
+    page.locator(".bt-tab").nth(2).click()
+    page.wait_for_selector("#bt-overlay input[data-omin]", timeout=10000)
+    page.locator('.bt-space[data-osk="fast"] [data-omin]').fill("5")
+    page.locator('.bt-space[data-osk="fast"] [data-omax]').fill("10")
+    page.locator('.bt-space[data-osk="fast"] [data-ostep]').fill("5")
+    page.locator('.bt-space[data-osk="slow"] [data-omin]').fill("30")
+    page.locator('.bt-space[data-osk="slow"] [data-omax]').fill("60")
+    page.locator('.bt-space[data-osk="slow"] [data-ostep]').fill("30")
+    page.fill("#bt-opt-topk", "1")
+    page.fill("#bt-bars", "300")
+    page.locator(".bt-foot .btn-primary").click()
+    page.wait_for_selector("#bt-opt-report-overlay", timeout=180000)
+    page.wait_for_timeout(500)
+    opt_best = page.locator(".bt-opt-best").count()
+    opt_rows = page.locator(".bt-opt-trial-table tr").count()
+    opt_acts = page.locator(".bt-opt-acts button").count()
+    chips_after_opt = page.locator("#result-chips .res-chip").count()
+    page.locator("#bt-opt-report-overlay .dialog-foot .btn-primary").click()
+    page.wait_for_timeout(300)
+    check("0.6.5：寻优页签 4 组 + 报告 + Top K 结果",
+          opt_best == 1 and opt_rows >= 5 and opt_acts >= 2
+          and chips_after_opt >= chips_before_opt + 1,
+          f"best={opt_best} rows={opt_rows} acts={opt_acts} "
+          f"chips={chips_before_opt}->{chips_after_opt}")
+
     # 16) 0.6.4 收尾：参数方案（存 → 回测对话框自动套用）
     saved = _post(f"{base}/api/presets", {"board_id": BOARD_ID,
                                           "script": "strategy/ma_cross",
@@ -740,6 +769,40 @@ def run_checks(page, base: str, agent_base: str = None,
     check("0.6.4：方案管理器可切全部/本标的 + 搜索",
           mgr_tabs == ["本标的", "全部方案"] and mgr_search == 1,
           f"tabs={mgr_tabs} search={mgr_search}")
+
+    # 16.2) 0.6.5：策略变更 → 方案管理器黄标 + 使用前确认
+    src = ('STRATEGY_MODE = "signal"\nNAME = "ui_changed"\nWARMUP = 2\n'
+           'PARAMS = {"fast": 5}\n'
+           'PARAM_META = {"fast": {"type": "int", "min": 1, "max": 20}}\n'
+           'def main(params, ohlcv):\n'
+           '    return {"target": [0.0] * len(ohlcv)}\n')
+    _post(f"{agent_base}/api/scripts",
+          {"id": "strategy/ui_changed", "code": src}, token=token)
+    _post(f"{base}/api/presets", {"board_id": BOARD_ID, "name": "变更测试",
+                                  "script": "strategy/ui_changed",
+                                  "params": {"fast": 5}})
+    _post(f"{agent_base}/api/scripts",
+          {"id": "strategy/ui_changed", "code": src + "\n# changed\n"}, token=token)
+    page.locator("#result-add").click()
+    page.wait_for_selector(".bt-card", timeout=8000)
+    page.wait_for_timeout(500)
+    page.locator(".bt-row select").nth(1).select_option("strategy/ui_changed")
+    page.wait_for_timeout(500)
+    page.locator(".bt-preset button", has_text="管理方案").click()
+    page.wait_for_selector(".bt-preset-manager", timeout=5000)
+    changed_badge = page.locator(".bt-preset-warn").count()
+    page.locator(".bt-preset-item button", has_text="使用").first.click()
+    page.wait_for_selector(".dialog-card", timeout=5000)
+    warn_title = page.locator(".dialog-card h3").inner_text()
+    page.locator(".dialog-card .btn-ghost").click()
+    page.wait_for_timeout(300)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(200)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(200)
+    check("0.6.5：策略变更提示（黄标 + 使用前确认）",
+          changed_badge >= 1 and "策略已变更" in warn_title,
+          f"badge={changed_badge} title={warn_title}")
 
     # 17) 0.6.3 保留策略：结果栏常驻提示（用户必须知道超出会自动淘汰）
     rt = page.locator("#result-retention")
@@ -817,7 +880,7 @@ def main() -> int:
             page.wait_for_selector(".ind-add", timeout=15000)
             _wait_app(page)
 
-            print("\nUI smoke（9 条）")
+            print("\nUI smoke（23 条）")
             passed, failed = run_checks(page, server.base, server.agent_base, server.token)
 
             # Console errors are a hard failure, but not a numbered check.

@@ -21,7 +21,7 @@ from .results import summarize
 
 logger = logging.getLogger("agentkline.store")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 EQUITY_CHUNK = 500      # 净值分块：每块 500 点 [[ts,value],…]
 EVENTS_KEEP = 5000      # 事件账本上限（超出裁旧）
 
@@ -69,6 +69,7 @@ _SCHEMA = (
            source TEXT NOT NULL, symbol TEXT NOT NULL, timeframe TEXT NOT NULL DEFAULT '',
            script TEXT NOT NULL, name TEXT NOT NULL, params TEXT NOT NULL, note TEXT,
            origin TEXT, is_default INTEGER NOT NULL DEFAULT 0,
+           script_sha256 TEXT,
            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)""",
     """CREATE UNIQUE INDEX IF NOT EXISTS presets_scope
            ON presets(source, symbol, timeframe, script, name)""",
@@ -155,8 +156,15 @@ class Store:
                 with self._conn:
                     for ddl in _SCHEMA:
                         self._conn.execute(ddl)
+                    # v2 → v3：方案记录策略内容哈希，用来提示“策略已变、参数可能不再对应”
+                    if current < 3:
+                        cols = {r[1] for r in self._conn.execute(
+                            "PRAGMA table_info(presets)").fetchall()}
+                        if "script_sha256" not in cols:
+                            self._conn.execute(
+                                "ALTER TABLE presets ADD COLUMN script_sha256 TEXT")
                     self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-                logger.info("现场库建表完成 v%s: %s", SCHEMA_VERSION, self.path)
+                logger.info("现场库建表/迁移完成 v%s: %s", SCHEMA_VERSION, self.path)
             if app_version:
                 self.set_meta("app_version", app_version)
 
@@ -390,6 +398,7 @@ class Store:
                 "timeframe": row["timeframe"] or "", "script": row["script"],
                 "name": row["name"], "params": _loads(row["params"], {}) or {},
                 "note": row["note"], "origin": _loads(row["origin"], None),
+                "script_sha256": row["script_sha256"] or "",
                 "is_default": bool(row["is_default"]),
                 "created_at": row["created_at"], "updated_at": row["updated_at"]}
 
@@ -397,16 +406,17 @@ class Store:
         now = int(time.time() * 1000)
         self._write(
             """INSERT INTO presets(id,source,symbol,timeframe,script,name,params,note,
-                                  origin,is_default,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                  origin,is_default,script_sha256,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (preset["id"], preset["source"], preset["symbol"],
              preset.get("timeframe") or "", preset["script"], preset["name"],
              _dumps(preset.get("params") or {}), preset.get("note"),
              None if preset.get("origin") is None else _dumps(preset["origin"]),
-             1 if preset.get("is_default") else 0, now, now))
+             1 if preset.get("is_default") else 0,
+             preset.get("script_sha256") or "", now, now))
 
     def update_preset(self, preset_id: str, patch: dict) -> None:
-        allowed = ("name", "params", "note", "is_default")
+        allowed = ("name", "params", "note", "is_default", "script_sha256")
         fields, args = [], []
         for key in allowed:
             if key in patch:

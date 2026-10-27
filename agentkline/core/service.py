@@ -19,6 +19,7 @@ from .script_engine import ScriptEngine
 from .datasource import DataSourceManager
 from .results import normalize_result, next_result_id, summarize, slice_section
 from .store import Store
+from . import optimizer as opt
 from ..backtest import runner as engine_runner
 
 logger = logging.getLogger("agentkline.service")
@@ -35,7 +36,7 @@ def _to_ms(v):
 class AgentKlineService:
     """AgentKline 业务核心"""
 
-    VERSION = "0.6.4"
+    VERSION = "0.6.5"
 
     def __init__(self, scripts_dir: str, limits: dict = None, data_dir: str = None):
         limits = limits or {}
@@ -75,6 +76,10 @@ class AgentKlineService:
         self.matrix_max_runs = int(limits.get("matrix_max_runs", 60))
         self._matrix_jobs: dict[str, dict] = {}
         self._matrix_lock = _th.Lock()
+        # v0.6.5 参数寻优作业（内存态；只把 Top K 的样本外结果登记进结果栏）
+        self.optimize_max_runs = int(limits.get("optimize_max_runs", 200))
+        self._optimize_jobs: dict[str, dict] = {}
+        self._optimize_lock = _th.Lock()
 
     def _build_index(self, sid):
         """建单源索引（防重入：warmup 与搜索请求撞车不重复建）。返回 True=建成/已有，False=他人构建中。"""
@@ -926,6 +931,11 @@ class AgentKlineService:
             scope["source"] if scope else None,
             scope["symbol"] if scope else None,
             (script or None))
+        for row in rows:
+            # v0.6.5：策略内容变了就提示“参数可能不再对应”；旧方案没哈希时先不猜
+            stored = row.get("script_sha256") or ""
+            current = self._script_sha(row.get("script")) if stored else ""
+            row["script_changed"] = bool(stored and current and stored != current)
         return {"board_id": board_id, "count": len(rows), "presets": rows}
 
     def save_preset(self, board_id, name, params=None, script=None, timeframe=None,
@@ -976,11 +986,13 @@ class AgentKlineService:
         preset = {"id": f"ps_{uuid.uuid4().hex[:8]}", "source": scope["source"],
                   "symbol": scope["symbol"], "timeframe": tf, "script": script,
                   "name": nm, "params": merged, "note": note, "origin": origin,
+                  "script_sha256": self._script_sha(script),
                   "is_default": bool(is_default)}
         self.store.insert_preset(preset)
         if is_default:
             self.store.set_default_preset(preset["id"])
         preset = self.store.get_preset(preset["id"])
+        preset["script_changed"] = False
         self._bc({"type": "preset_changed", "board_id": board_id, "preset": preset})
         return {"status": "ok", "preset": preset}
 
@@ -1013,6 +1025,8 @@ class AgentKlineService:
                 return {"error": f"PRESET_DUPLICATE_PARAMS: 这组参数已存为「{same[0]['name']}」"
                                  f"（id={same[0]['id']}），无需重复保存"}
             patch["params"] = merged
+            # 参数按当前策略重新校验过 → 同步刷新哈希基线
+            patch["script_sha256"] = self._script_sha(preset["script"])
         if note is not None:
             patch["note"] = note
         if is_default is not None:
@@ -1021,6 +1035,9 @@ class AgentKlineService:
         if is_default:
             self.store.set_default_preset(preset_id)
         preset = self.store.get_preset(preset_id)
+        stored = preset.get("script_sha256") or ""
+        current = self._script_sha(preset["script"]) if stored else ""
+        preset["script_changed"] = bool(stored and current and stored != current)
         self._bc({"type": "preset_changed", "board_id": None, "preset": preset})
         return {"status": "ok", "preset": preset}
 
@@ -1222,8 +1239,12 @@ class AgentKlineService:
             "bars": bars, "eval_idx": eval_idx, "clipped": clipped,
         }
 
-    def _execute_run(self, ctx, params=None, timeout=120.0, display_name=None, batch=None):
-        """用已冻结的 ctx 跑一次引擎并登记结果（单跑与矩阵共用）。"""
+    def _execute_run(self, ctx, params=None, timeout=120.0, display_name=None, batch=None,
+                     register=True):
+        """用已冻结的 ctx 跑一次引擎并登记结果（单跑与矩阵共用）。
+
+        register=False 时只算不登记（寻优试次用；Top K 才会二次登记进结果栏）。
+        """
         board_id, tf = ctx["board_id"], ctx["tf"]
         bars, eval_idx = ctx["bars"], ctx["eval_idx"]
         cash, fee, slip = ctx["cash"], ctx["fee"], ctx["slip"]
@@ -1308,6 +1329,16 @@ class AgentKlineService:
         res["data"]["fingerprint"] = self._data_fingerprint(bars, eval_idx)
         if batch:
             res["batch"] = batch          # 加法字段：批次归属（随 summary 落盘，不建表）
+        if not register:
+            return {"status": "ok", "result": summarize(res),
+                    "warnings": out.get("warnings") or [],
+                    "run": {"engine": result_payload["engine"]["id"],
+                            "elapsed_ms": elapsed_ms, "bars": len(bars) - eval_idx,
+                            "from": bars[eval_idx]["timestamp"], "to": bars[-1]["timestamp"],
+                            "warmup_bars": eval_idx, "backfilled": ctx["backfilled"],
+                            "clipped": ctx["clipped"],
+                            "requested": {"start": ctx["start_ms"], "end": ctx["end_ms"],
+                                          "limit": ctx["want"]}}}
         res["result_id"] = self._next_result_id(res["strategy"]["id"])
         r = self.state.add_result(board_id, res)
         if r.get("error"):
@@ -1353,36 +1384,7 @@ class AgentKlineService:
     @staticmethod
     def _matrix_cast(key, value, default, meta):
         """把 grid 值收敛到参数类型并做区间校验；返回 (canonical, err)。"""
-        meta = meta if isinstance(meta, dict) else {}
-        typ = str(meta.get("type") or (type(default).__name__ if default is not None else ""))
-        if typ in ("int", "float"):
-            if isinstance(value, bool):
-                return None, f"MATRIX_INVALID: {key}={value!r} 需要数字"
-            try:
-                num = float(value)
-            except (TypeError, ValueError):
-                return None, f"MATRIX_INVALID: {key}={value!r} 需要数字"
-            if typ == "int":
-                if not num.is_integer():
-                    return None, f"MATRIX_INVALID: {key}={value!r} 需要整数"
-                num = int(num)
-            if meta.get("min") is not None and num < float(meta["min"]):
-                return None, f"MATRIX_INVALID: {key}={value!r} 低于下限 {meta['min']}"
-            if meta.get("max") is not None and num > float(meta["max"]):
-                return None, f"MATRIX_INVALID: {key}={value!r} 高于上限 {meta['max']}"
-            return num, ""
-        if typ == "bool":
-            if isinstance(value, bool):
-                return value, ""
-            s = str(value).strip().lower()
-            if s in ("1", "true", "yes", "on"):
-                return True, ""
-            if s in ("0", "false", "no", "off"):
-                return False, ""
-            return None, f"MATRIX_INVALID: {key}={value!r} 需要布尔"
-        if typ in ("str", "string"):
-            return str(value), ""
-        return value, ""
+        return opt.cast_value(key, value, default, meta, prefix="MATRIX_INVALID")
 
     def _matrix_expand(self, info, grid, params_list):
         """展开参数矩阵（默认值基底 + 覆盖）。返回 (combos, err)。"""
@@ -1559,6 +1561,452 @@ class AgentKlineService:
         job["cancel"] = True
         return {"status": "ok", "cancelling": True, "done": job["done"],
                 "total": job["total"]}
+
+    # ============ 参数寻优（v0.6.5：目标 + 约束 + 样本外验证） ============
+    OPTIMIZE_METHODS = ("grid", "random", "bayes")
+
+    def _opt_label(self, ctx, params, suffix=""):
+        base = ((ctx.get("info") or {}).get("name") or "").strip() \
+            or str(ctx.get("script") or "回测").split("/")[-1]
+        parts = ", ".join(f"{k}={v}" for k, v in (params or {}).items())
+        text = f"{base} · {parts}" if parts else base
+        if suffix:
+            text = f"{text} · {suffix}"
+        return text[:120]
+
+    def _opt_prune(self):
+        """寻优作业态内存回收：完成态保留 10 分钟，最多留 20 个。"""
+        now = time.time()
+        alive = []
+        for jid, job in list(self._optimize_jobs.items()):
+            done = job.get("status") in ("done", "cancelled", "failed")
+            if done and now - float(job.get("finished_at") or 0) > 600:
+                self._optimize_jobs.pop(jid, None)
+            else:
+                alive.append((float(job.get("created_at") or 0), jid))
+        if len(self._optimize_jobs) > 20:
+            alive.sort()
+            for _, jid in alive[:max(0, len(alive) - 20)]:
+                self._optimize_jobs.pop(jid, None)
+
+    @staticmethod
+    def _opt_budget(budget, cap):
+        if budget is None:
+            b = {}
+        elif isinstance(budget, (int, float)) and not isinstance(budget, bool):
+            b = {"max_runs": budget}
+        elif isinstance(budget, dict):
+            b = budget
+        else:
+            return None, "OPTIMIZE_BUDGET_INVALID: budget 需要 {max_runs,max_seconds}"
+        extra = [k for k in b if k not in ("max_runs", "max_seconds")]
+        if extra:
+            return None, f"OPTIMIZE_BUDGET_INVALID: 不认识的键 {extra}"
+        try:
+            max_runs = int(b.get("max_runs", opt.DEFAULT_BUDGET["max_runs"]))
+            max_seconds = float(b.get("max_seconds", opt.DEFAULT_BUDGET["max_seconds"]))
+        except (TypeError, ValueError):
+            return None, "OPTIMIZE_BUDGET_INVALID: max_runs/max_seconds 需要数字"
+        if max_runs < 2:
+            return None, "OPTIMIZE_BUDGET_INVALID: max_runs 至少 2"
+        if max_runs > cap:
+            return None, f"OPTIMIZE_BUDGET_LIMIT: max_runs={max_runs} 超过上限 {cap}"
+        if not (10 <= max_seconds <= 3600):
+            return None, "OPTIMIZE_BUDGET_INVALID: max_seconds 需在 10~3600"
+        return {"max_runs": max_runs, "max_seconds": max_seconds}, None
+
+    @staticmethod
+    def _opt_holdout(holdout):
+        if holdout is None:
+            h = {}
+        elif isinstance(holdout, dict):
+            h = holdout
+        else:
+            return None, "OPTIMIZE_HOLDOUT_INVALID: holdout 需要 {ratio,top_k}"
+        extra = [k for k in h if k not in ("ratio", "top_k")]
+        if extra:
+            return None, f"OPTIMIZE_HOLDOUT_INVALID: 不认识的键 {extra}"
+        try:
+            ratio = float(h.get("ratio", opt.DEFAULT_HOLDOUT["ratio"]))
+            top_k = int(h.get("top_k", opt.DEFAULT_HOLDOUT["top_k"]))
+        except (TypeError, ValueError):
+            return None, "OPTIMIZE_HOLDOUT_INVALID: ratio/top_k 需要数字"
+        if ratio < 0 or ratio > 0.5:
+            return None, "OPTIMIZE_HOLDOUT_INVALID: ratio 需在 0~0.5（0=不做样本外）"
+        if not (1 <= top_k <= 10):
+            return None, "OPTIMIZE_HOLDOUT_INVALID: top_k 需在 1~10"
+        return {"ratio": ratio, "top_k": top_k}, None
+
+    def run_optimization(self, board_id, timeframe=None, engine="builtin", script=None,
+                         source=None, space=None, method="grid", objective=None,
+                         constraints=None, budget=None, holdout=None, seed=None,
+                         direction="long_only", initial_cash=10000.0, fee_bps=5.0,
+                         slippage_bps=5.0, protection=None, start_time=None,
+                         end_time=None, limit=20000, backfill_budget=20.0,
+                         timeout=120.0):
+        """参数寻优：冻结窗口 → 按空间/方法逐组回测 → Top K 做样本外验证并登记。
+
+        立即返回 {job_id,...}；进度用 get_optimization 或 WS optimize_progress。
+        """
+        method = str(method or "grid").lower()
+        if method not in self.OPTIMIZE_METHODS:
+            return {"error": f"OPTIMIZE_METHOD_INVALID: method 需为 "
+                             f"{'/'.join(self.OPTIMIZE_METHODS)}，收到 {method!r}"}
+        obj, err = opt.parse_objective(objective)
+        if err:
+            return {"error": err}
+        cons, err = opt.parse_constraints(constraints)
+        if err:
+            return {"error": err}
+        bud, err = self._opt_budget(budget, self.optimize_max_runs)
+        if err:
+            return {"error": err}
+        hol, err = self._opt_holdout(holdout)
+        if err:
+            return {"error": err}
+        try:
+            seed = int(seed) if seed is not None else int(time.time() * 1000) % (2 ** 32)
+        except (TypeError, ValueError):
+            return {"error": "OPTIMIZE_INVALID: seed 需要整数"}
+        try:
+            timeout = float(timeout)
+        except (TypeError, ValueError):
+            return {"error": "OPTIMIZE_INVALID: timeout 需要数字"}
+        if timeout <= 0:
+            return {"error": "OPTIMIZE_INVALID: timeout 必须 > 0"}
+
+        ctx = self._run_context(
+            board_id, timeframe=timeframe, engine=engine, script=script, source=source,
+            params=None, direction=direction, initial_cash=initial_cash,
+            fee_bps=fee_bps, slippage_bps=slippage_bps, protection=protection,
+            start_time=start_time, end_time=end_time, limit=limit,
+            backfill_budget=backfill_budget)
+        if ctx.get("error"):
+            return ctx
+        space_out, err = opt.parse_space(ctx.get("info"), space)
+        if err:
+            return {"error": err}
+
+        if method == "grid":
+            combos, err = opt.expand_grid(space_out["values"], bud["max_runs"])
+            if err:
+                return {"error": err}
+            total = len(combos)
+        else:
+            combos = None
+            total = min(bud["max_runs"], int(space_out["size"]))
+
+        n_eval = len(ctx["bars"]) - ctx["eval_idx"]
+        is_n, oos_n, err = opt.split_eval_bars(n_eval, hol["ratio"])
+        if err:
+            return {"error": err}
+        is_ctx = ctx
+        oos_ctx = None
+        split_time = None
+        if hol["ratio"] > 0:
+            split_abs = ctx["eval_idx"] + is_n
+            split_time = int(ctx["bars"][split_abs]["timestamp"])
+            is_bars = [dict(b) for b in ctx["bars"][:split_abs]]
+            is_ctx = dict(ctx, bars=is_bars, end_ms=split_time - 1,
+                          want=len(is_bars) - ctx["eval_idx"])
+            lead = min(int(ctx["warmup"]), split_abs)
+            oos_bars = [dict(b) for b in ctx["bars"][split_abs - lead:]]
+            oos_ctx = dict(ctx, bars=oos_bars, eval_idx=lead,
+                           start_ms=int(oos_bars[lead]["timestamp"]),
+                           end_ms=int(oos_bars[-1]["timestamp"]),
+                           want=len(oos_bars) - lead, clipped=False)
+        holdout_meta = {"ratio": hol["ratio"], "top_k": hol["top_k"],
+                        "is_bars": is_n, "oos_bars": oos_n, "split_time": split_time}
+
+        job_id = f"opt_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+        job = {
+            "job_id": job_id, "status": "running", "phase": "is",
+            "created_at": time.time(), "finished_at": None, "elapsed_ms": None,
+            "board_id": board_id, "timeframe": ctx["tf"], "script": ctx["script"] or "",
+            "method": method, "objective": obj, "constraints": cons,
+            "budget": bud, "holdout": holdout_meta, "seed": seed,
+            "space": space, "space_values": space_out["values"],
+            "space_size": int(space_out["size"]), "combos": combos,
+            "is_ctx": is_ctx, "oos_ctx": oos_ctx, "total": total, "done": 0,
+            "oos_done": 0, "current": None, "trials": [], "top": [], "best": None,
+            "warnings": [], "errors": [], "registered_result_ids": [],
+            "cancel": False, "space_exhausted": False, "timeout": timeout,
+        }
+        with self._optimize_lock:
+            self._opt_prune()
+            self._optimize_jobs[job_id] = job
+        self._bc({"type": "optimize_started", "job_id": job_id, "board_id": board_id,
+                  "timeframe": ctx["tf"], "method": method, "total": total,
+                  "objective": obj, "holdout": holdout_meta})
+        th = __import__("threading").Thread(target=self._optimize_worker, args=(job_id,),
+                                            daemon=True, name=f"optimize-{job_id}")
+        th.start()
+        return {"status": "ok", "job_id": job_id, "method": method, "total": total,
+                "phase": "is", "space": space_out["values"], "objective": obj,
+                "constraints": cons, "budget": bud, "holdout": holdout_meta}
+
+    def _optimize_worker(self, job_id):
+        job = self._optimize_jobs.get(job_id)
+        if not job:
+            return
+        rng = __import__("random").Random(job["seed"])
+        tried = set()
+        observations = []
+        t0 = time.monotonic()
+        method = job["method"]
+        try:
+            if method == "grid":
+                for i, combo in enumerate(job["combos"]):
+                    if job.get("cancel"):
+                        break
+                    if time.monotonic() - t0 > job["budget"]["max_seconds"]:
+                        job["warnings"].append({"code": "TIME_BUDGET",
+                                                "message": "达到时间预算，提前结束搜索"})
+                        break
+                    self._opt_one(job, combo, i)
+                    if job["trials"][-1].get("status") == "ok":
+                        observations.append({"params": combo,
+                                             "score": job["trials"][-1]["score"]})
+            else:
+                i = 0
+                while i < job["total"] and not job.get("cancel"):
+                    if time.monotonic() - t0 > job["budget"]["max_seconds"]:
+                        job["warnings"].append({"code": "TIME_BUDGET",
+                                                "message": "达到时间预算，提前结束搜索"})
+                        break
+                    if method == "bayes":
+                        combo = opt.propose_tpe(job["space_values"], observations, rng, tried)
+                    else:
+                        combo = opt.next_random(job["space_values"], rng, tried)
+                    if combo is None:
+                        job["space_exhausted"] = True
+                        break
+                    tried.add(opt._key(combo))
+                    trial = self._opt_one(job, combo, i)
+                    if trial.get("status") == "ok":
+                        observations.append({"params": combo, "score": trial["score"]})
+                    i += 1
+
+            if not job.get("cancel"):
+                self._opt_after_search(job)
+        except Exception as exc:  # pragma: no cover - 兜底：作业别静默卡 running
+            logger.exception("参数寻优作业失败: %s", job_id)
+            job["status"] = "failed"
+            job["errors"].append({"error": f"OPTIMIZE_FAILED: {exc}"})
+            job["warnings"].append({"code": "OPTIMIZE_FAILED",
+                                    "message": f"作业异常结束：{exc}"})
+        finally:
+            if job["status"] == "running":
+                job["status"] = "cancelled" if job.get("cancel") else "done"
+            job["phase"] = "done"
+            job["finished_at"] = time.time()
+            job["elapsed_ms"] = int((time.monotonic() - t0) * 1000)
+            job["current"] = None
+            self._bc({"type": "optimize_done", "job_id": job_id,
+                      "board_id": job["board_id"], "timeframe": job["timeframe"],
+                      "status": job["status"], "total": job["total"],
+                      "done": job["done"], "best": job.get("best"),
+                      "result_ids": list(job["registered_result_ids"]),
+                      "warnings": job["warnings"]})
+
+    def _opt_one(self, job, combo, index):
+        """跑一组样本内试次并写入 job；异常转成 failed 行。"""
+        job["current"] = combo
+        self._bc({"type": "optimize_progress", "job_id": job["job_id"],
+                  "board_id": job["board_id"], "timeframe": job["timeframe"],
+                  "phase": "is", "done": job["done"], "total": job["total"],
+                  "current": combo})
+        try:
+            body = self._execute_run(
+                job["is_ctx"], combo, timeout=job["timeout"],
+                display_name=self._opt_label(job["is_ctx"], combo), register=False)
+        except Exception as exc:  # 单组异常不炸整批
+            body = {"error": f"OPTIMIZE_RUN_FAILED: {exc}"}
+        trial = opt.summarize_trial(index, combo, body, job["objective"],
+                                    job["constraints"])
+        if (body or {}).get("error"):
+            trial["status"] = "failed"
+            trial["reason"] = body["error"]
+            job["errors"].append({"index": index, "params": combo, "error": body["error"]})
+        job["trials"].append(trial)
+        job["done"] = int(job.get("done") or 0) + 1
+        self._bc({"type": "optimize_progress", "job_id": job["job_id"],
+                  "board_id": job["board_id"], "timeframe": job["timeframe"],
+                  "phase": "is", "done": job["done"], "total": job["total"],
+                  "current": combo, "trial": {k: trial.get(k) for k in
+                                               ("index", "status", "score", "value", "reason")}})
+        return trial
+
+    def _opt_patch_batch(self, result_id, extra):
+        """样本外跑完后补 batch 字段（is_stats 先写、oos_stats 后补），并广播更新。"""
+        res = self.state.get_result(result_id)
+        if not res:
+            return
+        res.setdefault("batch", {}).update(extra)
+        summary = summarize(res)
+        if self.store is not None:
+            self.store.update_result_summary(result_id, summary)
+        self._bc({"type": "result_updated", "board_id": res["data"]["board"],
+                  "timeframe": res["data"]["timeframe"], "result": summary})
+
+    def _opt_after_search(self, job):
+        """样本内搜索结束：Top K 做样本外验证并登记（无 holdout 则登记 Top K 样本内）。"""
+        top = opt.select_top(job["trials"], job["holdout"]["top_k"])
+        if not top:
+            job["warnings"].append({"code": "NO_VALID_TRIAL",
+                                    "message": "没有满足约束的有效试次，未登记结果"})
+            return
+        if job["holdout"]["ratio"] > 0:
+            job["phase"] = "oos"
+            valid = []
+            for j, trial in enumerate(top):
+                if job.get("cancel"):
+                    break
+                job["current"] = trial["params"]
+                self._bc({"type": "optimize_progress", "job_id": job["job_id"],
+                          "board_id": job["board_id"], "timeframe": job["timeframe"],
+                          "phase": "oos", "done": j, "total": len(top),
+                          "current": trial["params"]})
+                batch = {"id": job["job_id"], "kind": "optimize",
+                         "method": job["method"], "index": j, "total": len(top),
+                         "params": trial["params"], "phase": "oos",
+                         "objective": job["objective"],
+                         "is_stats": trial.get("is_stats"),
+                         "is_score": trial.get("score")}
+                try:
+                    body = self._execute_run(
+                        job["oos_ctx"], trial["params"], timeout=job["timeout"],
+                        display_name=self._opt_label(job["is_ctx"], trial["params"], "样本外"),
+                        batch=batch)
+                except Exception as exc:
+                    body = {"error": f"OPTIMIZE_OOS_FAILED: {exc}"}
+                if body.get("error"):
+                    trial["oos_status"] = "failed"
+                    trial["oos_error"] = body["error"]
+                    job["errors"].append({"index": trial["index"], "phase": "oos",
+                                          "params": trial["params"], "error": body["error"]})
+                    job["warnings"].append({"code": "OOS_FAILED", "index": trial["index"],
+                                            "message": body["error"]})
+                    continue
+                res = body.get("result") or {}
+                oos_stats = res.get("stats") or {}
+                scored = opt.score_stats(oos_stats, job["objective"], job["constraints"])
+                over = opt.overfit_check(trial.get("is_stats"), oos_stats, job["objective"])
+                trial.update({
+                    "oos_status": scored["status"], "oos_score": scored["score"],
+                    "oos_value": scored["value"], "oos_reason": scored["reason"],
+                    "oos_stats": oos_stats, "overfit_gap": over["gap"],
+                    "overfit_ratio": over["ratio"], "result_id": res.get("result_id"),
+                    "oos_warnings": over["warnings"],
+                })
+                if trial.get("result_id"):
+                    self._opt_patch_batch(trial["result_id"], {
+                        "oos_stats": oos_stats, "oos_score": scored["score"],
+                        "oos_value": scored["value"],
+                        "overfit_gap": over["gap"], "overfit_ratio": over["ratio"],
+                    })
+                for w in over["warnings"]:
+                    job["warnings"].append({"index": trial["index"], **w})
+                if trial.get("result_id"):
+                    job["registered_result_ids"].append(trial["result_id"])
+                    job["results"] = job.get("results") or []
+                    job["results"].append({"index": trial["index"],
+                                           "result_id": trial["result_id"],
+                                           "params": trial["params"],
+                                           "score": trial.get("oos_score"),
+                                           "is_stats": trial.get("is_stats"),
+                                           "oos_stats": oos_stats})
+                if scored["status"] == "ok":
+                    valid.append(trial)
+                job["oos_done"] = j + 1
+                self._bc({"type": "optimize_progress", "job_id": job["job_id"],
+                          "board_id": job["board_id"], "timeframe": job["timeframe"],
+                          "phase": "oos", "done": j + 1, "total": len(top),
+                          "current": trial["params"],
+                          "trial": {"index": trial["index"],
+                                    "status": scored["status"],
+                                    "score": trial.get("oos_score")}})
+            valid.sort(key=lambda t: -float(t.get("oos_score") or 0))
+            job["top"] = valid[:job["holdout"]["top_k"]]
+            job["best"] = job["top"][0] if job["top"] else None
+            if not job["top"]:
+                job["warnings"].append({"code": "NO_OOS_VALID",
+                                        "message": "样本外没有满足约束的候选，未选出最优"})
+        else:
+            job["phase"] = "register"
+            job["warnings"].append({"code": "NO_HOLDOUT",
+                                    "message": "未做样本外验证（holdout.ratio=0），"
+                                               "Top K 仅为样本内候选"})
+            registered = []
+            for j, trial in enumerate(top):
+                if job.get("cancel"):
+                    break
+                job["current"] = trial["params"]
+                self._bc({"type": "optimize_progress", "job_id": job["job_id"],
+                          "board_id": job["board_id"], "timeframe": job["timeframe"],
+                          "phase": "register", "done": j, "total": len(top),
+                          "current": trial["params"]})
+                batch = {"id": job["job_id"], "kind": "optimize",
+                         "method": job["method"], "index": j, "total": len(top),
+                         "params": trial["params"], "phase": "is",
+                         "objective": job["objective"],
+                         "is_stats": trial.get("is_stats"),
+                         "is_score": trial.get("score")}
+                try:
+                    body = self._execute_run(
+                        job["is_ctx"], trial["params"], timeout=job["timeout"],
+                        display_name=self._opt_label(job["is_ctx"], trial["params"]),
+                        batch=batch)
+                except Exception as exc:
+                    body = {"error": f"OPTIMIZE_REGISTER_FAILED: {exc}"}
+                if body.get("error"):
+                    job["errors"].append({"index": trial["index"], "phase": "register",
+                                          "params": trial["params"], "error": body["error"]})
+                    continue
+                res = body.get("result") or {}
+                trial["result_id"] = res.get("result_id")
+                trial["oos_stats"] = None
+                trial["oos_status"] = None
+                if trial.get("result_id"):
+                    job["registered_result_ids"].append(trial["result_id"])
+                    registered.append(trial)
+            job["top"] = registered
+            job["best"] = registered[0] if registered else None
+
+    def get_optimization(self, job_id):
+        job = self._optimize_jobs.get(job_id)
+        if not job:
+            return {"error": f"OPTIMIZE_JOB_NOT_FOUND: {job_id}"}
+        elapsed = job.get("elapsed_ms")
+        if elapsed is None and job.get("created_at"):
+            elapsed = int((time.time() - float(job["created_at"])) * 1000)
+        return {
+            "job_id": job["job_id"], "status": job["status"], "phase": job["phase"],
+            "board_id": job["board_id"], "timeframe": job["timeframe"],
+            "script": job["script"], "method": job["method"],
+            "objective": job["objective"], "constraints": job["constraints"],
+            "budget": job["budget"], "holdout": job["holdout"], "seed": job["seed"],
+            "space": job["space"], "space_size": job.get("space_size"),
+            "total": job["total"], "done": job["done"], "oos_done": job.get("oos_done"),
+            "current": job.get("current"), "trials": job["trials"],
+            "top": job.get("top") or [], "best": job.get("best"),
+            "warnings": job["warnings"], "errors": job["errors"],
+            "registered_result_ids": job["registered_result_ids"],
+            "space_exhausted": bool(job.get("space_exhausted")),
+            "cancelled": job["status"] == "cancelled",
+            "created_at": job["created_at"], "finished_at": job["finished_at"],
+            "elapsed_ms": elapsed,
+        }
+
+    def cancel_optimization(self, job_id):
+        job = self._optimize_jobs.get(job_id)
+        if not job:
+            return {"error": f"OPTIMIZE_JOB_NOT_FOUND: {job_id}"}
+        if job["status"] != "running":
+            return {"status": job["status"], "noop": True}
+        job["cancel"] = True
+        return {"status": "ok", "cancelling": True, "done": job["done"],
+                "total": job["total"], "phase": job["phase"]}
 
     # ============ 划线 drawings（0.5.2：每板一份，showOn 管跨周期） ============
     def add_drawing(self, board_id, timeframe, drawing):

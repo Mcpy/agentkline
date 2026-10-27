@@ -11,7 +11,7 @@ resolution-markers = [
 
 [[package]]
 name = "agentkline"
-version = "0.6.4"
+version = "0.6.5"
 source = { editable = "." }
 dependencies = [
     { name = "agentkline-engine-core" },

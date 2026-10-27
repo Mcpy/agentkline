@@ -7,6 +7,7 @@ import { t } from './i18n.js';
 import { toast } from './search.js';
 import { openDialog } from './dialog.js';
 import { copyText } from './clipboard.js';
+
 import { tfMs } from './vela_adapter.js';
 
 let _engines = null;
@@ -129,13 +130,14 @@ export async function openBacktestDialog(opts = {}) {
     const bodyBox = el('div', 'bt-body');
     card.appendChild(bodyBox);
 
-    // v0.6.4 模式页签：单次 / 参数矩阵（引擎/策略/方向/窗口/成本共用）
+    // v0.6.4 模式页签：单次 / 参数矩阵；v0.6.5 增加参数寻优（引擎/策略/方向/窗口/成本共用）
     let mode = 'single';
     const tabs = el('div', 'bt-tabs');
     const tabSingle = el('button', 'bt-tab on', t('bt.tab.single'));
     const tabMatrix = el('button', 'bt-tab', t('bt.tab.matrix'));
-    tabSingle.type = tabMatrix.type = 'button';
-    tabs.append(tabSingle, tabMatrix);
+    const tabOptimize = el('button', 'bt-tab', t('bt.tab.optimize'));
+    tabSingle.type = tabMatrix.type = tabOptimize.type = 'button';
+    tabs.append(tabSingle, tabMatrix, tabOptimize);
     bodyBox.appendChild(tabs);
 
     // 引擎
@@ -326,6 +328,51 @@ export async function openBacktestDialog(opts = {}) {
             allBtn.classList.toggle('on', scope === 'all');
         };
 
+        const usePreset = async (p) => {
+            if (!strategies.some(x => x.id === p.script)) {
+                toast(t('bt.preset_use_missing', { script: p.script }));
+                return;
+            }
+            if (p.script_changed) {
+                closeOv();
+                const ok = await openDialog({
+                    title: t('bt.preset_changed_title'),
+                    message: t('bt.preset_changed_msg', { script: p.script }),
+                    confirmText: t('common.ok'),
+                });
+                if (!ok) { openPresetManager(); return; }
+            }
+            const sc = boardScope();
+            const other = (p.symbol && sc.symbol && p.symbol !== sc.symbol)
+                || (p.source && sc.source && p.source !== sc.source);
+            if (other) {
+                closeOv();
+                const ok = await openDialog({
+                    title: t('bt.preset_use'),
+                    message: t('bt.preset_use_other', {
+                        source: p.source || '—', symbol: p.symbol,
+                        tf: p.timeframe || '—',
+                    }),
+                    confirmText: t('common.ok'),
+                });
+                if (!ok) { openPresetManager(); return; }
+            } else {
+                closeOv();
+            }
+            if (stratSel.value !== p.script) {
+                stratSel.value = p.script;
+                paintPresets();
+                paintParams();
+            }
+            pendingParams = p.params || {};
+            applyParams(pendingParams);
+            presetSel.value = p.id;
+            pasteHint.textContent = t('bt.paste_from',
+                { symbol: p.symbol, tf: p.timeframe || '' });
+            pasteHint.style.display = '';
+            toast(t('bt.preset_used', { name: p.name }));
+        };
+
         const presetRow = (p) => {
             const row = el('div', 'bt-preset-item');
             const info = el('div', 'bt-preset-info');
@@ -337,7 +384,15 @@ export async function openBacktestDialog(opts = {}) {
                 info.appendChild(el('div', 'bt-preset-scope-meta',
                     `${p.script}${p.timeframe ? ' · ' + p.timeframe : ''}`));
             }
+            if (p.script_changed) {
+                info.appendChild(el('div', 'bt-preset-warn',
+                    t('bt.preset_changed_badge')));
+            }
             const acts = el('div', 'bt-preset-acts');
+            const use = el('button', 'btn-primary', t('bt.preset_use'));
+            use.type = 'button';
+            use.onclick = () => usePreset(p);
+            acts.appendChild(use);
             const cp = el('button', 'btn-ghost', t('bt.preset_copy'));
             cp.type = 'button';
             cp.onclick = async () => {
@@ -538,6 +593,9 @@ export async function openBacktestDialog(opts = {}) {
     const matrixBox = el('div', 'bt-matrix');
     matrixBox.style.display = 'none';
     bodyBox.appendChild(matrixBox);
+    const optimizeBox = el('div', 'bt-optimize');
+    optimizeBox.style.display = 'none';
+    bodyBox.appendChild(optimizeBox);
 
     const prog = el('div', 'bt-progress');
     prog.style.display = 'none';
@@ -588,6 +646,7 @@ export async function openBacktestDialog(opts = {}) {
                     errBox.textContent = `${e.code}: ${e.message}`;
                 }
                 paintMatrix(j);
+                paintOptimize(j);
                 const params = j.params || {};
                 const metaMap = j.param_meta || {};
                 const keys = Object.keys(params);
@@ -672,17 +731,342 @@ export async function openBacktestDialog(opts = {}) {
         paintCount();
     };
 
-    const runLabel = () => (mode === 'matrix' ? t('bt.run_matrix') : t('bt.run'));
+    // ---- v0.6.5 参数寻优：空间/目标/约束/预算/样本外 ----
+    const OPT_METRICS = ['total_return', 'annual_return', 'sharpe', 'sortino',
+                         'calmar', 'max_drawdown', 'profit_factor', 'win_rate'];
+    const paintOptimize = (meta) => {
+        optimizeBox.textContent = '';
+        if (!meta) return;
+        optimizeBox.appendChild(el('div', 'bt-sec', t('bt.opt.title')));
+        optimizeBox.appendChild(el('div', 'bt-hint', t('bt.opt.hint')));
+        const params = meta.params || {};
+        const metaMap = meta.param_meta || {};
+        const numeric = Object.keys(params).filter(k => {
+            const typ = (metaMap[k] && metaMap[k].type) || typeof params[k];
+            return typ === 'int' || typ === 'float';
+        });
+
+        const method = document.createElement('select');
+        method.id = 'bt-opt-method';
+        [['bayes', t('bt.opt.method.bayes')],
+         ['grid', t('bt.opt.method.grid')],
+         ['random', t('bt.opt.method.random')]].forEach(([v, label]) => {
+            const o = document.createElement('option');
+            o.value = v;
+            o.textContent = label;
+            method.appendChild(o);
+        });
+        optimizeBox.appendChild(row(t('bt.opt.method'), method, t('bt.opt.method_hint')));
+
+        const metric = document.createElement('select');
+        metric.id = 'bt-opt-metric';
+        OPT_METRICS.forEach(m => {
+            const o = document.createElement('option');
+            o.value = m;
+            o.textContent = t(`bt.opt.metric.${m}`);
+            metric.appendChild(o);
+        });
+        metric.value = 'sharpe';
+        const direction = document.createElement('select');
+        direction.id = 'bt-opt-direction';
+        [['max', t('bt.opt.dir.max')], ['min', t('bt.opt.dir.min')]].forEach(([v, label]) => {
+            const o = document.createElement('option');
+            o.value = v;
+            o.textContent = label;
+            direction.appendChild(o);
+        });
+        const objWrap = el('div', 'bt-inline');
+        objWrap.append(metric, direction);
+        optimizeBox.appendChild(row(t('bt.opt.objective'), objWrap, t('bt.opt.objective_hint')));
+
+        const minTrades = numInput(null, { min: 0, step: 1, placeholder: t('bt.opt.off') });
+        minTrades.id = 'bt-opt-mintrades';
+        const maxDd = numInput(null, { min: 0, max: 99, step: '1', placeholder: t('bt.opt.off') });
+        maxDd.id = 'bt-opt-maxdd';
+        const consWrap = el('div', 'bt-inline');
+        consWrap.append(minTrades, maxDd);
+        optimizeBox.appendChild(row(t('bt.opt.constraints'), consWrap, t('bt.opt.constraints_hint')));
+
+        const maxRuns = numInput(40, { min: 2, max: 200, step: 1 });
+        maxRuns.id = 'bt-opt-runs';
+        const maxSeconds = numInput(600, { min: 10, max: 3600, step: 10 });
+        maxSeconds.id = 'bt-opt-seconds';
+        const budgetWrap = el('div', 'bt-inline');
+        budgetWrap.append(maxRuns, maxSeconds);
+        optimizeBox.appendChild(row(t('bt.opt.budget'), budgetWrap, t('bt.opt.budget_hint')));
+
+        const ratio = document.createElement('select');
+        ratio.id = 'bt-opt-ratio';
+        [['0', t('bt.opt.holdout_off')], ['0.2', '20%'], ['0.3', '30%'],
+         ['0.4', '40%'], ['0.5', '50%']].forEach(([v, label]) => {
+            const o = document.createElement('option');
+            o.value = v;
+            o.textContent = label;
+            ratio.appendChild(o);
+        });
+        ratio.value = '0.3';
+        const topK = numInput(3, { min: 1, max: 10, step: 1 });
+        topK.id = 'bt-opt-topk';
+        const holdWrap = el('div', 'bt-inline');
+        holdWrap.append(ratio, topK);
+        optimizeBox.appendChild(row(t('bt.opt.holdout'), holdWrap, t('bt.opt.holdout_hint')));
+
+        optimizeBox.appendChild(el('div', 'bt-sec', t('bt.opt.space')));
+        optimizeBox.appendChild(el('div', 'bt-hint', t('bt.opt.space_hint')));
+        if (!numeric.length) {
+            optimizeBox.appendChild(el('div', 'bt-hint', t('bt.matrix.no_numeric')));
+        }
+        numeric.forEach(k => {
+            const m = metaMap[k] || {};
+            const box = el('div', 'bt-space');
+            box.dataset.osk = k;
+            const bound = m.min != null ? `${m.min} ~ ${m.max ?? '∞'}` : '';
+            box.appendChild(el('div', 'bt-space-head',
+                `${m.label || k}${bound ? ` (${bound})` : ''} · ${t('bt.opt.default')}=${params[k]}`));
+            const grid = el('div', 'bt-space-grid');
+            const mk = (label, key, attrs) => {
+                const wrap = el('label', 'bt-space-cell');
+                wrap.appendChild(el('span', '', label));
+                const inp = numInput(null, { step: (m.step || (m.type === 'int' ? 1 : 'any')), ...attrs });
+                inp.dataset[key] = '1';
+                wrap.appendChild(inp);
+                return wrap;
+            };
+            grid.append(
+                mk(t('bt.opt.min'), 'omin', { min: m.min, max: m.max }),
+                mk(t('bt.opt.max'), 'omax', { min: m.min, max: m.max }),
+                mk(t('bt.opt.step'), 'ostep', { min: 0 }),
+            );
+            const vals = document.createElement('input');
+            vals.type = 'text';
+            vals.dataset.ovalues = '1';
+            vals.placeholder = t('bt.opt.values_ph');
+            grid.appendChild(vals);
+            box.appendChild(grid);
+            optimizeBox.appendChild(box);
+        });
+    };
+
+    const readOptimizeSpace = () => {
+        const space = {};
+        let partial = '';
+        optimizeBox.querySelectorAll('[data-osk]').forEach(box => {
+            const key = box.dataset.osk;
+            const v = box.querySelector('[data-ovalues]');
+            if (v && v.value.trim()) {
+                const vals = v.value.split(',').map(x => x.trim()).filter(x => x !== '')
+                    .map(x => (Number.isFinite(Number(x)) ? Number(x) : x));
+                if (vals.length) space[key] = { values: vals };
+                return;
+            }
+            const lo = box.querySelector('[data-omin]').value.trim();
+            const hi = box.querySelector('[data-omax]').value.trim();
+            if (!lo && !hi) return;
+            if (!lo || !hi) { partial = key; return; }
+            const spec = { min: Number(lo), max: Number(hi) };
+            const step = box.querySelector('[data-ostep]').value.trim();
+            if (step) spec.step = Number(step);
+            space[key] = spec;
+        });
+        if (partial) {
+            return { error: t('bt.opt.space_partial', { key: partial }) };
+        }
+        if (!Object.keys(space).length) {
+            return { error: t('bt.opt.space_empty') };
+        }
+        return { space };
+    };
+
+    const fmtMetric = (key, v) => {
+        if (v == null || !Number.isFinite(Number(v))) return '—';
+        const n = Number(v);
+        if (key === 'total_return' || key === 'annual_return'
+            || key === 'max_drawdown' || key === 'win_rate') {
+            return `${(n * 100).toFixed(2)}%`;
+        }
+        return n.toFixed(3);
+    };
+    const fmtParams = (p) => Object.entries(p || {})
+        .map(([k, v]) => `${k}=${v}`).join(' ');
+    // 结果模块监听 ak:open-result（避免 backtest ↔ results 静态循环）
+    const focusResult = (id) => window.dispatchEvent(
+        new CustomEvent('ak:open-result', { detail: { id } }));
+
+    const openOptimizeReport = (st) => {
+        if (document.getElementById('bt-opt-report-overlay')) return;
+        const ov = el('div', 'overlay dialog-overlay');
+        ov.id = 'bt-opt-report-overlay';
+        const card = el('div', 'overlay-card dialog-card bt-opt-report');
+        card.appendChild(el('h3', '', t('bt.opt.report')));
+        const metricKey = (st.objective && st.objective.metric) || 'sharpe';
+        const best = st.best;
+        card.appendChild(el('div', 'dialog-msg',
+            `${t('bt.opt.method')}: ${st.method} · ${metricKey} · ${t('bt.opt.elapsed')} `
+            + `${((st.elapsed_ms || 0) / 1000).toFixed(1)}s`
+            + (st.seed != null ? ` · seed=${st.seed}` : '')));
+        if (best) {
+            const box = el('div', 'bt-opt-best');
+            box.appendChild(el('div', 'bt-opt-best-title', t('bt.opt.best')));
+            box.appendChild(el('div', 'bt-opt-best-params mono', fmtParams(best.params)));
+            card.appendChild(box);
+        } else {
+            card.appendChild(el('div', 'bt-opt-empty', t('bt.opt.no_best')));
+        }
+        const warns = (st.warnings || []).filter(w =>
+            ['OOS_DEGRADED', 'OOS_NO_EDGE', 'OOS_INVALID', 'NO_OOS_VALID',
+             'NO_HOLDOUT', 'TIME_BUDGET', 'NO_VALID_TRIAL'].includes(w.code));
+        if (warns.length) {
+            const wbox = el('div', 'bt-opt-warn');
+            warns.slice(0, 6).forEach(w => {
+                wbox.appendChild(el('div', '', `⚠ ${w.message || w.code}`));
+            });
+            card.appendChild(wbox);
+        }
+        if (best) {
+            const tbl = el('table', 'bt-opt-metrics');
+            const head = document.createElement('tr');
+            [t('bt.opt.metric'), 'IS', 'OOS'].forEach(h => {
+                const th = document.createElement('th');
+                th.textContent = h;
+                head.appendChild(th);
+            });
+            tbl.appendChild(head);
+            [['total_return', t('bt.opt.metric.total_return')],
+             ['annual_return', t('bt.opt.metric.annual_return')],
+             ['sharpe', t('bt.opt.metric.sharpe')],
+             ['max_drawdown', t('bt.opt.metric.max_drawdown')],
+             ['win_rate', t('bt.opt.metric.win_rate')],
+             ['trade_count', t('bt.opt.metric.trade_count')]].forEach(([k, label]) => {
+                const tr = document.createElement('tr');
+                tr.appendChild(el('td', '', label));
+                const isv = (best.is_stats || {})[k];
+                const oosv = (best.oos_stats || {})[k];
+                tr.appendChild(el('td', '', k === 'trade_count'
+                    ? String(isv ?? '—') : fmtMetric(k, isv)));
+                tr.appendChild(el('td', '', k === 'trade_count'
+                    ? String(oosv ?? '—') : fmtMetric(k, oosv)));
+                tbl.appendChild(tr);
+            });
+            card.appendChild(tbl);
+            const acts = el('div', 'bt-opt-acts');
+            if (best.result_id) {
+                const view = el('button', 'btn-primary', t('bt.opt.view_result'));
+                view.type = 'button';
+                view.onclick = async () => {
+                    ov.remove();
+                    try { focusResult(best.result_id); } catch (e) { /* 结果已淘汰 */ }
+                };
+                acts.appendChild(view);
+            }
+            const save = el('button', 'btn-ghost', t('bt.opt.save_preset'));
+            save.type = 'button';
+            save.onclick = async () => {
+                const def = `${t('bt.opt.preset_prefix')} ${fmtParams(best.params)}`.slice(0, 80);
+                const name = await openDialog({
+                    title: t('bt.opt.save_preset'), value: def,
+                    confirmText: t('bt.opt.save_preset'),
+                });
+                if (!name) return;
+                try {
+                    const payload = {
+                        board_id: st.board_id, script: st.script,
+                        timeframe: st.timeframe, name, params: best.params,
+                    };
+                    if (best.result_id) payload.origin_result_id = best.result_id;
+                    await fetchJSON('/api/presets', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+                    toast(t('bt.opt.preset_saved', { name }));
+                } catch (e) { toast(`${t('bt.opt.preset_fail')}: ${e.message}`); }
+            };
+            acts.appendChild(save);
+            const cp = el('button', 'btn-ghost', t('bt.preset_copy'));
+            cp.type = 'button';
+            cp.onclick = async () => {
+                const payload = { ak: 'ak.params', v: 1, script: st.script,
+                                  params: best.params,
+                                  from: { timeframe: st.timeframe } };
+                const ok = await copyText(JSON.stringify(payload));
+                toast(ok ? t('bt.preset_copy_ok') : t('result.copy_fail'));
+            };
+            acts.appendChild(cp);
+            card.appendChild(acts);
+        }
+        card.appendChild(el('div', 'bt-sec', t('bt.opt.trials')));
+        const wrap = el('div', 'bt-opt-trials');
+        const tbl = el('table', 'bt-opt-trial-table');
+        const thead = document.createElement('tr');
+        ['#', t('bt.opt.params'), t('bt.opt.status'), 'IS', 'OOS', ''].forEach(h => {
+            const th = document.createElement('th');
+            th.textContent = h;
+            thead.appendChild(th);
+        });
+        tbl.appendChild(thead);
+        const rows = [...(st.trials || [])].sort((a, b) => {
+            const sa = a.oos_score ?? a.score;
+            const sb = b.oos_score ?? b.score;
+            return (sb == null ? -Infinity : sb) - (sa == null ? -Infinity : sa);
+        });
+        rows.slice(0, 200).forEach(tr0 => {
+            const tr = document.createElement('tr');
+            tr.appendChild(el('td', '', String((tr0.index ?? 0) + 1)));
+            tr.appendChild(el('td', 'mono', fmtParams(tr0.params)));
+            const status = tr0.oos_status || tr0.status;
+            const stext = status === 'ok' ? t('bt.opt.st.ok')
+                : status === 'rejected' ? t('bt.opt.st.rejected')
+                : status === 'invalid' ? t('bt.opt.st.invalid') : t('bt.opt.st.failed');
+            const std = el('td', `bt-opt-st ${status || ''}`, stext);
+            if (tr0.reason || tr0.oos_reason) std.title = tr0.oos_reason || tr0.reason;
+            tr.appendChild(std);
+            tr.appendChild(el('td', '', fmtMetric(metricKey, tr0.value)));
+            tr.appendChild(el('td', '', fmtMetric(metricKey, tr0.oos_value)));
+            const act = el('td', '');
+            if (tr0.result_id) {
+                const v = el('button', 'btn-ghost', t('bt.opt.view'));
+                v.type = 'button';
+                v.onclick = async () => {
+                    ov.remove();
+                    try { focusResult(tr0.result_id); } catch (e) { /* 结果已淘汰 */ }
+                };
+                act.appendChild(v);
+            }
+            tr.appendChild(act);
+            tbl.appendChild(tr);
+        });
+        wrap.appendChild(tbl);
+        card.appendChild(wrap);
+        const foot = el('div', 'dialog-foot');
+        const closeBtn = el('button', 'btn-primary', t('common.close'));
+        closeBtn.type = 'button';
+        closeBtn.onclick = () => ov.remove();
+        foot.appendChild(closeBtn);
+        card.appendChild(foot);
+        const onKey = (e) => {
+            if (e.key === 'Escape') { e.stopPropagation(); ov.remove(); }
+        };
+        document.addEventListener('keydown', onKey, true);
+        ov.addEventListener('mousedown', (e) => { if (e.target === ov) ov.remove(); });
+        ov.appendChild(card);
+        document.body.appendChild(ov);
+    };
+
+    const runLabel = () => (mode === 'matrix' ? t('bt.run_matrix')
+        : mode === 'optimize' ? t('bt.run_optimize') : t('bt.run'));
     const setMode = (m) => {
         mode = m;
         tabSingle.classList.toggle('on', m === 'single');
         tabMatrix.classList.toggle('on', m === 'matrix');
+        tabOptimize.classList.toggle('on', m === 'optimize');
         paramsBox.style.display = m === 'single' ? '' : 'none';
         matrixBox.style.display = m === 'matrix' ? '' : 'none';
+        optimizeBox.style.display = m === 'optimize' ? '' : 'none';
         run.textContent = runLabel();
     };
     tabSingle.onclick = () => setMode('single');
     tabMatrix.onclick = () => setMode('matrix');
+    tabOptimize.onclick = () => setMode('optimize');
 
     stratSel.addEventListener('change', () => { paintPresets(); paintParams(); });
     if (strategies.length) paintParams();
@@ -772,8 +1156,115 @@ export async function openBacktestDialog(opts = {}) {
         }
     };
 
+    const runOptimizeNow = async () => {
+        errBox.textContent = '';
+        if (!meta) { errBox.textContent = t('bt.opt.no_meta'); return; }
+        const sp = readOptimizeSpace();
+        if (sp.error) { errBox.textContent = sp.error; return; }
+        const metric = document.getElementById('bt-opt-metric').value;
+        const direction = document.getElementById('bt-opt-direction').value;
+        const minTrades = document.getElementById('bt-opt-mintrades').value.trim();
+        const maxDdPct = document.getElementById('bt-opt-maxdd').value.trim();
+        const maxRuns = parseInt(document.getElementById('bt-opt-runs').value, 10) || 40;
+        const maxSeconds = parseInt(document.getElementById('bt-opt-seconds').value, 10) || 600;
+        const ratio = parseFloat(document.getElementById('bt-opt-ratio').value) || 0;
+        const topK = parseInt(document.getElementById('bt-opt-topk').value, 10) || 3;
+        const constraints = {};
+        if (minTrades) constraints.min_trades = parseInt(minTrades, 10);
+        if (maxDdPct) constraints.max_drawdown = parseFloat(maxDdPct) / 100;
+        const body = {
+            board_id: state.currentBoard,
+            timeframe: state.currentTimeframe,
+            engine: engineSel.value,
+            script: stratSel.value || null,
+            direction: dirSel.value,
+            initial_cash: parseFloat(cash.value),
+            fee_bps: parseFloat(fee.value),
+            slippage_bps: parseFloat(slip.value),
+            space: sp.space,
+            method: document.getElementById('bt-opt-method').value,
+            objective: { metric, direction },
+            constraints,
+            budget: { max_runs: Math.max(2, Math.min(200, maxRuns)),
+                      max_seconds: Math.max(10, Math.min(3600, maxSeconds)) },
+            holdout: { ratio, top_k: Math.max(1, Math.min(10, topK)) },
+            start_time: startMs,
+            end_time: endMs + dayMs - 1,
+            limit: clamp(parseInt(barsIn.value, 10) || MAX_RANGE_BARS, 1, MAX_RANGE_BARS),
+        };
+        const protection = {};
+        if (sl.value !== '') protection.stop_loss_pct = parseFloat(sl.value) / 100;
+        if (tp.value !== '') protection.take_profit_pct = parseFloat(tp.value) / 100;
+        if (Object.keys(protection).length) body.protection = protection;
+        run.disabled = true;
+        cancel.disabled = true;
+        const old = run.textContent;
+        run.textContent = t('bt.opt.starting');
+        try {
+            const j = await fetchJSON('/api/backtest/optimize', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const jobId = j.job_id;
+            const pText = el('span', 'bt-progress-text', t('bt.opt.running', { done: 0, total: j.total }));
+            const pCancel = el('button', 'btn-ghost', t('bt.opt.cancel'));
+            pCancel.type = 'button';
+            pCancel.onclick = async () => {
+                pCancel.disabled = true;
+                try {
+                    await fetchJSON(`/api/backtest/optimize/${jobId}/cancel`, { method: 'POST' });
+                } catch (e) { /* 由轮询收尾 */ }
+            };
+            prog.textContent = '';
+            prog.append(pText, pCancel);
+            prog.style.display = '';
+            stopProg();
+            progTimer = setInterval(async () => {
+                try {
+                    const st = await fetchJSON(`/api/backtest/optimize/${jobId}`);
+                    const phase = st.phase === 'oos' ? t('bt.opt.phase_oos')
+                        : st.phase === 'register' ? t('bt.opt.phase_register')
+                        : st.phase === 'done' ? t('bt.opt.phase_done') : t('bt.opt.phase_is');
+                    const done = st.phase === 'oos' ? (st.oos_done || 0) : st.done;
+                    const total = st.phase === 'oos'
+                        ? ((st.holdout && st.holdout.top_k) || 0) : st.total;
+                    const cur = st.current ? fmtParams(st.current) : '';
+                    pText.textContent = `${phase} ${done}/${total}`
+                        + (cur ? ` · ${cur}` : '');
+                    if (st.status !== 'running') {
+                        stopProg();
+                        run.disabled = false;
+                        cancel.disabled = false;
+                        run.textContent = old;
+                        if (st.status === 'failed') {
+                            const err = (st.errors && st.errors[0] && st.errors[0].error)
+                                || t('bt.opt.failed');
+                            errBox.textContent = err;
+                            return;
+                        }
+                        close();
+                        openOptimizeReport(st);
+                    }
+                } catch (e) {
+                    stopProg();
+                    errBox.textContent = e.message;
+                    run.disabled = false;
+                    cancel.disabled = false;
+                    run.textContent = old;
+                }
+            }, 700);
+        } catch (e) {
+            errBox.textContent = e.message;
+            run.disabled = false;
+            cancel.disabled = false;
+            run.textContent = old;
+        }
+    };
+
     run.onclick = async () => {
         if (mode === 'matrix') { await runMatrixNow(); return; }
+        if (mode === 'optimize') { await runOptimizeNow(); return; }
         errBox.textContent = '';
         run.disabled = true;
         cancel.disabled = true;

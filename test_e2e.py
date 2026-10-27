@@ -68,6 +68,9 @@ TOOL_REST_MAP = {
     "run_backtest_matrix": ("post", "/api/backtest/matrix"),
     "matrix_status": ("get", "/api/backtest/matrix/"),
     "matrix_cancel": ("post", "/api/backtest/matrix/"),
+    "run_optimization": ("post", "/api/backtest/optimize"),
+    "optimization_status": ("get", "/api/backtest/optimize/"),
+    "optimization_cancel": ("post", "/api/backtest/optimize/"),
     "focus_result_trade": ("post", "/api/result/"),
     "list_presets": ("get", "/api/presets"),
     "save_preset": ("post", "/api/presets"),
@@ -455,7 +458,7 @@ def test(port: int, token: str = None):
     print("🔗 两表面对齐")
     try:
         tools = mcp_tools(base, s)
-        check("MCP 工具数=63", len(tools) == 63, f"got {len(tools)}")
+        check("MCP 工具数=66", len(tools) == 66, f"got {len(tools)}")
         missing = [t for t in tools if t not in TOOL_REST_MAP and t not in MCP_ONLY]
         check("无未映射工具", not missing, str(missing))
         spec = s.get(f"{base}/openapi.json").json()
@@ -990,6 +993,40 @@ def test(port: int, token: str = None):
         _tm.sleep(0.2)
     check("矩阵可取消且不越界", cst.get("status") in ("cancelled", "done")
           and (cst.get("done") or 0) <= cj.get("total", 0), str(cst)[:160])
+
+    # === 11.7 参数寻优（v0.6.5） ===
+    r = s.post(f"{base}/api/backtest/optimize", json={
+        "board_id": "btb", "timeframe": "1d", "script": "strategy/ma_cross",
+        "space": {"fast": [5, 10], "slow": [30, 60]}, "method": "grid",
+        "objective": {"metric": "sharpe"}, "budget": {"max_runs": 4, "max_seconds": 120},
+        "holdout": {"ratio": 0.3, "top_k": 1}, "seed": 3, "limit": 300,
+    })
+    oj = r.json()
+    ojob = oj.get("job_id")
+    check("寻优启动 2×2", r.status_code == 200 and oj.get("total") == 4 and ojob, r.text[:200])
+    ost = {}
+    for _ in range(160):
+        ost = s.get(f"{base}/api/backtest/optimize/{ojob}").json()
+        if ost.get("status") != "running":
+            break
+        _tm.sleep(0.3)
+    check("寻优跑完并选出 Top K", ost.get("status") == "done" and ost.get("done") == 4
+          and (ost.get("best") or {}).get("result_id"), str(ost)[:240])
+    check("只登记 Top K 结果", len(ost.get("registered_result_ids") or []) == 1,
+          str(ost.get("registered_result_ids")))
+    orid = (ost.get("best") or {}).get("result_id")
+    if orid:
+        osum = s.get(f"{base}/api/result/{orid}?section=summary").json().get("result") or {}
+        ob = osum.get("batch") or {}
+        check("寻优结果带 IS/OOS 与过拟合字段", ob.get("kind") == "optimize"
+              and ob.get("phase") == "oos" and ob.get("is_stats")
+              and ob.get("oos_stats") and "overfit_gap" in ob, str(ob)[:240])
+    r = s.post(f"{base}/api/backtest/optimize", json={
+        "board_id": "btb", "script": "strategy/ma_cross",
+        "space": {"fast": [5]}, "method": "nope",
+    })
+    check("寻优未知方法被拒", r.status_code == 400 and "OPTIMIZE_METHOD_INVALID" in r.text,
+          r.text[:160])
 
     # 运镜：无浏览器必须 NO_BROWSER；有浏览器则 ok
     r = s.post(f"{base}/api/result/{rid1}/focus", json={"trade_index": 0})

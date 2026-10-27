@@ -1,6 +1,6 @@
 # AgentKline API 文档
 
-> 版本：v0.6.4 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server（API 自 v0.4.0 起保持兼容）
+> 版本：v0.6.5 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server（API 自 v0.4.0 起保持兼容）
 > 破坏性硬切版本：无兼容层。旧路径（/api/ohlcv、/api/load-csv、/history、datasource 端点、indicator/update 杂交路径）一律 404/405。
 > 机器可读附录：`python scripts/gen_api_ref.py` 可从运行中服务生成 REST 路由表 + MCP 工具表（防漂移）。
 
@@ -126,14 +126,16 @@ CAPS 声明⇒实现（backfill⇒until 参/symbols⇒list_symbols/ticker⇒tick
 数据源 until 回溯可重放跨窗连续；单槽 max_bars_per_slot=50000 截旧+dropped；重算尾窗 max_window=5000；
 数据家族单脚本分片范式；L1 沙箱自律。
 
-## 10. MCP 工具（Streamable HTTP `/mcp`，agent 端口，55 个）
+## 10. MCP 工具（Streamable HTTP `/mcp`，agent 端口，66 个）
 
 改名：set_datasource→**set_kline_source**；load_history→**backfill**；run_script 窄身；list_scripts payload 升级。
 新增：save_script、search_symbols。换参：add/update/delete_indicator 与 get_indicators 换 inst_id/instances。
 payload 调整：create_board(+symbol/source/params/poll_s)、create_timeframe、overview、list_boards。
 原样保留 21 + list_skills/load_skill/get_kline/take_snapshot 等。
 v0.6.0 增结果实例 5 个（import_result/list_results/get_result/rename_result/delete_result）；
-v0.6.1 增引擎回测 4 个（list_engines/list_strategies/strategy_meta/run_backtest，见 §17）。
+v0.6.1 增引擎回测 4 个（list_engines/list_strategies/strategy_meta/run_backtest，见 §17）；
+v0.6.4 增参数矩阵 3 个 + 运镜 1 个 + 参数方案 4 个；
+v0.6.5 增参数寻优 3 个（run_optimization/optimization_status/optimization_cancel，见 §17.7）。
 **MCP-only 判决**：take_snapshot（无 REST 触发）。**REST-only**：get_kline_source、/api/view 上报。
 docstring 为单一真相；REST 为薄镜像；`test_e2e.py` 含两表面对齐断言。
 
@@ -318,6 +320,46 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
 - `PUT /api/presets/{id}`：改名/改参数/备注/设默认（同作用域默认唯一）。
 - `DELETE /api/presets/{id}`：只删方案，不碰结果。
 - MCP 工具：`list_presets` / `save_preset` / `update_preset` / `delete_preset`。
+- v0.6.5：方案附 `script_sha256`；`GET /api/presets` 每条再加 `script_changed`（策略内容变过为 true；
+  旧方案无哈希时 false，不误报）。
+
+### 17.7 参数寻优（v0.6.5）
+
+- `POST /api/backtest/optimize`：体见下；立即返回 `{job_id,method,total,phase:"is",space,objective,
+  constraints,budget,holdout}`。
+
+```json
+{
+  "board_id": "demo_m3", "timeframe": "1d", "script": "strategy/ma_cross",
+  "space": {"fast": {"min": 5, "max": 30, "step": 1},
+            "slow": {"values": [20, 30, 60]}},
+  "method": "bayes",
+  "objective": {"metric": "sharpe", "direction": "max"},
+  "constraints": {"min_trades": 10, "max_drawdown": 0.4},
+  "budget": {"max_runs": 40, "max_seconds": 600},
+  "holdout": {"ratio": 0.3, "top_k": 3},
+  "seed": 42
+}
+```
+
+- 指标白名单：`total_return/annual_return/sharpe/sortino/calmar/max_drawdown/profit_factor/win_rate`；
+  `max_drawdown` 为负数，默认方向 `max`（越接近 0 越好）。
+- `method=grid|random|bayes`：grid 组合数超过 `max_runs` 报 `OPTIMIZE_BUDGET`；
+  bayes 为内置 TPE-lite（不依赖 optuna）；`seed` 可复现。
+- `budget.max_runs` 默认 40、上限 `limits.optimize_max_runs`（默认 200）；`max_seconds` 10~3600。
+- `holdout.ratio` 0~0.5（0=不验证），`top_k` 1~10；样本内外各至少 20 根，否则
+  `OPTIMIZE_HOLDOUT_TOO_SMALL`。
+- `GET /api/backtest/optimize/{job_id}`：`status=running|done|cancelled|failed`；
+  `phase=is|oos|register|done`；`trials` 每行含 `status=ok|rejected|invalid|failed`、`score`、
+  `is_stats`、`oos_*`、`overfit_gap`、`result_id`；`top/best` 按样本外分数排序；
+  `warnings`（`OOS_DEGRADED`/`OOS_NO_EDGE`/`OOS_INVALID`/`NO_OOS_VALID`/`NO_HOLDOUT`/
+  `TIME_BUDGET`/`NO_VALID_TRIAL`）。
+- `POST /api/backtest/optimize/{job_id}/cancel`：当前试次跑完即停，已登记结果保留。
+- 只登记 Top K 的样本外结果（无 holdout 时 Top K 样本内）；结果 `batch` 加
+  `kind:"optimize"`、`phase`、`method`、`params`、`is_stats`、`is_score`、`oos_stats`、
+  `oos_score`、`overfit_gap`、`overfit_ratio`。完整试次只在内存报告里，重启即失。
+- WS：`optimize_started` / `optimize_progress` / `optimize_done`。
+- MCP 工具：`run_optimization` / `optimization_status` / `optimization_cancel`。
 
 ## 内置数据源（v0.4.4）
 | `datasource/binance` | Binance 直连（requests 非 ccxt 库）：现货+永续全量、K线全周期、批量实时；含股票代币（现货 B 后缀 78 + TradFi 永续 205，display 带官方分类标注） |
