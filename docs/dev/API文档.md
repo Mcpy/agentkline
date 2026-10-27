@@ -120,7 +120,7 @@ CSV 入图 = 内置 `datasource/csv` 脚本（path 归操作参数，IDENTITY=[]
 
 ## 9. 脚本约定（v0.4）
 
-详见 `docs/脚本编写指南.md` 与 skills 双卷 `datasource-authoring` / `indicator-authoring`（agent 权威）。要点：
+详见 `docs/dev/脚本编写指南.md` 与 skills 双卷 `datasource-authoring` / `indicator-authoring`（agent 权威）。要点：
 双根三层目录；id=kind/name；字面元数据族 NAME/DESC/PARAMS/CAPS/IDENTITY（ast 静态抽取零 exec）；
 CAPS 声明⇒实现（backfill⇒until 参/symbols⇒list_symbols/ticker⇒ticker）；指标等长+warmup None+禁 NaN；
 数据源 until 回溯可重放跨窗连续；单槽 max_bars_per_slot=50000 截旧+dropped；重算尾窗 max_window=5000；
@@ -291,7 +291,7 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
 
 后端只通过 `ak-engine` 子进程调用引擎（stdin spec / stdout `__AK_RESULT__` + JSON / 超时 killpg），
 插件用 entry point group `agentkline.engines` 注册；内置 `builtin` 随主包安装，第三方引擎单独成包、
-只依赖 `agentkline-engine-core`。详见 `docs/引擎插件开发指南.md`。
+只依赖 `agentkline-engine-core`。详见 `docs/dev/引擎插件开发指南.md`。
 
 ### 17.5 参数矩阵 / 运镜 / 旧快照（v0.6.4）
 

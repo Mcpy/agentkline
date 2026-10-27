@@ -6,7 +6,7 @@ description: 如何编写 AgentKline 指标脚本——main(params, ohlcv)→val
 # AgentKline 指标脚本编写
 
 脚本由 `script_engine` 在隔离命名空间 exec（L1 沙箱：不限 import，自律）。
-人类版同文见 `docs/脚本编写指南.md`；冲突以本 skill 为准。数据源脚本见姊妹卷 `datasource-authoring`。
+人类版同文见 `docs/dev/脚本编写指南.md`；冲突以本 skill 为准。数据源脚本见姊妹卷 `datasource-authoring`。
 
 ## 存放与 id
 - 双根：builtin（包内 resources/scripts，只读）/ custom（scripts_dir，可写）。**你写脚本只落 custom**：

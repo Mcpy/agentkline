@@ -118,9 +118,9 @@ See `config.example.yaml`. Highlights:
 
 ## 📚 Docs
 
-- `docs/API文档.md` — full REST / WS / MCP reference
-- `docs/开发文档.md` — module layout, build & deployment
-- `docs/脚本编写指南.md` / `skills/script-authoring.md` — how to write legal indicator & datasource scripts
+- [API reference](docs/dev/API文档.md) — full REST / WS / MCP surface
+- [Developer guide](docs/dev/开发文档.md) — module layout, build & deployment
+- [Script guide](docs/dev/脚本编写指南.md) / [indicator-authoring](skills/indicator-authoring.md) / [datasource-authoring](skills/datasource-authoring.md) — how to write legal indicator & datasource scripts
 
 ## License
 

@@ -122,9 +122,9 @@ cd frontend && npm install && npm run build && cd ..
 
 ## 📚 文档
 
-- `docs/API文档.md` — REST / WS / MCP 全量接口
-- `docs/开发文档.md` — 模块结构、构建与部署
-- `docs/脚本编写指南.md` / `skills/script-authoring.md` — 如何编写合法的指标/数据源脚本
+- [API 文档](docs/dev/API文档.md) — REST / WS / MCP 全量接口
+- [开发文档](docs/dev/开发文档.md) — 模块结构、构建与部署
+- [脚本编写指南](docs/dev/脚本编写指南.md) / [指标脚本](skills/indicator-authoring.md) / [数据源脚本](skills/datasource-authoring.md) — 如何编写合法的指标/数据源脚本
 
 ## License
 
