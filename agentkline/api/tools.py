@@ -620,6 +620,13 @@ def strategy_meta(script: Optional[str] = None, source: Optional[str] = None):
     return service.strategy_meta(script, source)
 
 
+@api_tool(group="read", path="/api/optimizers")
+def list_optimizers():
+    """列出可用优化器脚本（optimizer/xxx，内置 + 自定义）：
+    id/name/desc/source/params/param_meta/caps/api；运行寻优时把 id 传给 run_optimization.method。"""
+    return service.list_optimizers()
+
+
 @api_tool(group="user_write", method="POST", path="/api/backtest", err_status=400)
 def run_backtest(board_id: str, timeframe: Optional[str] = None, engine: str = "builtin",
                  script: Optional[str] = None, source: Optional[str] = None,
@@ -685,42 +692,6 @@ def focus_result_trade(result_id: str, trade_index: int = 0):
     return service.focus_result_trade(result_id, trade_index)
 
 
-@api_tool(group="user_write", method="POST", path="/api/backtest/matrix", err_status=400)
-def run_backtest_matrix(board_id: str, timeframe: Optional[str] = None, engine: str = "builtin",
-                        script: Optional[str] = None, source: Optional[str] = None,
-                        grid: Optional[dict] = None, params_list: Optional[list] = None,
-                        direction: str = "long_only", initial_cash: float = 10000.0,
-                        fee_bps: float = 5.0, slippage_bps: float = 5.0,
-                        protection: Optional[dict] = None, start_time: Optional[int] = None,
-                        end_time: Optional[int] = None, limit: int = 20000,
-                        timeout: float = 120.0):
-    """按参数矩阵批量跑回测（同一份数据、串行、进度可查、可取消）。
-    board_id 必填；grid={"fast":[5,10,20],"slow":[30,60]} 或 params_list=[{...},{...}]
-    （二选一）；组合数默认上限 60（limits.matrix_max_runs）。
-    其余参数与单次回测相同；每个结果带 batch={id,index,total,params}。
-    立即返回 {job_id,total,runs}；进度用 matrix_status 查，取消用 matrix_cancel。"""
-    return service.run_matrix(
-        board_id, timeframe=timeframe, engine=engine, script=script, source=source,
-        grid=grid, params_list=params_list, direction=direction,
-        initial_cash=initial_cash, fee_bps=fee_bps, slippage_bps=slippage_bps,
-        protection=protection, start_time=start_time, end_time=end_time,
-        limit=limit, timeout=timeout)
-
-
-@api_tool(group="read", path="/api/backtest/matrix/{job_id}", err_status=404)
-def matrix_status(job_id: str):
-    """查参数矩阵作业：status=running/done/cancelled；done/total/current；
-    已出结果 results:[{index,result_id,params,stats}]；失败组 errors:[{index,params,error}]。"""
-    return service.get_matrix(job_id)
-
-
-@api_tool(group="user_write", method="POST", path="/api/backtest/matrix/{job_id}/cancel",
-          err_status=404)
-def matrix_cancel(job_id: str):
-    """请求取消参数矩阵：当前这一组跑完即停，已出结果保留（不删）。"""
-    return service.cancel_matrix(job_id)
-
-
 @api_tool(group="user_write", method="POST", path="/api/backtest/optimize", err_status=400)
 def run_optimization(board_id: str, timeframe: Optional[str] = None, engine: str = "builtin",
                      script: Optional[str] = None, source: Optional[str] = None,
@@ -731,12 +702,13 @@ def run_optimization(board_id: str, timeframe: Optional[str] = None, engine: str
                      initial_cash: float = 10000.0, fee_bps: float = 5.0,
                      slippage_bps: float = 5.0, protection: Optional[dict] = None,
                      start_time: Optional[int] = None, end_time: Optional[int] = None,
-                     limit: int = 20000, timeout: float = 120.0):
+                     limit: int = 20000, timeout: float = 120.0,
+                     optimizer_params: Optional[dict] = None):
     """参数寻优：在同一份冻结数据上按目标/约束搜索参数，Top K 做样本外验证。
 
     space 每个参数给 {"min","max","step"} 或 {"values":[...]}；
-    method=grid（全组合，组合数不能超预算）/random/bayes（内置 TPE-lite，无需 optuna）；
-    objective={"metric":"sharpe","direction":"max"}（指标白名单见文档）；
+    method=optimizer/grid 或旧别名 grid/random/bayes；自定义优化器传 optimizer/xxx；
+    optimizer_params 是优化器脚本 PARAMS 的覆盖值；objective 多目标脚本可传自由结构；
     constraints={"min_trades":10,"max_drawdown":0.4}（不满足的试次不参与评选）；
     budget={"max_runs":40,"max_seconds":600}；holdout={"ratio":0.3,"top_k":3}（ratio=0 不做样本外）。
     只把 Top K 的样本外结果登记进结果栏（不带 holdout 时登记 Top K 样本内），
@@ -747,7 +719,7 @@ def run_optimization(board_id: str, timeframe: Optional[str] = None, engine: str
         budget=budget, holdout=holdout, seed=seed, direction=direction,
         initial_cash=initial_cash, fee_bps=fee_bps, slippage_bps=slippage_bps,
         protection=protection, start_time=start_time, end_time=end_time,
-        limit=limit, timeout=timeout)
+        limit=limit, timeout=timeout, optimizer_params=optimizer_params)
 
 
 @api_tool(group="read", path="/api/backtest/optimize/{job_id}", err_status=404)

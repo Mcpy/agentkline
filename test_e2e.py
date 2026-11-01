@@ -63,11 +63,9 @@ TOOL_REST_MAP = {
     "import_result": ("post", "/api/result"),
     "list_engines": ("get", "/api/engines"),
     "list_strategies": ("get", "/api/strategies"),
+    "list_optimizers": ("get", "/api/optimizers"),
     "strategy_meta": ("get", "/api/strategy/meta"),
     "run_backtest": ("post", "/api/backtest"),
-    "run_backtest_matrix": ("post", "/api/backtest/matrix"),
-    "matrix_status": ("get", "/api/backtest/matrix/"),
-    "matrix_cancel": ("post", "/api/backtest/matrix/"),
     "run_optimization": ("post", "/api/backtest/optimize"),
     "optimization_status": ("get", "/api/backtest/optimize/"),
     "optimization_cancel": ("post", "/api/backtest/optimize/"),
@@ -458,7 +456,7 @@ def test(port: int, token: str = None):
     print("🔗 两表面对齐")
     try:
         tools = mcp_tools(base, s)
-        check("MCP 工具数=66", len(tools) == 66, f"got {len(tools)}")
+        check("MCP 工具数=64", len(tools) == 64, f"got {len(tools)}")
         missing = [t for t in tools if t not in TOOL_REST_MAP and t not in MCP_ONLY]
         check("无未映射工具", not missing, str(missing))
         spec = s.get(f"{base}/openapi.json").json()
@@ -760,13 +758,13 @@ def test(port: int, token: str = None):
           all(not ({"caps", "identity", "intervals"} & set(x.keys())) for x in ml),
           str(sorted(ml[0].keys())) if ml else "empty")
 
-    # === 11.4 skills 五卷（v0.4.4 拆分；0.6.1 增策略卷；0.6.4 增归因卷） ===
+    # === 11.4 skills 六卷（v0.4.4 拆分；0.6.1 策略；0.6.4 归因；0.6.6 优化器） ===
     print("📚 skills")
     r = s.get(f"{base}/api/skills")
     names = sorted(x["name"] for x in r.json().get("skills", r.json()))
-    check("skills 五卷齐", names == ["ai-walkthrough", "datasource-authoring",
-                                    "indicator-authoring", "result-attribution",
-                                    "strategy-authoring"], str(names))
+    check("skills 六卷齐", names == ["ai-walkthrough", "datasource-authoring",
+                                    "indicator-authoring", "optimizer-authoring",
+                                    "result-attribution", "strategy-authoring"], str(names))
     r = s.get(f"{base}/api/skills/datasource-authoring")
     body = r.json().get("content", r.text)
     check("datasource 卷含契约章+内联模板", "datasource 契约" in body and "INTERVALS" in body
@@ -782,6 +780,13 @@ def test(port: int, token: str = None):
           r.status_code == 200 and "main 契约" in body and "<!-- include" not in body
           and 'STRATEGY_MODE = "signal"' in body and "def main(params, ohlcv):" in body,
           body[:120])
+    r = s.get(f"{base}/api/skills/optimizer-authoring")
+    body = r.json().get("content", r.text)
+    check("optimizer 卷含契约+内联模板",
+          r.status_code == 200 and "OPTIMIZER_API" in body
+          and "def ask(state, ctx)" in body
+          and "def rank(state, ctx, trials, phase)" in body
+          and "<!-- include" not in body, body[:120])
 
     # === 11.5 MCP 提示词黑话门禁（v0.4.4） ===
     print("📜 MCP docstring 黑话门禁")
@@ -946,55 +951,14 @@ def test(port: int, token: str = None):
           and s.get(f"{base}/api/presets", params={"board_id": "btb"}).json().get("count") == 0,
           r.text[:160])
 
-    # === 11.6 参数矩阵（v0.6.4） ===
-    r = s.post(f"{base}/api/backtest/matrix", json={
-        "board_id": "btb", "timeframe": "1d", "script": "strategy/ma_cross",
-        "direction": "long_only", "initial_cash": 10000, "limit": 300,
-        "grid": {"fast": [5, 10], "slow": [30, 60]},
-    })
-    mj = r.json()
-    job_id = mj.get("job_id")
-    check("矩阵启动 2×2", r.status_code == 200 and mj.get("total") == 4 and job_id, r.text[:200])
-    st = {}
-    for _ in range(120):
-        st = s.get(f"{base}/api/backtest/matrix/{job_id}").json()
-        if st.get("status") != "running":
-            break
-        _tm.sleep(0.3)
-    check("矩阵跑完 4 组", st.get("status") == "done" and st.get("done") == 4
-          and len(st.get("results") or []) == 4, str(st)[:200])
-    batch_ids = set()
-    for row in (st.get("results") or []):
-        rr = s.get(f"{base}/api/result/{row['result_id']}?section=summary").json().get("result") or {}
-        batch_ids.add(((rr.get("batch") or {}).get("id"), (rr.get("data") or {}).get("fingerprint") is not None))
-    check("矩阵结果带 batch+指纹", batch_ids == {(job_id, True)}, str(batch_ids))
-    listed = s.get(f"{base}/api/results", params={"board_id": "btb"}).json()
-    fr = [x.get("freshness") for x in listed.get("results") or []
-          if x.get("batch", {}).get("id") == job_id]
-    check("新结果不标旧快照", len(fr) == 4 and all(f and f.get("stale") is False for f in fr), str(fr))
-    r = s.post(f"{base}/api/backtest/matrix", json={"board_id": "btb", "script": "strategy/ma_cross",
-                                                   "grid": {"nope": [1]}})
-    check("矩阵未知参数被拒", r.status_code == 400 and "MATRIX_INVALID" in r.text, r.text[:160])
-    r = s.post(f"{base}/api/backtest/matrix", json={"board_id": "btb", "script": "strategy/ma_cross",
-                                                   "grid": {"fast": list(range(1, 9)),
-                                                            "slow": list(range(1, 9))}})
-    check("矩阵超上限被拒", r.status_code == 400 and "MATRIX_LIMIT" in r.text, r.text[:160])
-    # 取消：立即取消，最终状态不晚于 done
-    r = s.post(f"{base}/api/backtest/matrix", json={
-        "board_id": "btb", "timeframe": "1d", "script": "strategy/ma_cross",
-        "limit": 300, "grid": {"fast": [5, 10, 15], "slow": [30, 60]}})
-    cj = r.json()
-    s.post(f"{base}/api/backtest/matrix/{cj['job_id']}/cancel")
-    cst = {}
-    for _ in range(60):
-        cst = s.get(f"{base}/api/backtest/matrix/{cj['job_id']}").json()
-        if cst.get("status") != "running":
-            break
-        _tm.sleep(0.2)
-    check("矩阵可取消且不越界", cst.get("status") in ("cancelled", "done")
-          and (cst.get("done") or 0) <= cj.get("total", 0), str(cst)[:160])
-
-    # === 11.7 参数寻优（v0.6.5） ===
+    # === 11.7 参数寻优（v0.6.5 / v0.6.6 优化器插件） ===
+    r = s.get(f"{base}/api/optimizers")
+    oo = r.json().get("optimizers") or []
+    check("优化器插件清单（内置三件）",
+          {o.get("id") for o in oo} >= {"optimizer/grid", "optimizer/random", "optimizer/bayes"}
+          and all(o.get("api") == 1 for o in oo if o.get("id") in
+                  {"optimizer/grid", "optimizer/random", "optimizer/bayes"}),
+          str(oo)[:240])
     r = s.post(f"{base}/api/backtest/optimize", json={
         "board_id": "btb", "timeframe": "1d", "script": "strategy/ma_cross",
         "space": {"fast": [5, 10], "slow": [30, 60]}, "method": "grid",
@@ -1028,6 +992,55 @@ def test(port: int, token: str = None):
     check("寻优未知方法被拒", r.status_code == 400 and "OPTIMIZE_METHOD_INVALID" in r.text,
           r.text[:160])
 
+    # 自定义优化器：PARAMS + 多目标 rank 接口验证（不内置到产品）
+    custom_opt = ('OPTIMIZER_API = 1\n'
+                  'NAME = "e2e_rank"\nDESC = "test multi-objective rank"\n'
+                  'PARAMS = {"w_sharpe": 0.6, "w_return": 0.4}\n'
+                  'PARAM_META = {"w_sharpe": {"type": "float", "min": 0, "max": 1},'
+                  ' "w_return": {"type": "float", "min": 0, "max": 1}}\n'
+                  'CAPS = {"continuous": False, "multi_objective": True,'
+                  ' "requires_full_space": False, "custom_score": False}\n'
+                  'def init(ctx):\n'
+                  '    return {"i": 0, "combos": [{"fast": 5, "slow": 30},'
+                  ' {"fast": 5, "slow": 60}, {"fast": 10, "slow": 30},'
+                  ' {"fast": 10, "slow": 60}]}\n'
+                  'def ask(state, ctx):\n'
+                  '    i = state["i"]\n'
+                  '    if i >= len(state["combos"]): return None\n'
+                  '    state["i"] = i + 1\n'
+                  '    return state["combos"][i]\n'
+                  'def rank(state, ctx, trials, phase):\n'
+                  '    ws = float(ctx["params"].get("w_sharpe") or 0)\n'
+                  '    wr = float(ctx["params"].get("w_return") or 0)\n'
+                  '    def val(t):\n'
+                  '        s = (t.get("oos_stats") if phase == "oos" else t.get("is_stats")) or {}\n'
+                  '        return ws * float(s.get("sharpe") or 0) + wr * float(s.get("total_return") or 0)\n'
+                  '    return [i for i, _ in sorted(enumerate(trials), key=lambda x: -val(x[1]))]\n')
+    r = s.post(f"{base}/api/scripts", json={"id": "optimizer/e2e_rank", "code": custom_opt})
+    check("自定义优化器保存即验", r.status_code == 200 and r.json().get("ok"), r.text[:200])
+    r = s.post(f"{base}/api/backtest/optimize", json={
+        "board_id": "btb", "timeframe": "1d", "script": "strategy/ma_cross",
+        "space": {"fast": [5, 10], "slow": [30, 60]},
+        "method": "optimizer/e2e_rank",
+        "objective": {"metrics": ["sharpe", "total_return"]},
+        "optimizer_params": {"w_sharpe": 0.8, "w_return": 0.2},
+        "budget": {"max_runs": 4, "max_seconds": 120},
+        "holdout": {"ratio": 0, "top_k": 1}, "seed": 5, "limit": 300,
+    })
+    co = r.json()
+    check("自定义优化器启动", r.status_code == 200 and co.get("total") == 4
+          and co.get("optimizer_params") == {"w_sharpe": 0.8, "w_return": 0.2},
+          r.text[:240])
+    cst = {}
+    for _ in range(120):
+        cst = s.get(f"{base}/api/backtest/optimize/{co.get('job_id')}").json()
+        if cst.get("status") != "running":
+            break
+        _tm.sleep(0.2)
+    check("自定义优化器 rank 生效", cst.get("status") == "done"
+          and cst.get("ranked_by") == "optimizer"
+          and (cst.get("optimizer") or {}).get("id") == "optimizer/e2e_rank"
+          and (cst.get("top") or [{}])[0].get("status") == "ok", str(cst)[:280])
     # 运镜：无浏览器必须 NO_BROWSER；有浏览器则 ok
     r = s.post(f"{base}/api/result/{rid1}/focus", json={"trade_index": 0})
     body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
@@ -1068,13 +1081,16 @@ def test(port: int, token: str = None):
     for bid in ["lk", "bare", "nobfboard", "bigb", "symboard", "ivb", "radb", "pf1", "pf2", "pf3"]:  # slowb 断言不残留，清理段不删
         r = s.delete(f"{base}/api/board/{bid}")
         check(f"delete {bid}", r.status_code == 200, r.text)
-    # e2e 自己写的压测脚本不留在仓库（save_script 无删除 API，直接清文件）
-    try:
-        os.remove(os.path.join(os.environ.get("AGENTKLINE_SCRIPTS_DIR")
-                               or os.path.join(os.path.dirname(__file__), "scripts"),
-                               "indicator", "tenp.py"))
-    except OSError:
-        pass
+    # e2e 自己写的夹具不留在仓库（save_script 无删除 API，直接清文件）
+    scripts_root = (os.environ.get("AGENTKLINE_SCRIPTS_DIR")
+                    or os.path.join(os.path.dirname(__file__), "scripts"))
+    for rel in ("indicator/tenp.py", "datasource/big.py", "datasource/ivsrc.py",
+                "datasource/nobf.py", "datasource/pfsrc.py", "datasource/slowsrc.py",
+                "datasource/syms_test.py", "optimizer/e2e_rank.py"):
+        try:
+            os.remove(os.path.join(scripts_root, rel))
+        except OSError:
+            pass
 
     print(f"\n{'='*60}\nResults: {passed} passed, {failed} failed, {passed+failed} total\n{'='*60}\n")
     return failed == 0

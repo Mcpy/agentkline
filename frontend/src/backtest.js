@@ -101,10 +101,23 @@ function readParams(container) {
     return out;
 }
 
+function groupHead(num, title, sub) {
+    const h = el('div', 'bt-group-head');
+    h.append(el('span', 'bt-group-num', String(num)),
+             el('span', 'bt-group-title', title));
+    if (sub) h.appendChild(el('span', 'bt-group-sub', sub));
+    return h;
+}
+
+function subHead(text) {
+    return el('div', 'bt-subhead', text);
+}
+
 export async function openBacktestDialog(opts = {}) {
     if (document.getElementById('bt-overlay')) return;
     let engines = [];
     let strategies = [];
+    let optimizers = [];
     let presets = [];
     try {
         [engines, strategies] = await Promise.all([loadEngines(), loadStrategies()]);
@@ -112,6 +125,9 @@ export async function openBacktestDialog(opts = {}) {
         toast(`${t('bt.load_fail')}: ${e.message}`);
         return;
     }
+    try {
+        optimizers = (await fetchJSON('/api/optimizers')).optimizers || [];
+    } catch (e) { optimizers = []; }
     if (state.currentBoard) {
         try {
             presets = (await fetchJSON('/api/presets')).presets || [];
@@ -130,28 +146,32 @@ export async function openBacktestDialog(opts = {}) {
     const bodyBox = el('div', 'bt-body');
     card.appendChild(bodyBox);
 
-    // v0.6.4 模式页签：单次 / 参数矩阵；v0.6.5 增加参数寻优（引擎/策略/方向/窗口/成本共用）
+    // v0.6.6 两段式：① 引擎参数（怎么跑）② 策略参数（跑什么）
+    const engineGroup = el('div', 'bt-group');
+    const stratGroup = el('div', 'bt-group');
+    bodyBox.append(engineGroup, stratGroup);
+
+    // 运行方式：单次 / 参数寻优（参数矩阵已并入寻优的 grid，不再单独存在）
     let mode = 'single';
-    const tabs = el('div', 'bt-tabs');
-    const tabSingle = el('button', 'bt-tab on', t('bt.tab.single'));
-    const tabMatrix = el('button', 'bt-tab', t('bt.tab.matrix'));
-    const tabOptimize = el('button', 'bt-tab', t('bt.tab.optimize'));
-    tabSingle.type = tabMatrix.type = tabOptimize.type = 'button';
-    tabs.append(tabSingle, tabMatrix, tabOptimize);
-    bodyBox.appendChild(tabs);
+    const tabSingle = el('button', 'bt-mode on', t('bt.tab.single'));
+    const tabOptimize = el('button', 'bt-mode', t('bt.tab.optimize'));
+    tabSingle.type = tabOptimize.type = 'button';
 
     // 引擎
     const engineSel = document.createElement('select');
+    engineSel.id = 'bt-engine';
     engines.forEach(e => {
         const o = document.createElement('option');
         o.value = e.id;
         o.textContent = `${e.id} ${e.version || ''}`.trim();
         engineSel.appendChild(o);
     });
-    bodyBox.appendChild(row(t('bt.engine'), engineSel));
+    engineGroup.appendChild(groupHead(1, t('bt.group.engine'), t('bt.group.engine_sub')));
+    engineGroup.appendChild(row(t('bt.engine'), engineSel));
 
     // 策略
     const stratSel = document.createElement('select');
+    stratSel.id = 'bt-strategy';
     strategies.forEach(s => {
         const o = document.createElement('option');
         o.value = s.id;
@@ -161,7 +181,10 @@ export async function openBacktestDialog(opts = {}) {
     });
     const stratRow = row(t('bt.strategy'), stratSel,
         strategies.length ? '' : t('bt.no_strategy'));
-    bodyBox.appendChild(stratRow);
+    stratGroup.appendChild(groupHead(2, t('bt.group.strategy'), t('bt.group.strategy_sub')));
+    stratGroup.appendChild(stratRow);
+    const strategyMeta = el('div', 'bt-strategy-meta');
+    stratGroup.appendChild(strategyMeta);
     if (!strategies.length) {
         stratSel.disabled = true;
     }
@@ -176,10 +199,16 @@ export async function openBacktestDialog(opts = {}) {
     presetImport.type = 'button';
     const presetWrap = el('div', 'bt-preset');
     presetWrap.append(presetSel, presetImport, presetManage);
-    bodyBox.appendChild(row(t('bt.preset'), presetWrap));
+    stratGroup.appendChild(row(t('bt.preset'), presetWrap,
+        t('bt.preset_hint')));
     const pasteHint = el('div', 'bt-hint');
     pasteHint.style.display = 'none';
-    bodyBox.appendChild(pasteHint);
+    stratGroup.appendChild(pasteHint);
+
+    // 运行方式放在策略区内：选策略 → 套方案 → 选运行方式 → 调参数
+    const modesWrap = el('div', 'bt-modes');
+    modesWrap.append(tabSingle, tabOptimize);
+    stratGroup.appendChild(row(t('bt.mode'), modesWrap));
     const boardScope = () => {
         const b = (state.boards || []).find(x => x.id === state.currentBoard);
         const lock = (b && b.source_lock) || {};
@@ -228,7 +257,8 @@ export async function openBacktestDialog(opts = {}) {
         if (!hit) return;
         pendingParams = hit.params || {};
         applyParams(pendingParams);
-        if (mode === 'matrix') paintCount();
+        updateOptimizeDefaults();
+        refreshSummary();
     };
 
     const importParams = async () => {
@@ -278,6 +308,8 @@ export async function openBacktestDialog(opts = {}) {
             ? t('bt.paste_from', { symbol: from.symbol, tf: from.timeframe || '' })
             : '';
         pasteHint.style.display = pasteHint.textContent ? '' : 'none';
+        refreshSummary();
+        updateOptimizeDefaults();
     };
     presetImport.onclick = importParams;
     paintPresets();
@@ -487,6 +519,7 @@ export async function openBacktestDialog(opts = {}) {
 
     // 方向
     const dirSel = document.createElement('select');
+    dirSel.id = 'bt-direction';
     [['long_only', t('bt.dir.long_only')],
      ['short_only', t('bt.dir.short_only')],
      ['both', t('bt.dir.both')]].forEach(([v, label]) => {
@@ -496,7 +529,7 @@ export async function openBacktestDialog(opts = {}) {
         dirSel.appendChild(o);
     });
     dirSel.value = 'long_only';
-    bodyBox.appendChild(row(t('bt.direction'), dirSel));
+    engineGroup.appendChild(row(t('bt.direction'), dirSel, t('bt.direction_hint')));
 
     // 时间范围：一行三格（开始 / 结束 / 根数），联动；默认 = 前端已加载的 K 线
     const MAX_RANGE_BARS = 20000;
@@ -540,7 +573,7 @@ export async function openBacktestDialog(opts = {}) {
     barsIn.title = t('bt.lookback');
     const rangeBox = el('div', 'bt-range');
     rangeBox.append(startD, endD, barsIn);
-    bodyBox.appendChild(row(t('bt.range'), rangeBox, t('bt.range_hint')));
+    engineGroup.appendChild(row(t('bt.range'), rangeBox, t('bt.range_hint')));
 
     let syncing = false;
     const syncRange = () => {
@@ -577,25 +610,37 @@ export async function openBacktestDialog(opts = {}) {
     const cash = numInput(10000, { min: 1, step: 'any' });
     const fee = numInput(5, { min: 0, step: '0.1' });
     const slip = numInput(5, { min: 0, step: '0.1' });
-    bodyBox.appendChild(row(t('bt.cash'), cash, t('bt.cash_hint')));
-    bodyBox.appendChild(row(t('bt.fee'), fee, t('bt.fee_hint')));
-    bodyBox.appendChild(row(t('bt.slip'), slip, t('bt.slip_hint')));
+    const costWrap = el('div', 'bt-triple');
+    const costCell = (label, ctl) => {
+        const c = el('label', 'bt-pair-cell');
+        c.appendChild(el('span', '', label));
+        c.appendChild(ctl);
+        return c;
+    };
+    costWrap.append(
+        costCell(t('bt.cash'), cash),
+        costCell(`${t('bt.fee')} (bp)`, fee),
+        costCell(`${t('bt.slip')} (bp)`, slip),
+    );
+    engineGroup.appendChild(row(t('bt.cost'), costWrap, t('bt.cost_hint')));
 
-    // 保护（可选，按百分比输入）
-    const sl = numInput(null, { min: 0, max: 99, step: '0.1', placeholder: t('bt.off') });
-    const tp = numInput(null, { min: 0, max: 999, step: '0.1', placeholder: t('bt.off') });
-    bodyBox.appendChild(row(t('bt.stop'), sl, t('bt.stop_hint')));
-    bodyBox.appendChild(row(t('bt.take'), tp));
-
-    // 参数（按策略声明动态渲染）
+    // 策略参数（按策略声明动态渲染）
+    const paramsHead = subHead(t('bt.params_block'));
+    stratGroup.appendChild(paramsHead);
     const paramsBox = el('div', 'bt-params');
-    bodyBox.appendChild(paramsBox);
-    const matrixBox = el('div', 'bt-matrix');
-    matrixBox.style.display = 'none';
-    bodyBox.appendChild(matrixBox);
+    stratGroup.appendChild(paramsBox);
+
+    // 参数寻优表单（运行方式=寻优时出现）；放在保护之前，寻优时先看到搜索设置
     const optimizeBox = el('div', 'bt-optimize');
     optimizeBox.style.display = 'none';
-    bodyBox.appendChild(optimizeBox);
+    stratGroup.appendChild(optimizeBox);
+
+    // 保护（可选，按百分比输入；PROTECTION 属于策略契约，留在策略区）
+    stratGroup.appendChild(subHead(t('bt.protect')));
+    const sl = numInput(null, { min: 0, max: 99, step: '0.1', placeholder: t('bt.off') });
+    const tp = numInput(null, { min: 0, max: 999, step: '0.1', placeholder: t('bt.off') });
+    stratGroup.appendChild(row(t('bt.stop'), sl, t('bt.stop_hint')));
+    stratGroup.appendChild(row(t('bt.take'), tp));
 
     const prog = el('div', 'bt-progress');
     prog.style.display = 'none';
@@ -608,8 +653,10 @@ export async function openBacktestDialog(opts = {}) {
     const cancel = el('button', 'btn-ghost', t('common.cancel'));
     const run = el('button', 'btn-primary', t('bt.run'));
     foot.append(cancel, run);
+    const summary = el('div', 'bt-summary');
     card.appendChild(prog);
     card.appendChild(errBox);
+    card.appendChild(summary);
     card.appendChild(foot);
     overlay.appendChild(card);
     document.body.appendChild(overlay);
@@ -627,31 +674,31 @@ export async function openBacktestDialog(opts = {}) {
     let meta = null;
     const paintParams = () => {
         paramsBox.textContent = '';
+        strategyMeta.textContent = '';
         meta = null;
         if (!stratSel.value) return;
         fetchJSON(`/api/strategy/meta?script=${encodeURIComponent(stratSel.value)}`)
             .then(j => {
                 meta = j;
                 if (j.error) { errBox.textContent = j.error; return; }
+                strategyMeta.textContent = '';
                 const desc = el('div', 'bt-meta');
                 const bits = [];
                 if (j.name) bits.push(j.name);
                 if (j.warmup != null) bits.push(`WARMUP ${j.warmup}`);
                 if (j.bars_per_year) bits.push(`${j.bars_per_year}/yr`);
                 desc.textContent = bits.join(' · ');
-                paramsBox.appendChild(desc);
-                if (j.desc) paramsBox.appendChild(el('div', 'bt-hint', j.desc));
+                strategyMeta.appendChild(desc);
+                if (j.desc) strategyMeta.appendChild(el('div', 'bt-hint', j.desc));
                 if (j.errors && j.errors.length) {
                     const e = j.errors[0];
                     errBox.textContent = `${e.code}: ${e.message}`;
                 }
-                paintMatrix(j);
                 paintOptimize(j);
                 const params = j.params || {};
                 const metaMap = j.param_meta || {};
                 const keys = Object.keys(params);
                 if (keys.length) {
-                    paramsBox.appendChild(el('div', 'bt-sec', t('bt.params')));
                     keys.forEach(k => {
                         const ctl = paramControl(k, params[k], metaMap[k]);
                         ctl.dataset.pname = k;
@@ -662,78 +709,45 @@ export async function openBacktestDialog(opts = {}) {
                     });
                 }
                 if (pendingParams) applyParams(pendingParams);
+                updateOptimizeDefaults();
+                refreshSummary();
             })
             .catch(e => { errBox.textContent = `meta: ${e.message}`; });
     };
-    // ---- 参数矩阵输入（v0.6.4）：多值用逗号分隔，组合数实时预览 ----
-    const MATRIX_MAX = 60;
-    const matrixInputs = () => [...matrixBox.querySelectorAll('input[data-mgrid]')];
-    const readGrid = () => {
-        const grid = {};
-        matrixInputs().forEach(inp => {
-            const raw = inp.value.trim();
-            if (!raw) return;
-            grid[inp.dataset.mgrid] = raw.split(',')
-                .map(x => x.trim()).filter(x => x !== '')
-                .map(x => (Number.isFinite(Number(x)) ? Number(x) : x));
-        });
-        return grid;
-    };
-    const gridCount = (grid) => {
-        const keys = Object.keys(grid);
-        if (!keys.length) return 0;
-        return keys.reduce((n, k) => n * Math.max(1, grid[k].length), 1);
-    };
-    const paintCount = () => {
-        const cnt = document.getElementById('bt-matrix-count');
-        if (!cnt) return;
-        const n = gridCount(readGrid());
-        if (!n) {
-            cnt.textContent = t('bt.matrix.empty');
-            cnt.classList.remove('err');
-            return;
-        }
-        if (n > MATRIX_MAX) {
-            cnt.textContent = t('bt.matrix.limit', { n, max: MATRIX_MAX });
-            cnt.classList.add('err');
-            return;
-        }
-        cnt.textContent = t('bt.matrix.count', { n });
-        cnt.classList.remove('err');
-    };
-    const paintMatrix = (meta) => {
-        matrixBox.textContent = '';
-        if (!meta) return;
-        matrixBox.appendChild(el('div', 'bt-sec', t('bt.matrix.title')));
-        matrixBox.appendChild(el('div', 'bt-hint', t('bt.matrix.hint')));
-        const params = meta.params || {};
-        const metaMap = meta.param_meta || {};
-        const numeric = Object.keys(params).filter(k => {
-            const typ = (metaMap[k] && metaMap[k].type) || typeof params[k];
-            return typ === 'int' || typ === 'float';
-        });
-        if (!numeric.length) {
-            matrixBox.appendChild(el('div', 'bt-hint', t('bt.matrix.no_numeric')));
-        }
-        numeric.forEach(k => {
-            const m = metaMap[k] || {};
-            const inp = document.createElement('input');
-            inp.type = 'text';
-            inp.dataset.mgrid = k;
-            inp.placeholder = `${params[k]} (${t('bt.matrix.values_hint')})`;
-            const bound = m.min != null ? `${m.min} ~ ${m.max ?? '∞'}` : '';
-            matrixBox.appendChild(row(`${m.label || k}${bound ? ` (${bound})` : ''}`, inp));
-            inp.addEventListener('input', paintCount);
-        });
-        const cnt = el('div', 'bt-hint bt-matrix-count');
-        cnt.id = 'bt-matrix-count';
-        matrixBox.appendChild(cnt);
-        paintCount();
-    };
-
     // ---- v0.6.5 参数寻优：空间/目标/约束/预算/样本外 ----
     const OPT_METRICS = ['total_return', 'annual_return', 'sharpe', 'sortino',
                          'calmar', 'max_drawdown', 'profit_factor', 'win_rate'];
+    const currentParamValues = () => ({
+        ...((meta && meta.params) || {}),
+        ...(pendingParams || {}),
+        ...readParams(paramsBox),
+    });
+    let optParamsBox = null;
+    let lastOptimizerId = 'optimizer/grid';
+    const renderOptimizerParams = (id) => {
+        if (!optParamsBox) return;
+        optParamsBox.textContent = '';
+        const o = optimizers.find(x => x.id === id);
+        const params = (o && o.params) || {};
+        const pmeta = (o && o.param_meta) || {};
+        const keys = Object.keys(params);
+        if (!keys.length) {
+            optParamsBox.style.display = 'none';
+            return;
+        }
+        optParamsBox.style.display = '';
+        optParamsBox.appendChild(subHead(t('bt.opt.params')));
+        keys.forEach(k => {
+            const ctl = paramControl(k, params[k], pmeta[k]);
+            ctl.dataset.pname = k;
+            ctl.dataset.opname = k;
+            const label = (pmeta[k] && pmeta[k].label) || k;
+            optParamsBox.appendChild(row(label, ctl,
+                pmeta[k] && pmeta[k].min != null
+                    ? `${pmeta[k].min} ~ ${pmeta[k].max ?? '∞'}` : ''));
+        });
+    };
+    const readOptimizerParams = () => (optParamsBox ? readParams(optParamsBox) : {});
     const paintOptimize = (meta) => {
         optimizeBox.textContent = '';
         if (!meta) return;
@@ -748,15 +762,34 @@ export async function openBacktestDialog(opts = {}) {
 
         const method = document.createElement('select');
         method.id = 'bt-opt-method';
-        [['bayes', t('bt.opt.method.bayes')],
-         ['grid', t('bt.opt.method.grid')],
-         ['random', t('bt.opt.method.random')]].forEach(([v, label]) => {
+        if (optimizers.length) {
+            optimizers.forEach(item => {
+                const o = document.createElement('option');
+                o.value = item.id;
+                o.textContent = `${item.name}${item.source === 'custom'
+                    ? ` · ${t('bt.opt.custom')}` : ''}`;
+                o.title = item.desc || item.id;
+                method.appendChild(o);
+            });
+            method.value = optimizers.some(x => x.id === lastOptimizerId)
+                ? lastOptimizerId : optimizers[0].id;
+        } else {
             const o = document.createElement('option');
-            o.value = v;
-            o.textContent = label;
+            o.value = '';
+            o.textContent = t('bt.opt.no_optimizer');
             method.appendChild(o);
-        });
+            method.disabled = true;
+        }
+        lastOptimizerId = method.value;
+        method.onchange = () => {
+            lastOptimizerId = method.value;
+            renderOptimizerParams(method.value);
+            refreshSummary();
+        };
         optimizeBox.appendChild(row(t('bt.opt.method'), method, t('bt.opt.method_hint')));
+        optParamsBox = el('div', 'bt-opt-params');
+        optimizeBox.appendChild(optParamsBox);
+        renderOptimizerParams(method.value);
 
         const metric = document.createElement('select');
         metric.id = 'bt-opt-metric';
@@ -814,15 +847,16 @@ export async function openBacktestDialog(opts = {}) {
         optimizeBox.appendChild(el('div', 'bt-sec', t('bt.opt.space')));
         optimizeBox.appendChild(el('div', 'bt-hint', t('bt.opt.space_hint')));
         if (!numeric.length) {
-            optimizeBox.appendChild(el('div', 'bt-hint', t('bt.matrix.no_numeric')));
+            optimizeBox.appendChild(el('div', 'bt-hint', t('bt.opt.no_numeric')));
         }
+        const cur = currentParamValues();
         numeric.forEach(k => {
             const m = metaMap[k] || {};
             const box = el('div', 'bt-space');
             box.dataset.osk = k;
             const bound = m.min != null ? `${m.min} ~ ${m.max ?? '∞'}` : '';
             box.appendChild(el('div', 'bt-space-head',
-                `${m.label || k}${bound ? ` (${bound})` : ''} · ${t('bt.opt.default')}=${params[k]}`));
+                `${m.label || k}${bound ? ` (${bound})` : ''} · ${t('bt.opt.default')}=${cur[k] ?? params[k]}`));
             const grid = el('div', 'bt-space-grid');
             const mk = (label, key, attrs) => {
                 const wrap = el('label', 'bt-space-cell');
@@ -844,6 +878,21 @@ export async function openBacktestDialog(opts = {}) {
             grid.appendChild(vals);
             box.appendChild(grid);
             optimizeBox.appendChild(box);
+        });
+    };
+
+    // 方案/参数变化后，刷新寻优空间里的“默认=x”标签（不重建输入，避免丢用户已填范围）
+    const updateOptimizeDefaults = () => {
+        if (!meta || !optimizeBox) return;
+        const cur = currentParamValues();
+        optimizeBox.querySelectorAll('[data-osk]').forEach(box => {
+            const k = box.dataset.osk;
+            const m = ((meta && meta.param_meta) || {})[k] || {};
+            const head = box.querySelector('.bt-space-head');
+            if (!head) return;
+            const bound = m.min != null ? `${m.min} ~ ${m.max ?? '∞'}` : '';
+            head.textContent = `${m.label || k}${bound ? ` (${bound})` : ''}`
+                + ` · ${t('bt.opt.default')}=${cur[k] ?? ((meta.params || {})[k])}`;
         });
     };
 
@@ -900,9 +949,16 @@ export async function openBacktestDialog(opts = {}) {
         card.appendChild(el('h3', '', t('bt.opt.report')));
         const metricKey = (st.objective && st.objective.metric) || 'sharpe';
         const best = st.best;
+        const optName = (st.optimizer && st.optimizer.name) || st.method;
+        const optSrc = st.optimizer && st.optimizer.source === 'custom'
+            ? ` · ${t('bt.opt.custom')}` : '';
+        const opKeys = Object.keys(st.optimizer_params || {});
+        const opStr = opKeys.length
+            ? ` · ${t('bt.opt.params')}: ${fmtParams(st.optimizer_params)}` : '';
         card.appendChild(el('div', 'dialog-msg',
-            `${t('bt.opt.method')}: ${st.method} · ${metricKey} · ${t('bt.opt.elapsed')} `
+            `${t('bt.opt.method')}: ${optName}${optSrc}${opStr} · ${metricKey} · ${t('bt.opt.elapsed')} `
             + `${((st.elapsed_ms || 0) / 1000).toFixed(1)}s`
+            + (st.ranked_by === 'optimizer' ? ` · ${t('bt.opt.rank_optimizer')}` : '')
             + (st.seed != null ? ` · seed=${st.seed}` : '')));
         if (best) {
             const box = el('div', 'bt-opt-best');
@@ -1052,109 +1108,54 @@ export async function openBacktestDialog(opts = {}) {
         document.body.appendChild(ov);
     };
 
-    const runLabel = () => (mode === 'matrix' ? t('bt.run_matrix')
-        : mode === 'optimize' ? t('bt.run_optimize') : t('bt.run'));
+    const refreshSummary = () => {
+        if (!summary) return;
+        const scriptName = (stratSel.options[stratSel.selectedIndex] || {}).textContent || '—';
+        const p = readParams(paramsBox);
+        const pstr = Object.entries(p).map(([k, v]) => `${k}=${v}`).join(' ');
+        const modeText = mode === 'optimize' ? t('bt.tab.optimize') : t('bt.tab.single');
+        let budget = '';
+        if (mode === 'optimize') {
+            const runs = document.getElementById('bt-opt-runs');
+            if (runs && runs.value) budget = ` · ${t('bt.summary.runs', { n: runs.value })}`;
+        }
+        summary.textContent = `${t('bt.summary_prefix')}: ${modeText}${budget}`
+            + ` · ${scriptName}${pstr ? ` · ${pstr}` : ''}`
+            + ` · ${cash.value || '—'} / ${fee.value || '0'}bp`;
+    };
+
+    const runLabel = () => (mode === 'optimize' ? t('bt.run_optimize') : t('bt.run'));
     const setMode = (m) => {
         mode = m;
         tabSingle.classList.toggle('on', m === 'single');
-        tabMatrix.classList.toggle('on', m === 'matrix');
         tabOptimize.classList.toggle('on', m === 'optimize');
+        paramsHead.style.display = m === 'single' ? '' : 'none';
         paramsBox.style.display = m === 'single' ? '' : 'none';
-        matrixBox.style.display = m === 'matrix' ? '' : 'none';
         optimizeBox.style.display = m === 'optimize' ? '' : 'none';
+        updateOptimizeDefaults();
         run.textContent = runLabel();
+        refreshSummary();
+        // 切模式后把对应表单带到可视区（引擎段较长，避免切了寻优却看不到表单）
+        const target = m === 'optimize' ? optimizeBox : paramsHead;
+        requestAnimationFrame(() => {
+            const br = bodyBox.getBoundingClientRect();
+            const tr = target.getBoundingClientRect();
+            bodyBox.scrollTop += (tr.top - br.top) - 8;
+        });
     };
     tabSingle.onclick = () => setMode('single');
-    tabMatrix.onclick = () => setMode('matrix');
     tabOptimize.onclick = () => setMode('optimize');
 
-    stratSel.addEventListener('change', () => { paintPresets(); paintParams(); });
+    stratSel.addEventListener('change', () => {
+        pendingParams = null;
+        paintPresets();
+        paintParams();
+        refreshSummary();
+    });
     if (strategies.length) paintParams();
-
-    const runMatrixNow = async () => {
-        errBox.textContent = '';
-        const grid = readGrid();
-        const n = gridCount(grid);
-        if (!n) { errBox.textContent = t('bt.matrix.empty'); return; }
-        if (n > MATRIX_MAX) {
-            errBox.textContent = t('bt.matrix.limit', { n, max: MATRIX_MAX });
-            return;
-        }
-        run.disabled = true;
-        cancel.disabled = true;
-        const old = run.textContent;
-        run.textContent = t('bt.matrix.starting');
-        try {
-            const body = {
-                board_id: state.currentBoard,
-                timeframe: state.currentTimeframe,
-                engine: engineSel.value,
-                script: stratSel.value || null,
-                direction: dirSel.value,
-                initial_cash: parseFloat(cash.value),
-                fee_bps: parseFloat(fee.value),
-                slippage_bps: parseFloat(slip.value),
-                grid,
-                start_time: startMs,
-                end_time: endMs + dayMs - 1,
-                limit: clamp(parseInt(barsIn.value, 10) || MAX_RANGE_BARS, 1, MAX_RANGE_BARS),
-            };
-            const protection = {};
-            if (sl.value !== '') protection.stop_loss_pct = parseFloat(sl.value) / 100;
-            if (tp.value !== '') protection.take_profit_pct = parseFloat(tp.value) / 100;
-            if (Object.keys(protection).length) body.protection = protection;
-            const j = await fetchJSON('/api/backtest/matrix', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-            });
-            const jobId = j.job_id;
-            const pText = el('span', 'bt-progress-text',
-                t('bt.matrix.running', { done: 0, total: j.total }));
-            const pCancel = el('button', 'btn-ghost', t('bt.matrix.cancel'));
-            pCancel.type = 'button';
-            pCancel.onclick = async () => {
-                pCancel.disabled = true;
-                try {
-                    await fetchJSON(`/api/backtest/matrix/${jobId}/cancel`, { method: 'POST' });
-                } catch (e) { /* 由轮询收尾 */ }
-            };
-            prog.textContent = '';
-            prog.append(pText, pCancel);
-            prog.style.display = '';
-            stopProg();
-            progTimer = setInterval(async () => {
-                try {
-                    const st = await fetchJSON(`/api/backtest/matrix/${jobId}`);
-                    const cur = st.current
-                        ? Object.entries(st.current).map(([k, v]) => `${k}=${v}`).join(' ')
-                        : '';
-                    pText.textContent = t('bt.matrix.running',
-                        { done: st.done, total: st.total }) + (cur ? ` · ${cur}` : '');
-                    if (st.status !== 'running') {
-                        stopProg();
-                        const okN = (st.results || []).length;
-                        const errN = (st.errors || []).length;
-                        toast(st.status === 'cancelled'
-                            ? t('bt.matrix.cancelled', { done: st.done, total: st.total })
-                            : t('bt.matrix.done', { ok: okN, err: errN }));
-                        close();
-                    }
-                } catch (e) {
-                    stopProg();
-                    errBox.textContent = e.message;
-                    run.disabled = false;
-                    cancel.disabled = false;
-                    run.textContent = old;
-                }
-            }, 600);
-        } catch (e) {
-            errBox.textContent = e.message;
-            run.disabled = false;
-            cancel.disabled = false;
-            run.textContent = old;
-        }
-    };
+    bodyBox.addEventListener('input', () => { refreshSummary(); updateOptimizeDefaults(); });
+    bodyBox.addEventListener('change', () => { refreshSummary(); updateOptimizeDefaults(); });
+    refreshSummary();
 
     const runOptimizeNow = async () => {
         errBox.textContent = '';
@@ -1183,6 +1184,7 @@ export async function openBacktestDialog(opts = {}) {
             slippage_bps: parseFloat(slip.value),
             space: sp.space,
             method: document.getElementById('bt-opt-method').value,
+            optimizer_params: readOptimizerParams(),
             objective: { metric, direction },
             constraints,
             budget: { max_runs: Math.max(2, Math.min(200, maxRuns)),
@@ -1263,7 +1265,6 @@ export async function openBacktestDialog(opts = {}) {
     };
 
     run.onclick = async () => {
-        if (mode === 'matrix') { await runMatrixNow(); return; }
         if (mode === 'optimize') { await runOptimizeNow(); return; }
         errBox.textContent = '';
         run.disabled = true;

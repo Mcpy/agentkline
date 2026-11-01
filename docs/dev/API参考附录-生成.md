@@ -3,9 +3,6 @@
 | 方法 | 路径 | 摘要 |
 |---|---|---|
 | POST | `/api/backtest` | Run Backtest |
-| POST | `/api/backtest/matrix` | Run Backtest Matrix |
-| GET | `/api/backtest/matrix/{job_id}` | Matrix Status |
-| POST | `/api/backtest/matrix/{job_id}/cancel` | Matrix Cancel |
 | POST | `/api/backtest/optimize` | Run Optimization |
 | GET | `/api/backtest/optimize/{job_id}` | Optimization Status |
 | POST | `/api/backtest/optimize/{job_id}/cancel` | Optimization Cancel |
@@ -42,6 +39,7 @@
 | GET | `/api/kline` | Get Kline |
 | GET | `/api/markers` | Get Markers |
 | POST | `/api/markers` | Set Markers |
+| GET | `/api/optimizers` | List Optimizers |
 | GET | `/api/overview` | Overview |
 | GET | `/api/presets` | List Presets |
 | POST | `/api/presets` | Save Preset |
@@ -137,15 +135,13 @@
 | `list_engines` | 列出可用回测引擎：id/version/api/caps/assumptions。 |
 | `list_strategies` | 列出可用策略脚本（strategy/xxx）：id/display/desc/params。 |
 | `strategy_meta` | 读取策略脚本的声明（NAME/DESC/WARMUP/PARAMS/PARAM_META/PROTECTION/BARS_PER_YEAR） |
+| `list_optimizers` | 列出可用优化器脚本（optimizer/xxx，内置 + 自定义）： |
 | `run_backtest` | 跑一次回测，结果按结果实例登记并广播。 |
 | `list_presets` | 列出参数方案（按画板标的过滤）。参数方案=命名后的参数集，绑定 源+标的+周期+策略， |
 | `save_preset` | 把一套参数存为该标的的参数方案。params 按策略声明校验并补全默认值； |
 | `update_preset` | 改参数方案：改名/改参数/备注/设为当前方案（is_default=true 会清掉同作用域旧默认）。 |
 | `delete_preset` | 删除参数方案（只删方案，不碰回测结果，也不删数据）。 |
 | `focus_result_trade` | 把用户屏幕带到某条结果的某一笔交易：选中该结果、打开详情、选中该笔并在图上定位。 |
-| `run_backtest_matrix` | 按参数矩阵批量跑回测（同一份数据、串行、进度可查、可取消）。 |
-| `matrix_status` | 查参数矩阵作业：status=running/done/cancelled；done/total/current； |
-| `matrix_cancel` | 请求取消参数矩阵：当前这一组跑完即停，已出结果保留（不删）。 |
 | `run_optimization` | 参数寻优：在同一份冻结数据上按目标/约束搜索参数，Top K 做样本外验证。 |
 | `optimization_status` | 查参数寻优作业：status=running/done/cancelled/failed；phase=is/oos/register/done； |
 | `optimization_cancel` | 请求取消参数寻优：当前试次跑完即停；已登记的 Top K 结果保留。 |

@@ -1,6 +1,6 @@
 # AgentKline API 文档
 
-> 版本：v0.6.5 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server（API 自 v0.4.0 起保持兼容）
+> 版本：v0.6.6 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server（API 自 v0.4.0 起保持兼容）
 > 破坏性硬切版本：无兼容层。旧路径（/api/ohlcv、/api/load-csv、/history、datasource 端点、indicator/update 杂交路径）一律 404/405。
 > 机器可读附录：`python scripts/gen_api_ref.py` 可从运行中服务生成 REST 路由表 + MCP 工具表（防漂移）。
 
@@ -78,10 +78,10 @@ CSV 入图 = 内置 `datasource/csv` 脚本（path 归操作参数，IDENTITY=[]
 
 | 方法 | 路径 | 端口 | 说明 |
 |---|---|---|---|
-| GET | `/api/scripts` | exec | 双根脚本表 `[{id,kind,source,display,desc,params,caps,identity}]` |
+| GET | `/api/scripts` | exec | 双根脚本表 `[{id,kind,source,display,desc,params,param_meta,caps,identity}]`（kind 含 optimizer） |
 | GET | `/api/scripts/meta` | read | 脚本元数据精简面 `[{id,kind,source,display,desc,params}]`：web 端口可读（设置面板补 PARAMS 默认值），无 MCP 面 |
 | GET | `/api/indicator-catalog` | read | 指标目录（内置 75 项 = 74 Vela 经典 + KDJ，并合并自定义脚本）：`{vela, groups[], indicators[], custom_count}`；每项含 type/script/title/short/title_zh/group/overlay/inputs（参数 schema，颜色已剔除）与 source（builtin/custom）。自定义脚本归 group=custom，与内置同 id 时标 shadowed=true，不重复出卡。指标库面板与设置面板共用，无 MCP 面 |
-| POST | `/api/scripts` | exec | `save_script`：`{id,code}` 只写 custom，保存即校验（CAPS_MISMATCH/SAVE_SYNTAX/SAVE_NO_MAIN/SAVE_EMPTY）；`strategy/*` 另按 signal 契约做 AST 校验（MODE_MISMATCH/MAIN_MISSING/PARAMS_INVALID/PROTECTION_*，不执行代码） |
+| POST | `/api/scripts` | exec | `save_script`：`{id,code}` 只写 custom，保存即校验（CAPS_MISMATCH/SAVE_SYNTAX/SAVE_NO_MAIN/SAVE_EMPTY）；`strategy/*` 按 signal 契约 AST 校验；`optimizer/*` 要求 `OPTIMIZER_API=1`+`ask`（SAVE_OPTIMIZER_*） |
 | POST | `/api/run-script` | exec | 窄身 `{script,params}`：只执行返回，图上不留痕 |
 | GET | `/api/search` | read | 标的搜索 `?q=&refresh=`：rows=`[{symbol,source,display,has_board}]`；索引=CAPS.symbols 源首用全量+TTL 日级；搜索不穿透交易所 |
 | GET | `/api/skills` / `/api/skills/{name}` | read | skills 列表/全文（MCP 薄镜像） |
@@ -126,7 +126,7 @@ CAPS 声明⇒实现（backfill⇒until 参/symbols⇒list_symbols/ticker⇒tick
 数据源 until 回溯可重放跨窗连续；单槽 max_bars_per_slot=50000 截旧+dropped；重算尾窗 max_window=5000；
 数据家族单脚本分片范式；L1 沙箱自律。
 
-## 10. MCP 工具（Streamable HTTP `/mcp`，agent 端口，66 个）
+## 10. MCP 工具（Streamable HTTP `/mcp`，agent 端口，64 个）
 
 改名：set_datasource→**set_kline_source**；load_history→**backfill**；run_script 窄身；list_scripts payload 升级。
 新增：save_script、search_symbols。换参：add/update/delete_indicator 与 get_indicators 换 inst_id/instances。
@@ -134,8 +134,8 @@ payload 调整：create_board(+symbol/source/params/poll_s)、create_timeframe�
 原样保留 21 + list_skills/load_skill/get_kline/take_snapshot 等。
 v0.6.0 增结果实例 5 个（import_result/list_results/get_result/rename_result/delete_result）；
 v0.6.1 增引擎回测 4 个（list_engines/list_strategies/strategy_meta/run_backtest，见 §17）；
-v0.6.4 增参数矩阵 3 个 + 运镜 1 个 + 参数方案 4 个；
-v0.6.5 增参数寻优 3 个（run_optimization/optimization_status/optimization_cancel，见 §17.7）。
+v0.6.4 增运镜 1 个 + 参数方案 4 个；
+v0.6.5 增参数寻优 3 个；v0.6.6 增 list_optimizers（优化器插件清单）。
 **MCP-only 判决**：take_snapshot（无 REST 触发）。**REST-only**：get_kline_source、/api/view 上报。
 docstring 为单一真相；REST 为薄镜像；`test_e2e.py` 含两表面对齐断言。
 
@@ -253,6 +253,7 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
 |---|---|---|---|
 | GET | `/api/engines` | web+agent | 引擎清单 `{engines:[{id,version,api,caps,assumptions,load_error}]}`；后端通过 `ak-engine list` 子进程发现，不 import 引擎运行时 |
 | GET | `/api/strategies` | web+agent | 策略脚本清单 `{strategies:[...]}`（同 list_scripts 行，仅 kind=strategy） |
+| GET | `/api/optimizers` | web+agent | 优化器脚本清单 `{optimizers:[{id,name,source,params,param_meta,caps,api}]}`（内置/自定义） |
 | GET | `/api/strategy/meta` | web+agent | `?script=strategy/x` 或 `?source=<全文>`：返回 NAME/DESC/WARMUP/PARAMS/PARAM_META/PROTECTION/BARS_PER_YEAR + `errors`（纯 AST，不执行） |
 | POST | `/api/backtest` | web+agent | 跑一次回测，结果按结果实例登记并广播 |
 
@@ -293,15 +294,9 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
 插件用 entry point group `agentkline.engines` 注册；内置 `builtin` 随主包安装，第三方引擎单独成包、
 只依赖 `agentkline-engine-core`。详见 `docs/dev/引擎插件开发指南.md`。
 
-### 17.5 参数矩阵 / 运镜 / 旧快照（v0.6.4）
+### 17.5 运镜 / 旧快照（v0.6.4）
 
-- `POST /api/backtest/matrix`：体同单次回测，另给 `grid={"fast":[5,10],"slow":[30,60]}` 或
-  `params_list=[{...},{...}]`（二选一）；组合上限 60（`limits.matrix_max_runs`）。
-  立即返回 `{job_id,total,runs}`；每个结果带 `batch={id,index,total,params,grid}`。
-- `GET /api/backtest/matrix/{job_id}`：`status=running|done|cancelled`、`done/total/current`、
-  `results:[{index,result_id,params,stats}]`、`errors:[{index,params,error}]`。
-- `POST /api/backtest/matrix/{job_id}/cancel`：当前组跑完即停，已出结果保留。
-- WS：`matrix_started` / `matrix_progress` / `matrix_done`（同 job_id）。
+- 参数矩阵已于 v0.6.6 移除：全组合扫描统一走参数寻优的 grid（或 values）方法。
 - `POST /api/result/{result_id}/focus`（agent 端口）：体 `{"trade_index":0}`，把用户屏幕带到该笔
   （选中结果 → 打开详情 → 选中该笔 → 图上定位）；无浏览器在线返回 `NO_BROWSER`。
 - 结果新增加法字段：`data.fingerprint={from,to,bars,head_close,tail_close}`；
@@ -323,17 +318,20 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
 - v0.6.5：方案附 `script_sha256`；`GET /api/presets` 每条再加 `script_changed`（策略内容变过为 true；
   旧方案无哈希时 false，不误报）。
 
-### 17.7 参数寻优（v0.6.5）
+### 17.7 参数寻优 / 优化器插件（v0.6.5，v0.6.6 插件化）
 
-- `POST /api/backtest/optimize`：体见下；立即返回 `{job_id,method,total,phase:"is",space,objective,
-  constraints,budget,holdout}`。
+- `GET /api/optimizers`：优化器脚本清单（内置 + 自定义）：
+  `[{id,name,desc,source,params,param_meta,caps,api}]`；id=`optimizer/xxx`，custom shadow builtin。
+- `POST /api/backtest/optimize`：立即返回 `{job_id,method,optimizer_id,optimizer,total,phase:"is",
+  space,objective,constraints,budget,holdout,optimizer_params}`。
 
 ```json
 {
   "board_id": "demo_m3", "timeframe": "1d", "script": "strategy/ma_cross",
   "space": {"fast": {"min": 5, "max": 30, "step": 1},
             "slow": {"values": [20, 30, 60]}},
-  "method": "bayes",
+  "method": "optimizer/bayes",
+  "optimizer_params": {},
   "objective": {"metric": "sharpe", "direction": "max"},
   "constraints": {"min_trades": 10, "max_drawdown": 0.4},
   "budget": {"max_runs": 40, "max_seconds": 600},
@@ -342,24 +340,29 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
 }
 ```
 
-- 指标白名单：`total_return/annual_return/sharpe/sortino/calmar/max_drawdown/profit_factor/win_rate`；
-  `max_drawdown` 为负数，默认方向 `max`（越接近 0 越好）。
-- `method=grid|random|bayes`：grid 组合数超过 `max_runs` 报 `OPTIMIZE_BUDGET`；
-  bayes 为内置 TPE-lite（不依赖 optuna）；`seed` 可复现。
+- `method` 接受 `optimizer/xxx`；旧别名 `grid/random/bayes` 自动映射到同名内置。
+  内核对 `optimizer_params` 按脚本 `PARAMS/PARAM_META` 校验并补默认值。
+- 指标白名单（单目标）：`total_return/annual_return/sharpe/sortino/calmar/max_drawdown/
+  profit_factor/win_rate`；`max_drawdown` 为负数，默认方向 `max`。
+- 优化器脚本声明 `CAPS`：`continuous`（候选可不在离散列表）、`multi_objective`（objective
+  自由结构 + `rank` 排序）、`requires_full_space`（grid）、`custom_score`（预留）。
+  多目标时试次 `score=None`，由脚本 `rank(state,ctx,trials,phase)` 决定 Top K；报告
+  `ranked_by="optimizer"`、`optimizer.source=custom`。
 - `budget.max_runs` 默认 40、上限 `limits.optimize_max_runs`（默认 200）；`max_seconds` 10~3600。
 - `holdout.ratio` 0~0.5（0=不验证），`top_k` 1~10；样本内外各至少 20 根，否则
   `OPTIMIZE_HOLDOUT_TOO_SMALL`。
 - `GET /api/backtest/optimize/{job_id}`：`status=running|done|cancelled|failed`；
   `phase=is|oos|register|done`；`trials` 每行含 `status=ok|rejected|invalid|failed`、`score`、
-  `is_stats`、`oos_*`、`overfit_gap`、`result_id`；`top/best` 按样本外分数排序；
-  `warnings`（`OOS_DEGRADED`/`OOS_NO_EDGE`/`OOS_INVALID`/`NO_OOS_VALID`/`NO_HOLDOUT`/
-  `TIME_BUDGET`/`NO_VALID_TRIAL`）。
+  `is_stats`、`oos_*`、`overfit_gap`、`result_id`；`top/best` 按 rank 或样本外分数排序；
+  `optimizer`、`optimizer_params`、`ranked_by`、`extra`；`warnings` 含原有 OOS/TIME_BUDGET/
+  NO_VALID_TRIAL 与 `OPTIMIZE_RANK_FAILED`/`OPTIMIZER_SUMMARIZE_FAILED`。
 - `POST /api/backtest/optimize/{job_id}/cancel`：当前试次跑完即停，已登记结果保留。
 - 只登记 Top K 的样本外结果（无 holdout 时 Top K 样本内）；结果 `batch` 加
   `kind:"optimize"`、`phase`、`method`、`params`、`is_stats`、`is_score`、`oos_stats`、
   `oos_score`、`overfit_gap`、`overfit_ratio`。完整试次只在内存报告里，重启即失。
 - WS：`optimize_started` / `optimize_progress` / `optimize_done`。
-- MCP 工具：`run_optimization` / `optimization_status` / `optimization_cancel`。
+- MCP 工具：`list_optimizers` / `run_optimization` / `optimization_status` / `optimization_cancel`。
+- 插件契约与自定义示例见 `docs/dev/优化器插件开发指南.md` 与 skill `optimizer-authoring`。
 
 ## 内置数据源（v0.4.4）
 | `datasource/binance` | Binance 直连（requests 非 ccxt 库）：现货+永续全量、K线全周期、批量实时；含股票代币（现货 B 后缀 78 + TradFi 永续 205，display 带官方分类标注） |

@@ -36,7 +36,7 @@ def _to_ms(v):
 class AgentKlineService:
     """AgentKline 业务核心"""
 
-    VERSION = "0.6.5"
+    VERSION = "0.6.6"
 
     def __init__(self, scripts_dir: str, limits: dict = None, data_dir: str = None):
         limits = limits or {}
@@ -72,10 +72,6 @@ class AgentKlineService:
         self.DEFAULT_ONLINE_TFS = ["15m", "1h", "4h", "1d", "1w"]  # 实时源建板默认周期
         self.notify: Callable[[dict], None] = lambda msg: None  # 由传输层注入
         self.current_view: dict = {}  # 用户当前视图（前端上报）
-        # v0.6.4 参数矩阵作业（内存态；结果本身落盘，重启只丢 job 不丢结果）
-        self.matrix_max_runs = int(limits.get("matrix_max_runs", 60))
-        self._matrix_jobs: dict[str, dict] = {}
-        self._matrix_lock = _th.Lock()
         # v0.6.5 参数寻优作业（内存态；只把 Top K 的样本外结果登记进结果栏）
         self.optimize_max_runs = int(limits.get("optimize_max_runs", 200))
         self._optimize_jobs: dict[str, dict] = {}
@@ -913,9 +909,9 @@ class AgentKlineService:
             return None, {"error": f"PRESET_INVALID: 未知参数 {unknown}（可用: {list(defaults)}）"}
         clean = {}
         for k, v in params.items():
-            val, err = self._matrix_cast(k, v, defaults.get(k), pmeta.get(k))
+            val, err = opt.cast_value(k, v, defaults.get(k), pmeta.get(k), prefix="PRESET_INVALID")
             if err:
-                return None, {"error": err.replace("MATRIX_INVALID", "PRESET_INVALID")}
+                return None, {"error": err}
             clean[k] = val
         return {**defaults, **clean}, None
 
@@ -1057,6 +1053,10 @@ class AgentKlineService:
         rows = [r for r in self.script_engine.list_scripts() if r.get("kind") == "strategy"]
         return {"strategies": rows}
 
+    def list_optimizers(self):
+        """优化器脚本清单（内置 + 自定义；custom shadow builtin）。"""
+        return {"optimizers": self.script_engine.list_optimizers()}
+
     def list_engines(self):
         """引擎清单。后端不 import 引擎运行时，清单也来自子进程。"""
         try:
@@ -1166,7 +1166,7 @@ class AgentKlineService:
                      backfill_budget=20.0):
         """一次回测的「准备段」：校验 → 策略声明 → 补历史 → 冻结窗口。
 
-        v0.6.4：参数矩阵复用同一份 ctx（同一批 bars），保证各组结果可比。
+        v0.6.4：同一份 ctx（同一批 bars）保证批量跑与寻优各组结果可比。
         返回 ctx 或 {"error": ...}。
         """
         if direction not in ("long_only", "short_only", "both"):
@@ -1241,7 +1241,7 @@ class AgentKlineService:
 
     def _execute_run(self, ctx, params=None, timeout=120.0, display_name=None, batch=None,
                      register=True):
-        """用已冻结的 ctx 跑一次引擎并登记结果（单跑与矩阵共用）。
+        """用已冻结的 ctx 跑一次引擎并登记结果（单跑、寻优共用）。
 
         register=False 时只算不登记（寻优试次用；Top K 才会二次登记进结果栏）。
         """
@@ -1380,190 +1380,7 @@ class AgentKlineService:
             return ctx
         return self._execute_run(ctx, params, timeout=timeout)
 
-    # ============ 参数矩阵（v0.6.4：同一份数据上跑一组参数） ============
-    @staticmethod
-    def _matrix_cast(key, value, default, meta):
-        """把 grid 值收敛到参数类型并做区间校验；返回 (canonical, err)。"""
-        return opt.cast_value(key, value, default, meta, prefix="MATRIX_INVALID")
-
-    def _matrix_expand(self, info, grid, params_list):
-        """展开参数矩阵（默认值基底 + 覆盖）。返回 (combos, err)。"""
-        import itertools
-        base = dict((info or {}).get("params") or {})
-        meta = dict((info or {}).get("param_meta") or {})
-        if params_list is not None:
-            if not isinstance(params_list, list) or not params_list:
-                return None, "MATRIX_EMPTY: params_list 需要非空数组"
-            raw = []
-            for item in params_list:
-                if not isinstance(item, dict):
-                    return None, "MATRIX_INVALID: params_list 的元素需要对象"
-                unknown = [k for k in item if k not in base]
-                if unknown:
-                    return None, (f"MATRIX_INVALID: 未知参数 {unknown}（可用: {list(base) or '无'}）")
-                raw.append(dict(item))
-        else:
-            grid = grid or {}
-            if not isinstance(grid, dict) or not grid:
-                return None, "MATRIX_EMPTY: 至少给 grid 或 params_list"
-            unknown = [k for k in grid if k not in base]
-            if unknown:
-                return None, (f"MATRIX_INVALID: 未知参数 {unknown}（可用: {list(base) or '无'}）")
-            keys = list(grid)
-            for k in keys:
-                if not isinstance(grid[k], list) or not grid[k]:
-                    return None, f"MATRIX_EMPTY: grid.{k} 需要非空数组"
-            raw = [dict(zip(keys, values))
-                   for values in itertools.product(*[grid[k] for k in keys])]
-        if len(raw) > self.matrix_max_runs:
-            return None, (f"MATRIX_LIMIT: 组合 {len(raw)} 超过上限 {self.matrix_max_runs}"
-                          f"（拆小或调 limits.matrix_max_runs）")
-        combos = []
-        for item in raw:
-            combo = {}
-            for k, v in item.items():
-                value, err = self._matrix_cast(k, v, base.get(k), meta.get(k))
-                if err:
-                    return None, err
-                combo[k] = value
-            combos.append(combo)
-        return combos, None
-
-    def _matrix_label(self, ctx, combo):
-        base = ((ctx.get("info") or {}).get("name") or "").strip() \
-            or str(ctx.get("script") or "回测").split("/")[-1]
-        if not combo:
-            return base
-        parts = ", ".join(f"{k}={v}" for k, v in combo.items())
-        return f"{base} · {parts}"[:120]
-
-    def _matrix_prune(self):
-        """作业态内存回收：完成态保留 10 分钟，最多留 20 个。"""
-        now = time.time()
-        alive = []
-        for jid, job in list(self._matrix_jobs.items()):
-            done = job.get("status") in ("done", "cancelled", "failed")
-            if done and now - float(job.get("finished_at") or 0) > 600:
-                self._matrix_jobs.pop(jid, None)
-            else:
-                alive.append((float(job.get("created_at") or 0), jid))
-        if len(self._matrix_jobs) > 20:
-            alive.sort()
-            for _, jid in alive[:max(0, len(alive) - 20)]:
-                self._matrix_jobs.pop(jid, None)
-
-    def run_matrix(self, board_id, timeframe=None, engine="builtin", script=None,
-                   source=None, grid=None, params_list=None, direction="long_only",
-                   initial_cash=10000.0, fee_bps=5.0, slippage_bps=5.0,
-                   protection=None, start_time=None, end_time=None, limit=20000,
-                   backfill_budget=20.0, timeout=120.0):
-        """参数矩阵：一次冻结窗口，串行跑多组参数，结果逐条登记并广播进度。
-
-        返回 {job_id,total,runs:[{index,params,display_name}]}；进度用
-        GET /api/backtest/matrix/{job_id} 或 WS matrix_progress 取。
-        """
-        ctx = self._run_context(
-            board_id, timeframe=timeframe, engine=engine, script=script, source=source,
-            params=None, direction=direction, initial_cash=initial_cash,
-            fee_bps=fee_bps, slippage_bps=slippage_bps, protection=protection,
-            start_time=start_time, end_time=end_time, limit=limit,
-            backfill_budget=backfill_budget)
-        if ctx.get("error"):
-            return ctx
-        combos, err = self._matrix_expand(ctx.get("info"), grid, params_list)
-        if err:
-            return {"error": err}
-        job_id = f"mtx_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-        runs = [{"index": i, "params": c, "display_name": self._matrix_label(ctx, c)}
-                for i, c in enumerate(combos)]
-        job = {
-            "job_id": job_id, "status": "running", "created_at": time.time(),
-            "finished_at": None, "total": len(combos), "done": 0, "current": None,
-            "results": [], "errors": [], "cancel": False,
-            "board_id": board_id, "timeframe": ctx["tf"], "script": ctx["script"] or "",
-            "grid": grid, "params_list": params_list,
-            "ctx": ctx, "combos": combos, "timeout": timeout,
-        }
-        with self._matrix_lock:
-            self._matrix_prune()
-            self._matrix_jobs[job_id] = job
-        self._bc({"type": "matrix_started", "job_id": job_id, "board_id": board_id,
-                  "timeframe": ctx["tf"], "total": len(combos), "runs": runs})
-        th = __import__("threading").Thread(target=self._matrix_worker, args=(job_id,),
-                                            daemon=True, name=f"matrix-{job_id}")
-        th.start()
-        return {"status": "ok", "job_id": job_id, "total": len(combos),
-                "runs": runs, "max_runs": self.matrix_max_runs}
-
-    def _matrix_worker(self, job_id):
-        job = self._matrix_jobs.get(job_id)
-        if not job:
-            return
-        ctx = job["ctx"]
-        total = job["total"]
-        try:
-            for i, combo in enumerate(job["combos"]):
-                if job.get("cancel"):
-                    break
-                job["current"] = combo
-                self._bc({"type": "matrix_progress", "job_id": job_id,
-                          "board_id": job["board_id"], "timeframe": job["timeframe"],
-                          "done": job["done"], "total": total, "current": combo})
-                batch = {"id": job_id, "index": i, "total": total,
-                         "params": combo, "grid": job.get("grid")}
-                try:
-                    body = self._execute_run(ctx, combo, timeout=job.get("timeout") or 120.0,
-                                             display_name=self._matrix_label(ctx, combo),
-                                             batch=batch)
-                except Exception as exc:  # 单组异常不炸整批
-                    body = {"error": f"MATRIX_RUN_FAILED: {exc}"}
-                if body.get("error"):
-                    job["errors"].append({"index": i, "params": combo,
-                                          "error": body["error"]})
-                else:
-                    res = body.get("result") or {}
-                    job["results"].append({"index": i, "result_id": res.get("result_id"),
-                                           "params": combo,
-                                           "stats": res.get("stats") or {}})
-                job["done"] = i + 1
-                self._bc({"type": "matrix_progress", "job_id": job_id,
-                          "board_id": job["board_id"], "timeframe": job["timeframe"],
-                          "done": job["done"], "total": total, "current": combo})
-        finally:
-            job["status"] = "cancelled" if job.get("cancel") else "done"
-            job["finished_at"] = time.time()
-            job["current"] = None
-            self._bc({"type": "matrix_done", "job_id": job_id,
-                      "board_id": job["board_id"], "timeframe": job["timeframe"],
-                      "status": job["status"], "total": total, "done": job["done"],
-                      "result_ids": [r["result_id"] for r in job["results"]],
-                      "errors": job["errors"]})
-
-    def get_matrix(self, job_id):
-        job = self._matrix_jobs.get(job_id)
-        if not job:
-            return {"error": f"MATRIX_JOB_NOT_FOUND: {job_id}"}
-        return {
-            "job_id": job["job_id"], "status": job["status"],
-            "board_id": job["board_id"], "timeframe": job["timeframe"],
-            "script": job["script"], "total": job["total"], "done": job["done"],
-            "current": job["current"], "results": job["results"],
-            "errors": job["errors"], "cancelled": job["status"] == "cancelled",
-            "created_at": job["created_at"], "finished_at": job["finished_at"],
-        }
-
-    def cancel_matrix(self, job_id):
-        job = self._matrix_jobs.get(job_id)
-        if not job:
-            return {"error": f"MATRIX_JOB_NOT_FOUND: {job_id}"}
-        if job["status"] != "running":
-            return {"status": job["status"], "noop": True}
-        job["cancel"] = True
-        return {"status": "ok", "cancelling": True, "done": job["done"],
-                "total": job["total"]}
-
     # ============ 参数寻优（v0.6.5：目标 + 约束 + 样本外验证） ============
-    OPTIMIZE_METHODS = ("grid", "random", "bayes")
 
     def _opt_label(self, ctx, params, suffix=""):
         base = ((ctx.get("info") or {}).get("name") or "").strip() \
@@ -1637,24 +1454,146 @@ class AgentKlineService:
             return None, "OPTIMIZE_HOLDOUT_INVALID: top_k 需在 1~10"
         return {"ratio": ratio, "top_k": top_k}, None
 
+    @staticmethod
+    def _opt_method_ref(method):
+        m = str(method or "optimizer/grid").strip()
+        return m if m.startswith("optimizer/") else f"optimizer/{m}"
+
+    @staticmethod
+    def _opt_plugin_params(info, provided):
+        defaults = dict((info or {}).get("params") or {})
+        meta = dict((info or {}).get("param_meta") or {})
+        allowed = set(defaults) | set(meta)
+        if provided is None:
+            provided = {}
+        if not isinstance(provided, dict):
+            return None, "OPTIMIZER_PARAM_INVALID: optimizer_params 需要对象"
+        unknown = [k for k in provided if k not in allowed]
+        if unknown:
+            return None, (f"OPTIMIZER_PARAM_INVALID: 未知优化器参数 {unknown}"
+                          f"（可用: {sorted(allowed) or '无'}）")
+        out = dict(defaults)
+        for k, v in provided.items():
+            val, err = opt.cast_value(k, v, defaults.get(k), meta.get(k),
+                                      prefix="OPTIMIZER_PARAM_INVALID")
+            if err:
+                return None, err
+            out[k] = val
+        return out, None
+
+    def _opt_ctx(self, job, history=None):
+        sp = job["space_parsed"]
+        t0 = job.get("t_start") or time.monotonic()
+        return {
+            "space": {
+                "raw": job.get("space"), "values": sp["values"],
+                "base": sp["base"], "meta": sp["meta"], "size": sp["size"],
+            },
+            "objective": job.get("objective") or {},
+            "constraints": job.get("constraints") or {},
+            "budget": {
+                "max_runs": int(job["budget"]["max_runs"]),
+                "max_seconds": float(job["budget"]["max_seconds"]),
+            },
+            "seed": job.get("seed"),
+            "params": job.get("optimizer_params") or {},
+            "history": [dict(t) for t in (history if history is not None
+                                          else (job.get("trials") or []))],
+            "done": int(job.get("done") or 0),
+            "elapsed_ms": int((time.monotonic() - t0) * 1000),
+            "rng": job.get("rng"),
+        }
+
+    def _opt_candidate(self, job, candidate):
+        if not isinstance(candidate, dict):
+            return None, "OPTIMIZE_CANDIDATE_INVALID: ask 必须返回 params 对象或 None"
+        base = job["space_parsed"]["base"]
+        meta = job["space_parsed"]["meta"]
+        unknown = [k for k in candidate if k not in base]
+        if unknown:
+            return None, f"OPTIMIZE_CANDIDATE_INVALID: 未知参数 {unknown}"
+        out = {}
+        for k, v in candidate.items():
+            val, err = opt.cast_value(k, v, base.get(k), meta.get(k),
+                                      prefix="OPTIMIZE_CANDIDATE_INVALID")
+            if err:
+                return None, err
+            out[k] = val
+        return out, None
+
+    def _opt_rank(self, job, phase, trials, k):
+        """用优化器 rank 钩子排序；无钩子/失败时回落标量分数。"""
+        k = max(0, int(k))
+        fn = (job.get("namespace") or {}).get("rank")
+        if callable(fn):
+            ctx = self._opt_ctx(job, history=trials)
+            try:
+                order = fn(job["state"], ctx, trials, phase)
+            except Exception as exc:
+                job["warnings"].append({"code": "OPTIMIZE_RANK_FAILED",
+                                        "message": f"优化器 rank 失败，回落标量排序: {exc}"})
+                order = None
+            if isinstance(order, (list, tuple)):
+                picked, seen = [], set()
+                for i in order:
+                    if isinstance(i, bool) or not isinstance(i, int):
+                        continue
+                    if i < 0 or i >= len(trials) or i in seen:
+                        continue
+                    seen.add(i)
+                    t = trials[i]
+                    if phase == "oos":
+                        if t.get("oos_status") == "ok":
+                            picked.append(t)
+                    elif t.get("status") == "ok":
+                        picked.append(t)
+                    if len(picked) >= k:
+                        break
+                if picked:
+                    return picked[:k], "optimizer"
+        if phase == "is":
+            return opt.select_top(trials, k), "score"
+        valid = [t for t in trials if t.get("oos_status") == "ok"]
+        valid.sort(key=lambda t: -float(t.get("oos_score") or 0))
+        return valid[:k], "score"
+
     def run_optimization(self, board_id, timeframe=None, engine="builtin", script=None,
                          source=None, space=None, method="grid", objective=None,
                          constraints=None, budget=None, holdout=None, seed=None,
                          direction="long_only", initial_cash=10000.0, fee_bps=5.0,
                          slippage_bps=5.0, protection=None, start_time=None,
                          end_time=None, limit=20000, backfill_budget=20.0,
-                         timeout=120.0):
-        """参数寻优：冻结窗口 → 按空间/方法逐组回测 → Top K 做样本外验证并登记。
+                         timeout=120.0, optimizer_params=None):
+        """参数寻优：冻结窗口 → 优化器脚本逐组提议 → Top K 做样本外验证并登记。
 
-        立即返回 {job_id,...}；进度用 get_optimization 或 WS optimize_progress。
+        method 可以是 optimizer/grid 或旧别名 grid/random/bayes；自定义优化器传
+        optimizer/xxx。优化器只负责提议/排序，跑引擎、预算、样本外与登记留在内核。
         """
-        method = str(method or "grid").lower()
-        if method not in self.OPTIMIZE_METHODS:
-            return {"error": f"OPTIMIZE_METHOD_INVALID: method 需为 "
-                             f"{'/'.join(self.OPTIMIZE_METHODS)}，收到 {method!r}"}
-        obj, err = opt.parse_objective(objective)
+        method_ref = self._opt_method_ref(method)
+        info = self.script_engine.optimizer_meta(method_ref)
+        if info.get("error"):
+            if not str(method or "").startswith("optimizer/"):
+                ids = [o["id"] for o in self.script_engine.list_optimizers()]
+                return {"error": (f"OPTIMIZE_METHOD_INVALID: 优化器 {method!r} 不存在"
+                                  f"（可用: {', '.join(ids) or '无'}）")}
+            return {"error": info["error"]}
+        caps = info.get("caps") or {}
+        oparams, err = self._opt_plugin_params(info, optimizer_params)
         if err:
             return {"error": err}
+        if caps.get("multi_objective"):
+            if objective is None:
+                obj = {}
+            elif isinstance(objective, dict):
+                obj = dict(objective)
+            elif isinstance(objective, str):
+                obj = {"metric": objective}
+            else:
+                return {"error": "OPTIMIZE_OBJECTIVE_INVALID: 多目标 objective 需要对象"}
+        else:
+            obj, err = opt.parse_objective(objective)
+            if err:
+                return {"error": err}
         cons, err = opt.parse_constraints(constraints)
         if err:
             return {"error": err}
@@ -1686,15 +1625,15 @@ class AgentKlineService:
         space_out, err = opt.parse_space(ctx.get("info"), space)
         if err:
             return {"error": err}
-
-        if method == "grid":
-            combos, err = opt.expand_grid(space_out["values"], bud["max_runs"])
-            if err:
-                return {"error": err}
-            total = len(combos)
+        if caps.get("requires_full_space") and space_out["size"] > bud["max_runs"]:
+            return {"error": (f"OPTIMIZE_BUDGET: 网格共有 {space_out['size']} 组，"
+                              f"超过预算 {bud['max_runs']}（改小空间或换随机/贝叶斯）")}
+        if caps.get("requires_full_space"):
+            total = int(space_out["size"])
+        elif caps.get("continuous"):
+            total = int(bud["max_runs"])
         else:
-            combos = None
-            total = min(bud["max_runs"], int(space_out["size"]))
+            total = min(int(bud["max_runs"]), int(space_out["size"]))
 
         n_eval = len(ctx["bars"]) - ctx["eval_idx"]
         is_n, oos_n, err = opt.split_eval_bars(n_eval, hol["ratio"])
@@ -1718,77 +1657,106 @@ class AgentKlineService:
         holdout_meta = {"ratio": hol["ratio"], "top_k": hol["top_k"],
                         "is_bars": is_n, "oos_bars": oos_n, "split_time": split_time}
 
+        loaded = self.script_engine.load_optimizer(method_ref)
+        if loaded.get("error"):
+            return {"error": loaded["error"]}
+        namespace = loaded["namespace"]
+        method_short = method_ref.split("/", 1)[1]
+
         job_id = f"opt_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+        rng = __import__("random").Random(seed)
         job = {
             "job_id": job_id, "status": "running", "phase": "is",
             "created_at": time.time(), "finished_at": None, "elapsed_ms": None,
             "board_id": board_id, "timeframe": ctx["tf"], "script": ctx["script"] or "",
-            "method": method, "objective": obj, "constraints": cons,
+            "method": method_short, "optimizer_id": method_ref,
+            "optimizer": {"id": info["id"], "name": info["name"],
+                          "source": info["source"], "desc": info["desc"],
+                          "api": info.get("api")},
+            "optimizer_params": oparams, "multi_objective": bool(caps.get("multi_objective")),
+            "caps": caps, "objective": obj, "constraints": cons,
             "budget": bud, "holdout": holdout_meta, "seed": seed,
-            "space": space, "space_values": space_out["values"],
-            "space_size": int(space_out["size"]), "combos": combos,
+            "space": space, "space_parsed": space_out,
+            "space_size": int(space_out["size"]),
             "is_ctx": is_ctx, "oos_ctx": oos_ctx, "total": total, "done": 0,
             "oos_done": 0, "current": None, "trials": [], "top": [], "best": None,
             "warnings": [], "errors": [], "registered_result_ids": [],
             "cancel": False, "space_exhausted": False, "timeout": timeout,
+            "namespace": namespace, "state": {}, "rng": rng,
+            "t_start": time.monotonic(), "ranked_by": None, "extra": {},
         }
+        init_fn = namespace.get("init")
+        if callable(init_fn):
+            try:
+                state = init_fn(self._opt_ctx(job))
+            except Exception as exc:
+                return {"error": f"OPTIMIZER_INIT_FAILED: {exc}"}
+            if not isinstance(state, dict):
+                return {"error": "OPTIMIZER_INIT_FAILED: init 必须返回 dict"}
+            job["state"] = state
         with self._optimize_lock:
             self._opt_prune()
             self._optimize_jobs[job_id] = job
         self._bc({"type": "optimize_started", "job_id": job_id, "board_id": board_id,
-                  "timeframe": ctx["tf"], "method": method, "total": total,
-                  "objective": obj, "holdout": holdout_meta})
+                  "timeframe": ctx["tf"], "method": method_short,
+                  "optimizer": job["optimizer"], "total": total,
+                  "objective": obj, "holdout": holdout_meta,
+                  "optimizer_params": oparams})
         th = __import__("threading").Thread(target=self._optimize_worker, args=(job_id,),
                                             daemon=True, name=f"optimize-{job_id}")
         th.start()
-        return {"status": "ok", "job_id": job_id, "method": method, "total": total,
+        return {"status": "ok", "job_id": job_id, "method": method_short,
+                "optimizer_id": method_ref, "optimizer": job["optimizer"],
+                "optimizer_params": oparams, "total": total,
                 "phase": "is", "space": space_out["values"], "objective": obj,
-                "constraints": cons, "budget": bud, "holdout": holdout_meta}
+                "constraints": cons, "budget": bud, "holdout": holdout_meta,
+                "ranked_by": None}
 
     def _optimize_worker(self, job_id):
         job = self._optimize_jobs.get(job_id)
         if not job:
             return
-        rng = __import__("random").Random(job["seed"])
-        tried = set()
-        observations = []
-        t0 = time.monotonic()
-        method = job["method"]
+        namespace = job["namespace"]
+        state = job["state"]
+        t0 = job["t_start"]
         try:
-            if method == "grid":
-                for i, combo in enumerate(job["combos"]):
-                    if job.get("cancel"):
-                        break
-                    if time.monotonic() - t0 > job["budget"]["max_seconds"]:
-                        job["warnings"].append({"code": "TIME_BUDGET",
-                                                "message": "达到时间预算，提前结束搜索"})
-                        break
-                    self._opt_one(job, combo, i)
-                    if job["trials"][-1].get("status") == "ok":
-                        observations.append({"params": combo,
-                                             "score": job["trials"][-1]["score"]})
-            else:
-                i = 0
-                while i < job["total"] and not job.get("cancel"):
-                    if time.monotonic() - t0 > job["budget"]["max_seconds"]:
-                        job["warnings"].append({"code": "TIME_BUDGET",
-                                                "message": "达到时间预算，提前结束搜索"})
-                        break
-                    if method == "bayes":
-                        combo = opt.propose_tpe(job["space_values"], observations, rng, tried)
-                    else:
-                        combo = opt.next_random(job["space_values"], rng, tried)
-                    if combo is None:
-                        job["space_exhausted"] = True
-                        break
-                    tried.add(opt._key(combo))
+            i = 0
+            while job["done"] < job["total"] and not job.get("cancel"):
+                if time.monotonic() - t0 > job["budget"]["max_seconds"]:
+                    job["warnings"].append({"code": "TIME_BUDGET",
+                                            "message": "达到时间预算，提前结束搜索"})
+                    break
+                ask = namespace.get("ask")
+                try:
+                    raw = ask(state, self._opt_ctx(job))
+                except Exception as exc:
+                    raise RuntimeError(f"OPTIMIZER_ASK_FAILED: {exc}") from exc
+                if raw is None:
+                    job["space_exhausted"] = True
+                    break
+                combo, err = self._opt_candidate(job, raw)
+                if err:
+                    trial = self._opt_bad_candidate(job, raw, i, err)
+                else:
                     trial = self._opt_one(job, combo, i)
-                    if trial.get("status") == "ok":
-                        observations.append({"params": combo, "score": trial["score"]})
-                    i += 1
-
+                tell = namespace.get("tell")
+                if callable(tell):
+                    try:
+                        tell(state, self._opt_ctx(job), trial)
+                    except Exception as exc:
+                        raise RuntimeError(f"OPTIMIZER_TELL_FAILED: {exc}") from exc
+                i += 1
             if not job.get("cancel"):
                 self._opt_after_search(job)
+                summarize = namespace.get("summarize")
+                if callable(summarize):
+                    try:
+                        extra = summarize(state, self._opt_ctx(job))
+                        if isinstance(extra, dict):
+                            job["extra"] = extra
+                    except Exception as exc:
+                        job["warnings"].append({"code": "OPTIMIZER_SUMMARIZE_FAILED",
+                                                "message": str(exc)})
         except Exception as exc:  # pragma: no cover - 兜底：作业别静默卡 running
             logger.exception("参数寻优作业失败: %s", job_id)
             job["status"] = "failed"
@@ -1809,6 +1777,22 @@ class AgentKlineService:
                       "result_ids": list(job["registered_result_ids"]),
                       "warnings": job["warnings"]})
 
+    def _opt_bad_candidate(self, job, raw, index, reason):
+        """优化器返回了不合法的候选：记一行 invalid，不跑引擎，预算照常扣。"""
+        trial = {"index": index, "params": raw if isinstance(raw, dict) else {},
+                 "status": "invalid", "score": None, "value": None,
+                 "reason": reason, "is_stats": {}}
+        job["trials"].append(trial)
+        job["done"] = int(job.get("done") or 0) + 1
+        job["errors"].append({"index": index, "params": trial["params"], "error": reason})
+        self._bc({"type": "optimize_progress", "job_id": job["job_id"],
+                  "board_id": job["board_id"], "timeframe": job["timeframe"],
+                  "phase": "is", "done": job["done"], "total": job["total"],
+                  "current": trial["params"],
+                  "trial": {"index": index, "status": "invalid",
+                            "score": None, "value": None, "reason": reason}})
+        return trial
+
     def _opt_one(self, job, combo, index):
         """跑一组样本内试次并写入 job；异常转成 failed 行。"""
         job["current"] = combo
@@ -1823,7 +1807,8 @@ class AgentKlineService:
         except Exception as exc:  # 单组异常不炸整批
             body = {"error": f"OPTIMIZE_RUN_FAILED: {exc}"}
         trial = opt.summarize_trial(index, combo, body, job["objective"],
-                                    job["constraints"])
+                                    job["constraints"],
+                                    multi=bool(job.get("multi_objective")))
         if (body or {}).get("error"):
             trial["status"] = "failed"
             trial["reason"] = body["error"]
@@ -1851,7 +1836,9 @@ class AgentKlineService:
 
     def _opt_after_search(self, job):
         """样本内搜索结束：Top K 做样本外验证并登记（无 holdout 则登记 Top K 样本内）。"""
-        top = opt.select_top(job["trials"], job["holdout"]["top_k"])
+        top, ranked_by = self._opt_rank(job, "is", job["trials"],
+                                        job["holdout"]["top_k"])
+        job["ranked_by"] = ranked_by
         if not top:
             job["warnings"].append({"code": "NO_VALID_TRIAL",
                                     "message": "没有满足约束的有效试次，未登记结果"})
@@ -1890,8 +1877,12 @@ class AgentKlineService:
                     continue
                 res = body.get("result") or {}
                 oos_stats = res.get("stats") or {}
-                scored = opt.score_stats(oos_stats, job["objective"], job["constraints"])
-                over = opt.overfit_check(trial.get("is_stats"), oos_stats, job["objective"])
+                if job.get("multi_objective"):
+                    scored = opt.score_multi(oos_stats, job["constraints"])
+                    over = {"gap": None, "ratio": None, "warnings": []}
+                else:
+                    scored = opt.score_stats(oos_stats, job["objective"], job["constraints"])
+                    over = opt.overfit_check(trial.get("is_stats"), oos_stats, job["objective"])
                 trial.update({
                     "oos_status": scored["status"], "oos_score": scored["score"],
                     "oos_value": scored["value"], "oos_reason": scored["reason"],
@@ -1926,8 +1917,10 @@ class AgentKlineService:
                           "trial": {"index": trial["index"],
                                     "status": scored["status"],
                                     "score": trial.get("oos_score")}})
-            valid.sort(key=lambda t: -float(t.get("oos_score") or 0))
-            job["top"] = valid[:job["holdout"]["top_k"]]
+            ordered, how = self._opt_rank(job, "oos", valid,
+                                          job["holdout"]["top_k"])
+            job["ranked_by"] = "optimizer" if how == "optimizer" else job.get("ranked_by")
+            job["top"] = ordered[:job["holdout"]["top_k"]]
             job["best"] = job["top"][0] if job["top"] else None
             if not job["top"]:
                 job["warnings"].append({"code": "NO_OOS_VALID",
@@ -1984,6 +1977,10 @@ class AgentKlineService:
             "job_id": job["job_id"], "status": job["status"], "phase": job["phase"],
             "board_id": job["board_id"], "timeframe": job["timeframe"],
             "script": job["script"], "method": job["method"],
+            "optimizer_id": job.get("optimizer_id"), "optimizer": job.get("optimizer"),
+            "optimizer_params": job.get("optimizer_params") or {},
+            "multi_objective": bool(job.get("multi_objective")),
+            "ranked_by": job.get("ranked_by"), "extra": job.get("extra") or {},
             "objective": job["objective"], "constraints": job["constraints"],
             "budget": job["budget"], "holdout": job["holdout"], "seed": job["seed"],
             "space": job["space"], "space_size": job.get("space_size"),

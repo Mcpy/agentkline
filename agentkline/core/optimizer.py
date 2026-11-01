@@ -2,9 +2,8 @@
 
 设计要点（定稿见 docs/0.6.5-参数寻优方案.md）：
 - 空间 = 每个参数一组离散候选值（range 或 values），统一收敛到参数类型；
-- 三种搜索器：grid（全组合，受预算约束）/ random（均匀采样）/ bayes（内置 TPE-lite）；
-- TPE-lite 用“好/坏两组参数值的独立分类分布 + 联合接受概率”近似贝叶斯，
-  无科学计算依赖、可复现；装了 optuna 也不自动切换，避免行为漂移；
+- 搜索器已插件化（v0.6.6）：grid/random/bayes 在 scripts/optimizer/ 内置脚本；
+- 本模块保留空间解析/评分/切分/过拟合与 TPE-lite 纯函数，供内置脚本复用；
 - 目标 + 约束在这里统一评分：ok / rejected（约束）/ invalid（指标不可用）；
 - 本模块只算“下一个候选/评分/排序”，跑引擎与登记结果留在 service。
 """
@@ -211,6 +210,28 @@ def parse_constraints(constraints):
     return out, None
 
 
+def _check_constraints(stats, constraints):
+    """返回 (ok, reason)；约束不满足时 ok=False。"""
+    cons = constraints or {}
+    stats = stats if isinstance(stats, dict) else {}
+    if "min_trades" in cons:
+        try:
+            trades = int(stats.get("trade_count") or 0)
+        except (TypeError, ValueError):
+            trades = 0
+        if trades < cons["min_trades"]:
+            return False, f"MIN_TRADES: 交易 {trades} < {cons['min_trades']}"
+    if "max_drawdown" in cons:
+        mdd = stats.get("max_drawdown")
+        try:
+            mdd = abs(float(mdd))
+        except (TypeError, ValueError):
+            mdd = 1.0
+        if mdd > cons["max_drawdown"] + 1e-12:
+            return False, f"MAX_DRAWDOWN: 回撤 {mdd:.2%} > {cons['max_drawdown']:.2%}"
+    return True, ""
+
+
 def score_stats(stats, objective, constraints):
     """给一次试次评分：{status, score, value, reason}。
 
@@ -228,26 +249,18 @@ def score_stats(stats, objective, constraints):
     if not math.isfinite(value):
         return {"status": "invalid", "score": None, "value": None,
                 "reason": f"METRIC_UNAVAILABLE: {metric} 非有限数"}
-    cons = constraints or {}
-    if "min_trades" in cons:
-        try:
-            trades = int(stats.get("trade_count") or 0)
-        except (TypeError, ValueError):
-            trades = 0
-        if trades < cons["min_trades"]:
-            return {"status": "rejected", "score": None, "value": value,
-                    "reason": f"MIN_TRADES: 交易 {trades} < {cons['min_trades']}"}
-    if "max_drawdown" in cons:
-        mdd = stats.get("max_drawdown")
-        try:
-            mdd = abs(float(mdd))
-        except (TypeError, ValueError):
-            mdd = 1.0
-        if mdd > cons["max_drawdown"] + 1e-12:
-            return {"status": "rejected", "score": None, "value": value,
-                    "reason": f"MAX_DRAWDOWN: 回撤 {mdd:.2%} > {cons['max_drawdown']:.2%}"}
+    ok, reason = _check_constraints(stats, constraints)
+    if not ok:
+        return {"status": "rejected", "score": None, "value": value, "reason": reason}
     score = value if objective["direction"] == "max" else -value
     return {"status": "ok", "score": score, "value": value, "reason": ""}
+
+
+def score_multi(stats, constraints):
+    """多目标/自定义排序模式：只做约束判定，不强行合成单指标分数。"""
+    ok, reason = _check_constraints(stats, constraints)
+    return {"status": "ok" if ok else "rejected", "score": None,
+            "value": None, "reason": reason}
 
 
 # ---------------------------------------------------------------- 搜索器
@@ -412,10 +425,10 @@ def _num(v):
     return f if math.isfinite(f) else None
 
 
-def summarize_trial(index, params, result, objective, constraints):
+def summarize_trial(index, params, result, objective, constraints, multi=False):
     """把 _execute_run 的返回收敛成报告里的试次行。"""
     stats = ((result or {}).get("result") or {}).get("stats") or {}
-    scored = score_stats(stats, objective, constraints)
+    scored = score_multi(stats, constraints) if multi else score_stats(stats, objective, constraints)
     return {
         "index": index,
         "params": params,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AgentKline UI smoke (v0.6.5) — 23 browser checks on a disposable instance.
+"""AgentKline UI smoke (v0.6.6) — 22 browser checks on a disposable instance.
 
 Why this exists: test_e2e.py covers the API/MCP surface, not the browser UI.
 These checks protect the surfaces that 0.5.3–0.6.5 changed by hand:
@@ -481,9 +481,9 @@ def run_checks(page, base: str, agent_base: str = None,
     # 8) +回测：对话框 → 引擎/策略/参数 → 运行 → 结果进结果栏（v0.6.1 M3）
     page.locator("#result-add").click()
     page.wait_for_selector(".bt-card", timeout=8000)
-    engine_vals = page.locator(".bt-card .bt-row select").nth(0).evaluate_all(
+    engine_vals = page.locator("#bt-engine").evaluate_all(
         "els => els.map(e => e.value)")
-    strat_vals = page.locator(".bt-card .bt-row select").nth(1).evaluate_all(
+    strat_vals = page.locator("#bt-strategy").evaluate_all(
         "els => els.map(e => e.value)")
     page.wait_for_selector(".bt-params [data-pname]", timeout=8000)
     params = page.locator(".bt-params [data-pname]").evaluate_all(
@@ -677,41 +677,38 @@ def run_checks(page, base: str, agent_base: str = None,
         print("  [dbg] csv download failed:", e)
     check("B3：明细 CSV 导出", csv_ok and csv_rows >= 11, f"ok={csv_ok} rows={csv_rows}")
 
-    # 15) 0.6.4 参数矩阵：页签 → 多值预览 → 2 组 → 批次标签（批次表已按用户裁决删除）
-    chips_before = page.locator("#result-chips .res-chip").count()
-    page.locator("#result-add").click()
-    page.wait_for_selector(".bt-card", timeout=8000)
-    page.locator(".bt-tab").nth(1).click()
-    page.wait_for_selector("#bt-overlay input[data-mgrid]", timeout=10000)
-    grid_inputs = page.locator("#bt-overlay input[data-mgrid]")
-    grid_inputs.nth(0).fill("5,10")
-    grid_inputs.nth(1).fill("30")
-    page.wait_for_timeout(200)
-    preview = page.locator("#bt-matrix-count").inner_text()
-    page.fill("#bt-bars", "300")
-    page.locator(".bt-foot .btn-primary").click()
-    page.wait_for_selector(".bt-progress", state="visible", timeout=10000)
-    page.wait_for_function("() => !document.getElementById('bt-overlay')", timeout=120000)
-    page.wait_for_timeout(900)
-    batch_tags = page.locator("#result-chips .res-batch-tag").count()
-    batch_tables = page.locator(".res-batch").count()
-    strip_ok = page.evaluate("""() => ['#result-chips', '#board-tabs', '#timeframe-tabs', '#indicator-chips']
-        .every(s => document.querySelector(s)?.classList.contains('xstrip'))""")
-    check("0.6.4：四类条目横向溢出条就绪（画板/周期/指标/结果）", strip_ok, f"ok={strip_ok}")
-
-    chips_after = page.locator("#result-chips .res-chip").count()
-    check("0.6.4：参数矩阵 2 组 + 批次标签（无批次表）",
-          "2 组" in preview and batch_tags >= 1 and batch_tables == 0
-          and chips_after >= chips_before + 2,
-          f"preview={preview} tags={batch_tags} tables={batch_tables} "
-          f"chips={chips_before}->{chips_after}")
-
-    # 15.1) 0.6.5 参数寻优：页签 → 范围 → 4 组 → 报告 → Top K 结果
+    # 15) 0.6.5 参数寻优 + 0.6.6 优化器插件：动态列表 / 参数表单 → 范围 → 报告 → Top K
+    custom_opt = ('OPTIMIZER_API = 1\n'
+                  'NAME = "UI 演示优化器"\nDESC = "ui smoke"\n'
+                  'PARAMS = {"w_sharpe": 0.6, "w_return": 0.4}\n'
+                  'PARAM_META = {"w_sharpe": {"type": "float", "min": 0, "max": 1},'
+                  ' "w_return": {"type": "float", "min": 0, "max": 1}}\n'
+                  'CAPS = {"continuous": False, "multi_objective": False,'
+                  ' "requires_full_space": False, "custom_score": False}\n'
+                  'def init(ctx):\n'
+                  '    return {"i": 0, "combos": [{"fast": 5, "slow": 30},'
+                  ' {"fast": 10, "slow": 60}]}\n'
+                  'def ask(state, ctx):\n'
+                  '    i = state["i"]\n'
+                  '    if i >= len(state["combos"]): return None\n'
+                  '    state["i"] = i + 1\n'
+                  '    return state["combos"][i]\n')
+    _post(f"{agent_base}/api/scripts",
+          {"id": "optimizer/ui_demo", "code": custom_opt}, token=token)
     chips_before_opt = page.locator("#result-chips .res-chip").count()
     page.locator("#result-add").click()
     page.wait_for_selector(".bt-card", timeout=8000)
-    page.locator(".bt-tab").nth(2).click()
+    page.locator("button.bt-mode", has_text="参数寻优").click()
     page.wait_for_selector("#bt-overlay input[data-omin]", timeout=10000)
+    opt_names = page.locator("#bt-opt-method option").all_inner_texts()
+    page.locator("#bt-opt-method").select_option("optimizer/ui_demo")
+    page.wait_for_timeout(200)
+    opt_param_count = page.locator(".bt-opt-params [data-opname]").count()
+    check("0.6.6：优化器动态列表 + 参数表单",
+          len(opt_names) >= 4 and any("UI 演示优化器" in x for x in opt_names)
+          and opt_param_count == 2,
+          f"names={opt_names} params={opt_param_count}")
+    page.locator("#bt-opt-method").select_option("optimizer/grid")
     page.locator('.bt-space[data-osk="fast"] [data-omin]').fill("5")
     page.locator('.bt-space[data-osk="fast"] [data-omax]').fill("10")
     page.locator('.bt-space[data-osk="fast"] [data-ostep]').fill("5")
@@ -786,7 +783,7 @@ def run_checks(page, base: str, agent_base: str = None,
     page.locator("#result-add").click()
     page.wait_for_selector(".bt-card", timeout=8000)
     page.wait_for_timeout(500)
-    page.locator(".bt-row select").nth(1).select_option("strategy/ui_changed")
+    page.locator("#bt-strategy").select_option("strategy/ui_changed")
     page.wait_for_timeout(500)
     page.locator(".bt-preset button", has_text="管理方案").click()
     page.wait_for_selector(".bt-preset-manager", timeout=5000)
@@ -880,7 +877,7 @@ def main() -> int:
             page.wait_for_selector(".ind-add", timeout=15000)
             _wait_app(page)
 
-            print("\nUI smoke（23 条）")
+            print("\nUI smoke（22 条）")
             passed, failed = run_checks(page, server.base, server.agent_base, server.token)
 
             # Console errors are a hard failure, but not a numbered check.

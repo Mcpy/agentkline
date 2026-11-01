@@ -1,10 +1,10 @@
 """
-AgentKline - 脚本执行引擎（v0.4 R1）
+AgentKline - 脚本执行引擎（v0.4 R1；v0.6.6 增 optimizer）
 
-- 双根存储：builtin = <package>/resources/scripts/{datasource,indicator,strategy}（随包发布，只读）
+- 双根存储：builtin = <package>/resources/scripts/{datasource,indicator,strategy,optimizer}（随包发布，只读）
              custom = <scripts_dir>/{...}（可写；save_script 只落这里）
 - id = kind/stem 是唯一技术标识；引用格式 kind/name（如 indicator/macd），裸文件名硬切报错
-- 元数据 NAME/DESC/PARAMS/CAPS/IDENTITY 为模块顶层**字面常量**，ast 静态抽取（列目录永不 exec）+ mtime 缓存
+- 元数据 NAME/DESC/PARAMS/PARAM_META/CAPS/IDENTITY/OPTIMIZER_API 为模块顶层**字面常量**，ast 静态抽取（列目录永不 exec）+ mtime 缓存
 - CAPS 一致性：声明 ⇒ 必须实现（backfill⇒main 含 until 参；symbols⇒def list_symbols；ticker⇒def ticker），否则 CAPS_MISMATCH；
   不声明 = 无能力（custom 旧脚本缺 CAPS 仅 warning）
 - 运行模式 poll/once 是槽位配置属性，不是脚本类别（见 service/datasource）
@@ -21,10 +21,13 @@ from typing import Optional
 
 logger = logging.getLogger("agentkline.script")
 
-KINDS = ("datasource", "indicator", "strategy")
+KINDS = ("datasource", "indicator", "strategy", "optimizer")
 CAPS_KEYS = ("backfill", "symbols", "ticker")
+OPTIMIZER_CAPS = ("continuous", "multi_objective", "requires_full_space", "custom_score")
+OPTIMIZER_API_VERSION = 1
 STEM_RE = re.compile(r"^[a-z0-9_]+$")
-META_NAMES = ("NAME", "DESC", "PARAMS", "CAPS", "IDENTITY", "INTERVALS", "SUBPLOT")
+META_NAMES = ("NAME", "DESC", "PARAMS", "PARAM_META", "CAPS", "IDENTITY",
+              "INTERVALS", "SUBPLOT", "OPTIMIZER_API")
 SAVE_WARN_BYTES = 100_000  # save_script 大小告警阈值（R8 护栏族）
 
 
@@ -80,9 +83,10 @@ class ScriptEngine:
     @staticmethod
     def _meta_from_tree(tree) -> dict:
         meta = {"name": None, "desc": ast.get_docstring(tree), "params": {},
-                "caps": {k: False for k in CAPS_KEYS}, "caps_declared": False,
-                "identity": [], "defs": set(), "main_until": False, "has_main": False,
-                "subplot": False}
+                "param_meta": {}, "caps": {k: False for k in CAPS_KEYS},
+                "caps_raw": {}, "caps_declared": False, "optimizer_api": None,
+                "literal_errors": [], "identity": [], "defs": set(),
+                "main_until": False, "has_main": False, "subplot": False}
         literals = {}
         for node in tree.body:
             if isinstance(node, ast.Assign):
@@ -92,14 +96,24 @@ class ScriptEngine:
                             literals[t.id] = ast.literal_eval(node.value)
                         except Exception:
                             literals[t.id] = None  # 非字面 = 未声明（契约要求字面）
+                            meta["literal_errors"].append(t.id)
+        for _name, _typ in (("PARAMS", dict), ("PARAM_META", dict), ("CAPS", dict)):
+            if _name in literals and literals[_name] is not None \
+                    and not isinstance(literals[_name], _typ):
+                meta["literal_errors"].append(_name)
         if isinstance(literals.get("NAME"), str):
             meta["name"] = literals["NAME"]
         if isinstance(literals.get("DESC"), str):
             meta["desc"] = literals["DESC"]
         if isinstance(literals.get("PARAMS"), dict):
             meta["params"] = literals["PARAMS"]
+        if isinstance(literals.get("PARAM_META"), dict):
+            meta["param_meta"] = literals["PARAM_META"]
+        if "OPTIMIZER_API" in literals:
+            meta["optimizer_api"] = literals["OPTIMIZER_API"]
         caps_raw = literals.get("CAPS")
         if isinstance(caps_raw, dict):
+            meta["caps_raw"] = dict(caps_raw)
             meta["caps"] = {k: bool(caps_raw.get(k, False)) for k in CAPS_KEYS}
             meta["caps_declared"] = True
         ident = literals.get("IDENTITY")
@@ -152,6 +166,79 @@ class ScriptEngine:
             return {k: False for k in CAPS_KEYS}
         return self._ast_info(r["path"])["caps"]
 
+    # ---------- 优化器插件（v0.6.6） ----------
+    @staticmethod
+    def check_optimizer_meta(meta: dict) -> Optional[str]:
+        if meta.get("optimizer_api") != OPTIMIZER_API_VERSION:
+            return (f"SAVE_OPTIMIZER_API: 需要 OPTIMIZER_API = {OPTIMIZER_API_VERSION}，"
+                    f"收到 {meta.get('optimizer_api')!r}")
+        if "ask" not in meta["defs"]:
+            return "SAVE_OPTIMIZER_ASK: 必须定义 def ask(state, ctx)"
+        for name in ("PARAMS", "PARAM_META", "CAPS"):
+            if name in (meta.get("literal_errors") or []):
+                return f"SAVE_OPTIMIZER_META: {name} 必须是字面量"
+        return None
+
+    def optimizer_meta(self, ref: str) -> dict:
+        r = self.resolve(ref)
+        if not r:
+            return {"error": id_error(ref) if parse_id(ref) is None
+                    else f"SCRIPT_NOT_FOUND: {ref}"}
+        if r["kind"] != "optimizer":
+            return {"error": f"OPTIMIZER_INVALID: {ref} 不是 optimizer 脚本"}
+        meta = self._ast_info(r["path"])
+        caps = {k: bool((meta.get("caps_raw") or {}).get(k, False))
+                for k in OPTIMIZER_CAPS}
+        return {
+            "id": r["id"], "kind": "optimizer", "source": r["source"],
+            "name": meta["name"] or r["stem"], "desc": meta["desc"] or "",
+            "params": meta.get("params") or {},
+            "param_meta": meta.get("param_meta") or {},
+            "caps": caps, "api": meta.get("optimizer_api"),
+            "error": self.check_optimizer_meta(meta),
+        }
+
+    def list_optimizers(self) -> list:
+        seen, out = set(), []
+        for source, root in self.roots():
+            for p in sorted((root / "optimizer").glob("*.py")):
+                sid = f"optimizer/{p.stem}"
+                if sid in seen:
+                    continue
+                seen.add(sid)
+                info = self.optimizer_meta(sid)
+                if "error" in info and info.get("error") and not info.get("id"):
+                    continue
+                out.append(info)
+        return out
+
+    def load_optimizer(self, ref: str) -> dict:
+        """加载优化器脚本到独立命名空间；ask 必须存在，init/tell/rank 可选。"""
+        info = self.optimizer_meta(ref)
+        if info.get("error"):
+            return {"error": info["error"]}
+        r = self.resolve(ref)
+        try:
+            code = r["path"].read_text(encoding="utf-8")
+        except OSError as exc:
+            return {"error": f"SCRIPT_READ_ERROR: {exc}"}
+        namespace = {"__name__": "__ak_optimizer__", "__file__": str(r["path"])}
+        old_stdout, captured = sys.stdout, io.StringIO()
+        sys.stdout = captured
+        try:
+            exec(code, namespace)
+        except Exception as exc:
+            return {"error": f"OPTIMIZER_SCRIPT_ERROR: {exc}"}
+        finally:
+            sys.stdout = old_stdout
+            output = captured.getvalue()
+            if output:
+                logger.info("Optimizer output %s: %s", ref, output[:500])
+        if not callable(namespace.get("ask")):
+            return {"error": "OPTIMIZER_SCRIPT_ERROR: ask 不可调用"}
+        return {"id": info["id"], "source": info["source"], "meta": info,
+                "namespace": namespace}
+
     # ---------- 列表 ----------
     def list_scripts(self) -> list:
         seen, out = set(), []
@@ -163,13 +250,17 @@ class ScriptEngine:
                         continue  # custom shadow builtin
                     seen.add(sid)
                     meta = self._ast_info(p)
-                    if not meta["caps_declared"] and source == "custom":
+                    if not meta["caps_declared"] and source == "custom" and kind != "optimizer":
                         logger.warning("脚本 %s 未声明 CAPS（v0.4 硬切后视为无能力）", sid)
+                    caps = ({k: bool((meta.get("caps_raw") or {}).get(k, False))
+                             for k in OPTIMIZER_CAPS}
+                            if kind == "optimizer" else meta["caps"])
                     out.append({
                         "id": sid, "kind": kind, "source": source,
                         "display": meta["name"] or p.stem,
                         "desc": meta["desc"] or "",
-                        "params": meta["params"], "caps": meta["caps"],
+                        "params": meta["params"], "param_meta": meta.get("param_meta") or {},
+                        "caps": caps,
                         "identity": meta["identity"], "intervals": meta["intervals"],
                     })
         return out
@@ -382,12 +473,17 @@ class ScriptEngine:
         except SyntaxError as e:
             return {"error": f"SAVE_SYNTAX: {e}"}
         meta = self._meta_from_tree(tree)
-        if not meta["has_main"]:
-            return {"error": f"SAVE_NO_MAIN: {kind} 脚本必须定义 main 函数"
-                             f"（datasource: main(params[, until])；indicator: main(params, ohlcv)）"}
-        caps_err = self.check_caps(meta)
-        if caps_err:
-            return {"error": caps_err}
+        if kind == "optimizer":
+            opt_err = self.check_optimizer_meta(meta)
+            if opt_err:
+                return {"error": opt_err}
+        else:
+            if not meta["has_main"]:
+                return {"error": f"SAVE_NO_MAIN: {kind} 脚本必须定义 main 函数"
+                                 f"（datasource: main(params[, until])；indicator: main(params, ohlcv)）"}
+            caps_err = self.check_caps(meta)
+            if caps_err:
+                return {"error": caps_err}
         if kind == "strategy":
             # v0.6.1：策略保存即验（纯 AST，不执行；错误码与 ak-engine 一致）
             try:
