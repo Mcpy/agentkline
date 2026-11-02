@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AgentKline UI smoke (v0.6.6) — 22 browser checks on a disposable instance.
+"""AgentKline UI smoke (v0.6.7) — 27 browser checks on a disposable instance.
 
 Why this exists: test_e2e.py covers the API/MCP surface, not the browser UI.
 These checks protect the surfaces that 0.5.3–0.6.5 changed by hand:
@@ -723,14 +723,79 @@ def run_checks(page, base: str, agent_base: str = None,
     opt_best = page.locator(".bt-opt-best").count()
     opt_rows = page.locator(".bt-opt-trial-table tr").count()
     opt_acts = page.locator(".bt-opt-acts button").count()
+    opt_stab = page.locator(".bt-stab-section").count()
     chips_after_opt = page.locator("#result-chips .res-chip").count()
     page.locator("#bt-opt-report-overlay .dialog-foot .btn-primary").click()
     page.wait_for_timeout(300)
     check("0.6.5：寻优页签 4 组 + 报告 + Top K 结果",
           opt_best == 1 and opt_rows >= 5 and opt_acts >= 2
-          and chips_after_opt >= chips_before_opt + 1,
-          f"best={opt_best} rows={opt_rows} acts={opt_acts} "
+          and chips_after_opt >= chips_before_opt + 1 and opt_stab >= 1,
+          f"best={opt_best} rows={opt_rows} acts={opt_acts} stab={opt_stab} "
           f"chips={chips_before_opt}->{chips_after_opt}")
+
+    # 15.1) v0.6.7：Walk-forward 表单 + 折报告
+    page.locator("#result-add").click()
+    page.wait_for_selector(".bt-card", timeout=8000)
+    page.locator("button.bt-mode", has_text="参数寻优").click()
+    page.wait_for_selector("#bt-opt-mode", timeout=10000)
+    page.locator("#bt-opt-mode").select_option("walk_forward")
+    page.wait_for_timeout(200)
+    wf_visible = page.locator("#bt-opt-wf-folds").is_visible()
+    hold_hidden = not page.locator("#bt-opt-ratio").is_visible()
+    page.fill("#bt-opt-wf-folds", "3")
+    page.locator("#bt-opt-stability").uncheck()
+    page.fill("#bt-opt-runs", "4")
+    page.locator('.bt-space[data-osk="fast"] [data-omin]').fill("5")
+    page.locator('.bt-space[data-osk="fast"] [data-omax]').fill("10")
+    page.locator('.bt-space[data-osk="fast"] [data-ostep]').fill("5")
+    page.locator('.bt-space[data-osk="slow"] [data-omin]').fill("30")
+    page.locator('.bt-space[data-osk="slow"] [data-omax]').fill("60")
+    page.locator('.bt-space[data-osk="slow"] [data-ostep]').fill("30")
+    page.fill("#bt-bars", "300")
+    page.locator(".bt-foot .btn-primary").click()
+    page.wait_for_selector("#bt-opt-report-overlay", timeout=180000)
+    page.wait_for_timeout(500)
+    wf_sum = page.locator(".bt-wf-section").count()
+    wf_rows = page.locator(".bt-opt-wf-table tr").count()
+    page.locator("#bt-opt-report-overlay .dialog-foot .btn-primary").click()
+    page.wait_for_timeout(300)
+    check("0.6.7：Walk-forward 表单 + 折报告",
+          wf_visible and hold_hidden and wf_sum == 1 and wf_rows >= 4,
+          f"form={wf_visible}/{hold_hidden} sum={wf_sum} rows={wf_rows}")
+
+    # 15.2) v0.6.7：顶部栏「历史报告」入口 + 列表可回读/删除
+    page.locator("#result-history").click()
+    page.wait_for_selector("#bt-opt-history-overlay", timeout=8000)
+    page.wait_for_timeout(400)
+    hist_rows = page.locator(".bt-opt-history-row").count()
+    hist_symbol = page.locator(".bt-opt-history-symbol").first.inner_text()
+    hist_strategy = page.locator(".bt-opt-history-strategy").first.inner_text()
+    hist_tabs = page.locator(".bt-opt-history-toolbar .bt-tab").all_inner_texts()
+    hist_search = page.locator(".bt-opt-history-toolbar .bt-preset-search").count()
+    page.locator(".bt-opt-history-toolbar .bt-tab").nth(1).click()
+    page.wait_for_timeout(500)
+    hist_all_rows = page.locator(".bt-opt-history-row").count()
+    hist_after = hist_rows
+    if hist_rows >= 1:
+        page.locator(".bt-opt-history-del").first.click()
+        page.wait_for_selector(".dialog-overlay .btn-danger", timeout=5000)
+        page.locator(".dialog-overlay .btn-danger").click()
+        page.wait_for_timeout(500)
+        hist_after = page.locator(".bt-opt-history-row").count()
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(200)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(200)
+    check("0.6.7：历史报告列表可回读", hist_rows >= 1, f"rows={hist_rows}")
+    check("0.6.7：历史行展示标的/策略",
+          bool(hist_symbol.strip()) and bool(hist_strategy.strip()),
+          f"symbol={hist_symbol!r} strategy={hist_strategy!r}")
+    check("0.6.7：历史报告 本标的/全部 + 搜索",
+          hist_tabs == ["本标的", "全部报告"] and hist_search == 1
+          and hist_all_rows >= 1,
+          f"tabs={hist_tabs} search={hist_search} all={hist_all_rows}")
+    check("0.6.7：历史报告可删除", hist_rows >= 1 and hist_after == hist_rows - 1,
+          f"rows={hist_rows}->{hist_after}")
 
     # 16) 0.6.4 收尾：参数方案（存 → 回测对话框自动套用）
     saved = _post(f"{base}/api/presets", {"board_id": BOARD_ID,
@@ -877,7 +942,7 @@ def main() -> int:
             page.wait_for_selector(".ind-add", timeout=15000)
             _wait_app(page)
 
-            print("\nUI smoke（22 条）")
+            print("\nUI smoke（27 条）")
             passed, failed = run_checks(page, server.base, server.agent_base, server.token)
 
             # Console errors are a hard failure, but not a numbered check.

@@ -703,7 +703,9 @@ def run_optimization(board_id: str, timeframe: Optional[str] = None, engine: str
                      slippage_bps: float = 5.0, protection: Optional[dict] = None,
                      start_time: Optional[int] = None, end_time: Optional[int] = None,
                      limit: int = 20000, timeout: float = 120.0,
-                     optimizer_params: Optional[dict] = None):
+                     optimizer_params: Optional[dict] = None,
+                     mode: str = "single", walk_forward: Optional[dict] = None,
+                     stability: Optional[dict] = None):
     """参数寻优：在同一份冻结数据上按目标/约束搜索参数，Top K 做样本外验证。
 
     space 每个参数给 {"min","max","step"} 或 {"values":[...]}；
@@ -711,21 +713,41 @@ def run_optimization(board_id: str, timeframe: Optional[str] = None, engine: str
     optimizer_params 是优化器脚本 PARAMS 的覆盖值；objective 多目标脚本可传自由结构；
     constraints={"min_trades":10,"max_drawdown":0.4}（不满足的试次不参与评选）；
     budget={"max_runs":40,"max_seconds":600}；holdout={"ratio":0.3,"top_k":3}（ratio=0 不做样本外）。
-    只把 Top K 的样本外结果登记进结果栏（不带 holdout 时登记 Top K 样本内），
-    完整试次表在作业报告里。立即返回 {job_id,total,...}；进度用 optimization_status。"""
+    mode="walk_forward" 时走滚动/锚定稳健性验证：
+      walk_forward={"folds":5,"window":"rolling","is_ratio":0.75,"top_k":1}；
+    stability={"enabled":True,"mode":"auto","radius":1,"scope":"one_at_a_time",
+               "max_runs":24} 对最优参数做邻域扫描（0.6.7）。
+    只把 Top K/每折最优结果登记进结果栏；完整报告落盘，可用 list_optimizations 回看。
+    立即返回 {job_id,total,...}；进度用 optimization_status。"""
     return service.run_optimization(
         board_id, timeframe=timeframe, engine=engine, script=script, source=source,
         space=space, method=method, objective=objective, constraints=constraints,
         budget=budget, holdout=holdout, seed=seed, direction=direction,
         initial_cash=initial_cash, fee_bps=fee_bps, slippage_bps=slippage_bps,
         protection=protection, start_time=start_time, end_time=end_time,
-        limit=limit, timeout=timeout, optimizer_params=optimizer_params)
+        limit=limit, timeout=timeout, optimizer_params=optimizer_params,
+        mode=mode, walk_forward=walk_forward, stability=stability)
+
+
+@api_tool(group="read", path="/api/backtest/optimizations")
+def list_optimizations(board_id: Optional[str] = None, limit: int = 50):
+    """列出已落盘的寻优/稳健性报告（v0.6.7）；点击结果用 optimization_status 取全文。"""
+    return service.list_optimizations(board_id=board_id, limit=limit)
+
+
+@api_tool(group="user_write", method="DELETE",
+          path="/api/backtest/optimizations/{job_id}", err_status=404)
+def delete_optimization(job_id: str):
+    """删除一份已落盘的寻优/稳健性报告；只删报告，不删该批已登记的结果。"""
+    return service.delete_optimization(job_id)
 
 
 @api_tool(group="read", path="/api/backtest/optimize/{job_id}", err_status=404)
 def optimization_status(job_id: str):
-    """查参数寻优作业：status=running/done/cancelled/failed；phase=is/oos/register/done；
-    done/total、current、trials:[{index,params,status,score,is_stats,oos_*}],
+    """查参数寻优/稳健性作业：status=running/done/cancelled/failed；
+    phase=is/oos/register/wf/stability/done；done/total、current、
+    trials:[{index,fold?,params,status,score,is_stats,oos_*}]、folds[]、
+    walk_forward(summary/stitched_oos)、stability(runs/pass_ratio/isolated_peak)、
     top/best（含 result_id 与样本内外指标）、warnings、registered_result_ids。"""
     return service.get_optimization(job_id)
 

@@ -3,6 +3,8 @@
 | 方法 | 路径 | 摘要 |
 |---|---|---|
 | POST | `/api/backtest` | Run Backtest |
+| GET | `/api/backtest/optimizations` | List Optimizations |
+| DELETE | `/api/backtest/optimizations/{job_id}` | Delete Optimization |
 | POST | `/api/backtest/optimize` | Run Optimization |
 | GET | `/api/backtest/optimize/{job_id}` | Optimization Status |
 | POST | `/api/backtest/optimize/{job_id}/cancel` | Optimization Cancel |
@@ -143,7 +145,9 @@
 | `delete_preset` | 删除参数方案（只删方案，不碰回测结果，也不删数据）。 |
 | `focus_result_trade` | 把用户屏幕带到某条结果的某一笔交易：选中该结果、打开详情、选中该笔并在图上定位。 |
 | `run_optimization` | 参数寻优：在同一份冻结数据上按目标/约束搜索参数，Top K 做样本外验证。 |
-| `optimization_status` | 查参数寻优作业：status=running/done/cancelled/failed；phase=is/oos/register/done； |
+| `list_optimizations` | 列出已落盘的寻优/稳健性报告（v0.6.7）；点击结果用 optimization_status 取全文。 |
+| `delete_optimization` | 删除一份已落盘的寻优/稳健性报告；只删报告，不删该批已登记的结果。 |
+| `optimization_status` | 查参数寻优/稳健性作业：status=running/done/cancelled/failed； |
 | `optimization_cancel` | 请求取消参数寻优：当前试次跑完即停；已登记的 Top K 结果保留。 |
 | `take_snapshot` | 触发前端截图并返回图片+路径。需有浏览器连着 /ws。 |
 | `get_snapshot` | 读取最新快照（图片+路径）。快照由浏览器截图上传产生。 |

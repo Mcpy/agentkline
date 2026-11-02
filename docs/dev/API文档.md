@@ -1,6 +1,6 @@
 # AgentKline API 文档
 
-> 版本：v0.6.6 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server（API 自 v0.4.0 起保持兼容）
+> 版本：v0.6.7 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server（API 自 v0.4.0 起保持兼容）
 > 破坏性硬切版本：无兼容层。旧路径（/api/ohlcv、/api/load-csv、/history、datasource 端点、indicator/update 杂交路径）一律 404/405。
 > 机器可读附录：`python scripts/gen_api_ref.py` 可从运行中服务生成 REST 路由表 + MCP 工具表（防漂移）。
 
@@ -126,7 +126,7 @@ CAPS 声明⇒实现（backfill⇒until 参/symbols⇒list_symbols/ticker⇒tick
 数据源 until 回溯可重放跨窗连续；单槽 max_bars_per_slot=50000 截旧+dropped；重算尾窗 max_window=5000；
 数据家族单脚本分片范式；L1 沙箱自律。
 
-## 10. MCP 工具（Streamable HTTP `/mcp`，agent 端口，64 个）
+## 10. MCP 工具（Streamable HTTP `/mcp`，agent 端口，66 个）
 
 改名：set_datasource→**set_kline_source**；load_history→**backfill**；run_script 窄身；list_scripts payload 升级。
 新增：save_script、search_symbols。换参：add/update/delete_indicator 与 get_indicators 换 inst_id/instances。
@@ -135,7 +135,7 @@ payload 调整：create_board(+symbol/source/params/poll_s)、create_timeframe�
 v0.6.0 增结果实例 5 个（import_result/list_results/get_result/rename_result/delete_result）；
 v0.6.1 增引擎回测 4 个（list_engines/list_strategies/strategy_meta/run_backtest，见 §17）；
 v0.6.4 增运镜 1 个 + 参数方案 4 个；
-v0.6.5 增参数寻优 3 个；v0.6.6 增 list_optimizers（优化器插件清单）。
+v0.6.5 增参数寻优 3 个；v0.6.6 增 list_optimizers（优化器插件清单）；v0.6.7 增 list_optimizations / delete_optimization（报告历史/删除）。
 **MCP-only 判决**：take_snapshot（无 REST 触发）。**REST-only**：get_kline_source、/api/view 上报。
 docstring 为单一真相；REST 为薄镜像；`test_e2e.py` 含两表面对齐断言。
 
@@ -254,6 +254,8 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
 | GET | `/api/engines` | web+agent | 引擎清单 `{engines:[{id,version,api,caps,assumptions,load_error}]}`；后端通过 `ak-engine list` 子进程发现，不 import 引擎运行时 |
 | GET | `/api/strategies` | web+agent | 策略脚本清单 `{strategies:[...]}`（同 list_scripts 行，仅 kind=strategy） |
 | GET | `/api/optimizers` | web+agent | 优化器脚本清单 `{optimizers:[{id,name,source,params,param_meta,caps,api}]}`（内置/自定义） |
+| GET | `/api/backtest/optimizations` | web+agent | 寻优/稳健性报告历史 `?board_id=&limit=50`：`{optimizations:[{job_id,symbol,strategy_name,timeframe,mode,method,status,best_params,fold_count,stability,...}]}`（v0.6.7 落盘；列表按标的展示） |
+| DELETE | `/api/backtest/optimizations/{job_id}` | web+agent | 删除一份已落盘报告；只删报告，不删该批已登记结果（v0.6.7） |
 | GET | `/api/strategy/meta` | web+agent | `?script=strategy/x` 或 `?source=<全文>`：返回 NAME/DESC/WARMUP/PARAMS/PARAM_META/PROTECTION/BARS_PER_YEAR + `errors`（纯 AST，不执行） |
 | POST | `/api/backtest` | web+agent | 跑一次回测，结果按结果实例登记并广播 |
 
@@ -318,12 +320,12 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
 - v0.6.5：方案附 `script_sha256`；`GET /api/presets` 每条再加 `script_changed`（策略内容变过为 true；
   旧方案无哈希时 false，不误报）。
 
-### 17.7 参数寻优 / 优化器插件（v0.6.5，v0.6.6 插件化）
+### 17.7 参数寻优 / 优化器插件 / 稳健性（v0.6.5，v0.6.6 插件化，v0.6.7 稳健性）
 
 - `GET /api/optimizers`：优化器脚本清单（内置 + 自定义）：
   `[{id,name,desc,source,params,param_meta,caps,api}]`；id=`optimizer/xxx`，custom shadow builtin。
-- `POST /api/backtest/optimize`：立即返回 `{job_id,method,optimizer_id,optimizer,total,phase:"is",
-  space,objective,constraints,budget,holdout,optimizer_params}`。
+- `POST /api/backtest/optimize`：立即返回 `{job_id,method,optimizer_id,optimizer,total,phase,
+  mode,walk_forward,stability,space,objective,constraints,budget,holdout,optimizer_params}`。
 
 ```json
 {
@@ -336,9 +338,40 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
   "constraints": {"min_trades": 10, "max_drawdown": 0.4},
   "budget": {"max_runs": 40, "max_seconds": 600},
   "holdout": {"ratio": 0.3, "top_k": 3},
+  "mode": "single",
+  "stability": {"enabled": true, "mode": "auto", "radius": 1,
+                "scope": "one_at_a_time", "max_runs": 24},
   "seed": 42
 }
 ```
+
+Walk-forward 模式（v0.6.7）把 `holdout` 换成 `walk_forward`：
+
+```json
+{
+  "mode": "walk_forward",
+  "walk_forward": {"folds": 5, "window": "rolling", "is_ratio": 0.75,
+                   "top_k": 1, "min_oos_bars": 20},
+  "stability": {"enabled": true, "max_runs": 24}
+}
+```
+
+- `walk_forward.folds` 3~10（默认 5）；`window=rolling|anchored`（默认滚动）；
+  `is_ratio` 0.5~0.9（0.75=3:1，默认）；`top_k` 每折 1~3。数据不够时自动降折并给
+  `WF_FOLDS_REDUCED`；切不出 3 折返回 `WF_INSUFFICIENT_BARS`。每折 OOS 默认紧接 IS、
+  step=OOS 长度；`step` 可选，超过 OOS 长度会告警 `WF_STEP_GAP`。
+- 每折都会重新寻优，只有每折 Top K（默认 1）登记结果，`batch.kind="walkforward"`，
+  带 `fold/folds/window`。报告 `folds[]` 每折含 IS/OOS 起止、`is_stats/oos_stats`、
+  `is_score/oos_score`、`result_id`；`walk_forward.summary` 给 `positive_folds/wfe/parameter_drift`，
+  `walk_forward.stitched_oos` 给拼接后的 OOS 净值。
+- `stability`（默认单次模式开启、walk-forward 默认关闭）：对最终最优参数做邻域扫描；
+  `mode=auto|step|percent`（auto：整数 ±1 step、连续 ±10%）、`radius=1|2`、
+  `scope=one_at_a_time|top2|full`、`max_runs` 2~100（默认 24）。
+  `stability.pass_ratio/plateau_ratio` 默认 0.5/0.8；报告含 `runs[]`、`pass_ratio`、
+  `plateau_ratio`、`isolated_peak`，并在 `PARAM_ISOLATED_PEAK` 时告警。多目标暂不支持邻域。
+- 报告落盘（v0.6.7）：SQLite schema v4 的 `optimize_reports` 保存整份报告；内存作业 10 分钟
+  退役后仍可 `GET /api/backtest/optimize/{job_id}` 回读，`GET /api/backtest/optimizations`
+  列历史。`POST /api/backtest/optimize/{job_id}/cancel` 后已跑完的试次/结果保留。
 
 - `method` 接受 `optimizer/xxx`；旧别名 `grid/random/bayes` 自动映射到同名内置。
   内核对 `optimizer_params` 按脚本 `PARAMS/PARAM_META` 校验并补默认值。
@@ -352,16 +385,22 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
 - `holdout.ratio` 0~0.5（0=不验证），`top_k` 1~10；样本内外各至少 20 根，否则
   `OPTIMIZE_HOLDOUT_TOO_SMALL`。
 - `GET /api/backtest/optimize/{job_id}`：`status=running|done|cancelled|failed`；
-  `phase=is|oos|register|done`；`trials` 每行含 `status=ok|rejected|invalid|failed`、`score`、
-  `is_stats`、`oos_*`、`overfit_gap`、`result_id`；`top/best` 按 rank 或样本外分数排序；
-  `optimizer`、`optimizer_params`、`ranked_by`、`extra`；`warnings` 含原有 OOS/TIME_BUDGET/
-  NO_VALID_TRIAL 与 `OPTIMIZE_RANK_FAILED`/`OPTIMIZER_SUMMARIZE_FAILED`。
+  `phase=is|oos|register|wf|stability|done`；`trials` 每行含 `status=ok|rejected|invalid|failed`、
+  `score`、`is_stats`、`oos_*`、`overfit_gap`、`result_id`（walk-forward 行另带 `fold`）；
+  `top/best` 按 rank 或样本外分数排序；`folds[]`、`walk_forward`、`stability`、
+  `stability_done/stability_total` 在对应模式出现；`optimizer`、`optimizer_params`、
+  `ranked_by`、`extra`；`warnings` 含原有 OOS/TIME_BUDGET/NO_VALID_TRIAL 与
+  `WF_FOLD_NEGATIVE`/`WF_DEGRADED`/`WF_PARAM_DRIFT`/`PARAM_ISOLATED_PEAK` 等。
 - `POST /api/backtest/optimize/{job_id}/cancel`：当前试次跑完即停，已登记结果保留。
-- 只登记 Top K 的样本外结果（无 holdout 时 Top K 样本内）；结果 `batch` 加
-  `kind:"optimize"`、`phase`、`method`、`params`、`is_stats`、`is_score`、`oos_stats`、
-  `oos_score`、`overfit_gap`、`overfit_ratio`。完整试次只在内存报告里，重启即失。
+- 只登记 Top K/每折最优结果；结果 `batch` 加 `kind:"optimize"|"walkforward"`、`phase`、
+  `method`、`params`、`is_stats`、`is_score`、`oos_stats`、`oos_score`、`overfit_gap`、
+  `overfit_ratio`；walk-forward 另带 `fold/folds/window`。
+- 报告（含试次、折、邻域）落盘到 `optimize_reports`，重启可回读；`list_optimizations` 只给
+  摘要，全文仍走 `optimization_status`。`DELETE /api/backtest/optimizations/{job_id}` 删报告，
+  不删已登记结果；running 作业拒绝删除，返回 `OPTIMIZE_RUNNING`。
 - WS：`optimize_started` / `optimize_progress` / `optimize_done`。
-- MCP 工具：`list_optimizers` / `run_optimization` / `optimization_status` / `optimization_cancel`。
+- MCP 工具：`list_optimizers` / `run_optimization` / `list_optimizations` /
+  `delete_optimization` / `optimization_status` / `optimization_cancel`。
 - 插件契约与自定义示例见 `docs/dev/优化器插件开发指南.md` 与 skill `optimizer-authoring`。
 
 ## 内置数据源（v0.4.4）

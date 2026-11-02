@@ -229,8 +229,8 @@ def test_store_migration_and_hash():
         conn.close()
         st = Store(db, app_version="0.6.5")
         cols = {r[1] for r in st._conn.execute("PRAGMA table_info(presets)").fetchall()}
-        check("v2 → v3 迁移加 script_sha256", "script_sha256" in cols
-              and st.stats()["schema"] == 3, str(cols))
+        check("v2 → v4 迁移加 script_sha256", "script_sha256" in cols
+              and st.stats()["schema"] == 4, str(cols))
         st.close()
 
         # 方案记录策略哈希 + 策略变更提示

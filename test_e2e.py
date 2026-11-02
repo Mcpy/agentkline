@@ -69,6 +69,8 @@ TOOL_REST_MAP = {
     "run_optimization": ("post", "/api/backtest/optimize"),
     "optimization_status": ("get", "/api/backtest/optimize/"),
     "optimization_cancel": ("post", "/api/backtest/optimize/"),
+    "list_optimizations": ("get", "/api/backtest/optimizations"),
+    "delete_optimization": ("delete", "/api/backtest/optimizations/"),
     "focus_result_trade": ("post", "/api/result/"),
     "list_presets": ("get", "/api/presets"),
     "save_preset": ("post", "/api/presets"),
@@ -456,7 +458,7 @@ def test(port: int, token: str = None):
     print("🔗 两表面对齐")
     try:
         tools = mcp_tools(base, s)
-        check("MCP 工具数=64", len(tools) == 64, f"got {len(tools)}")
+        check("MCP 工具数=66", len(tools) == 66, f"got {len(tools)}")
         missing = [t for t in tools if t not in TOOL_REST_MAP and t not in MCP_ONLY]
         check("无未映射工具", not missing, str(missing))
         spec = s.get(f"{base}/openapi.json").json()
@@ -991,6 +993,68 @@ def test(port: int, token: str = None):
     })
     check("寻优未知方法被拒", r.status_code == 400 and "OPTIMIZE_METHOD_INVALID" in r.text,
           r.text[:160])
+
+    # v0.6.7 Walk-forward + 参数邻域 + 报告落盘
+    r = s.post(f"{base}/api/backtest/optimize", json={
+        "board_id": "btb", "timeframe": "1d", "script": "strategy/ma_cross",
+        "space": {"fast": [5, 10], "slow": [30, 60]}, "method": "grid",
+        "objective": {"metric": "sharpe"}, "budget": {"max_runs": 4, "max_seconds": 120},
+        "mode": "walk_forward",
+        "walk_forward": {"folds": 3, "window": "rolling", "is_ratio": 0.75, "top_k": 1},
+        "stability": {"enabled": True, "mode": "auto", "radius": 1,
+                      "scope": "one_at_a_time", "max_runs": 8},
+        "seed": 7, "limit": 300,
+    })
+    wj = r.json()
+    wjob = wj.get("job_id")
+    check("WF 启动（3 折 × 4 试次）", r.status_code == 200 and wjob
+          and wj.get("mode") == "walk_forward" and wj.get("total") == 12,
+          r.text[:240])
+    wst = {}
+    for _ in range(180):
+        wst = s.get(f"{base}/api/backtest/optimize/{wjob}").json()
+        if wst.get("status") != "running":
+            break
+        _tm.sleep(0.25)
+    wf = wst.get("walk_forward") or {}
+    folds = wst.get("folds") or []
+    check("WF 三折均有 IS/OOS 与结果", wst.get("status") == "done"
+          and len(folds) == 3
+          and all(f.get("is_stats") and f.get("oos_stats") and f.get("result_id")
+                  for f in folds), str(wst)[:260])
+    check("WF 汇总/拼接 OOS", (wf.get("summary") or {}).get("valid_folds") == 3
+          and len((wf.get("stitched_oos") or {}).get("values") or []) > 0,
+          str(wf.get("summary"))[:200])
+    check("WF 只登记每折最优", len(wst.get("registered_result_ids") or []) == 3,
+          str(wst.get("registered_result_ids")))
+    if folds:
+        wsum = s.get(f"{base}/api/result/{folds[0]['result_id']}?section=summary") \
+            .json().get("result") or {}
+        wb = wsum.get("batch") or {}
+        check("WF 结果带 fold 批次", wb.get("kind") == "walkforward"
+              and wb.get("fold") == 0 and wb.get("folds") == 3, str(wb)[:220])
+    stab = wst.get("stability") or {}
+    check("参数邻域报告", stab.get("runs") and stab.get("pass_ratio") is not None
+          and "isolated_peak" in stab, str(stab)[:220])
+    hist = s.get(f"{base}/api/backtest/optimizations",
+                 params={"board_id": "btb", "limit": 20}).json()
+    hrow = next((x for x in hist.get("optimizations") or []
+                 if x.get("job_id") == wjob), {})
+    check("报告列表含 WF 作业", bool(hrow), str(hist)[:240])
+    check("报告摘要带标的/策略", bool(hrow.get("symbol"))
+          and bool(hrow.get("strategy_name")), str(hrow)[:240])
+    check("报告落盘可回读", (s.get(f"{base}/api/backtest/optimize/{wjob}").json()
+                              .get("mode") == "walk_forward"), "")
+    r = s.delete(f"{base}/api/backtest/optimizations/{wjob}")
+    check("报告可删除", r.status_code == 200 and r.json().get("deleted") == wjob,
+          r.text[:160])
+    hist2 = s.get(f"{base}/api/backtest/optimizations",
+                  params={"board_id": "btb", "limit": 20}).json()
+    check("删除后历史不再包含", not any(x.get("job_id") == wjob
+                                        for x in hist2.get("optimizations") or []),
+          str(hist2)[:200])
+    check("删除后报告 404", s.get(f"{base}/api/backtest/optimize/{wjob}").status_code == 404,
+          "")
 
     # 自定义优化器：PARAMS + 多目标 rank 接口验证（不内置到产品）
     custom_opt = ('OPTIMIZER_API = 1\n'

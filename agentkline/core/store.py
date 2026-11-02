@@ -21,7 +21,7 @@ from .results import summarize
 
 logger = logging.getLogger("agentkline.store")
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 EQUITY_CHUNK = 500      # 净值分块：每块 500 点 [[ts,value],…]
 EVENTS_KEEP = 5000      # 事件账本上限（超出裁旧）
 
@@ -73,6 +73,18 @@ _SCHEMA = (
            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)""",
     """CREATE UNIQUE INDEX IF NOT EXISTS presets_scope
            ON presets(source, symbol, timeframe, script, name)""",
+    # v0.6.7 寻优/稳健性作业报告：内存 10 分钟退役后仍可回看
+    """CREATE TABLE IF NOT EXISTS optimize_reports (
+           job_id TEXT PRIMARY KEY,
+           board_id TEXT NOT NULL,
+           timeframe TEXT,
+           status TEXT,
+           summary TEXT NOT NULL,
+           report TEXT NOT NULL,
+           created_at INTEGER NOT NULL,
+           finished_at INTEGER)""",
+    """CREATE INDEX IF NOT EXISTS optimize_reports_board
+           ON optimize_reports(board_id, created_at DESC)""",
 )
 
 
@@ -374,6 +386,77 @@ class Store:
 
     def count_results(self) -> int:
         return int(self._rows("SELECT COUNT(*) AS n FROM results")[0]["n"])
+
+    # ---------- 寻优/稳健性报告（v0.6.7） ----------
+    def save_optimization(self, report: dict) -> None:
+        """整份报告落盘；summary 单独存一份，供历史列表快速读。"""
+        jid = str(report.get("job_id") or "")
+        if not jid:
+            return
+        best = report.get("best") or {}
+        wf = report.get("walk_forward") or {}
+        st = report.get("stability") or {}
+        summary = {
+            "job_id": jid,
+            "board_id": report.get("board_id") or "",
+            "timeframe": report.get("timeframe") or "",
+            "status": report.get("status") or "",
+            "mode": report.get("mode") or "single",
+            "method": report.get("method") or "",
+            "optimizer": report.get("optimizer") or {},
+            "symbol": report.get("symbol") or "",
+            "board_name": report.get("board_name") or "",
+            "strategy_name": report.get("strategy_name") or "",
+            "script": report.get("script") or "",
+            "created_at": report.get("created_at") or 0,
+            "finished_at": report.get("finished_at"),
+            "total": report.get("total"),
+            "best_params": best.get("params") or {},
+            "best_result_id": best.get("result_id"),
+            "fold_count": wf.get("fold_count"),
+            "stability": bool(st.get("runs")),
+            "warnings": [w.get("code") for w in (report.get("warnings") or [])
+                         if isinstance(w, dict) and w.get("code")],
+        }
+        self._write(
+            """INSERT OR REPLACE INTO optimize_reports
+               (job_id,board_id,timeframe,status,summary,report,created_at,finished_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (jid, summary["board_id"], summary["timeframe"], summary["status"],
+             _dumps(summary), _dumps(report), int(summary["created_at"] or 0),
+             int(summary["finished_at"] or 0)))
+
+    def load_optimization(self, job_id: str) -> Optional[dict]:
+        rows = self._rows("SELECT report FROM optimize_reports WHERE job_id=?", (job_id,))
+        if not rows:
+            return None
+        out = _loads(rows[0]["report"], None)
+        if isinstance(out, dict):
+            out["persisted"] = True
+            return out
+        return None
+
+    def delete_optimization(self, job_id: str) -> bool:
+        rows = self._rows("SELECT 1 FROM optimize_reports WHERE job_id=?", (job_id,))
+        if not rows:
+            return False
+        self._write("DELETE FROM optimize_reports WHERE job_id=?", (job_id,))
+        return True
+
+    def list_optimizations(self, board_id: str = None, limit: int = 50) -> list[dict]:
+        sql = "SELECT summary FROM optimize_reports"
+        args = []
+        if board_id:
+            sql += " WHERE board_id=?"
+            args.append(board_id)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        args.append(max(1, min(int(limit or 50), 200)))
+        out = []
+        for r in self._rows(sql, tuple(args)):
+            s = _loads(r["summary"], None)
+            if isinstance(s, dict) and s.get("job_id"):
+                out.append(s)
+        return out
 
     # ---------- 参数方案（v0.6.4 收尾） ----------
     def list_presets(self, source=None, symbol=None, script=None,

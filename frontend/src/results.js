@@ -12,7 +12,7 @@ import { refreshResultLayer, refreshResultMarksOnly, resultColor, focusTradeRang
          hitTradeMarker, tradeMarkerPoints } from './vela_adapter.js';
 import { addActivity } from './activity.js';
 import { openWorkbench, renderWorkbench, updateWorkbenchStatus } from './workbench.js';
-import { openBacktestDialog } from './backtest.js';
+import { openBacktestDialog, openOptimizeHistory } from './backtest.js';
 import { bindStrip, revealActive } from './scroll_strip.js';
 import { copyText } from './clipboard.js';
 
@@ -1426,6 +1426,8 @@ export function bindResults() {
     });
     const addBt = document.getElementById('result-add');
     if (addBt) addBt.addEventListener('click', () => { openBacktestDialog(); });
+    const historyBt = document.getElementById('result-history');
+    if (historyBt) historyBt.addEventListener('click', () => { openOptimizeHistory(); });
     renderResultBar();
     fillOverview();
 }

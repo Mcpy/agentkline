@@ -1,4 +1,4 @@
-"""v0.6.5 参数寻优内核（纯函数，不依赖 numpy/optuna）。
+"""v0.6.5 参数寻优内核（纯函数，不依赖 numpy/optuna）；v0.6.7 增 WF 切窗/参数邻域。
 
 设计要点（定稿见 docs/0.6.5-参数寻优方案.md）：
 - 空间 = 每个参数一组离散候选值（range 或 values），统一收敛到参数类型；
@@ -439,3 +439,329 @@ def summarize_trial(index, params, result, objective, constraints, multi=False):
         "is_stats": stats,
         "runtime_ms": ((result or {}).get("run") or {}).get("elapsed_ms"),
     }
+
+
+# ================================================================
+# v0.6.7 稳健性：walk-forward 切窗 + 参数邻域
+# ================================================================
+
+DEFAULT_WALK_FORWARD = {
+    "folds": 5,
+    "window": "rolling",
+    "is_ratio": 0.75,
+    "step": None,
+    "min_oos_bars": MIN_EVAL_BARS,
+    "top_k": 1,
+}
+DEFAULT_STABILITY = {
+    "enabled": True,
+    "mode": "auto",
+    "radius": 1,
+    "scope": "one_at_a_time",
+    "max_runs": 24,
+    "pass_ratio": 0.5,
+    "plateau_ratio": 0.8,
+}
+
+
+def _cfg_int(value, name, lo, hi):
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        n = int(value)
+    except (TypeError, ValueError):
+        return None, f"WF_CONFIG_INVALID: {name} 需要整数"
+    if n < lo or n > hi:
+        return None, f"WF_CONFIG_INVALID: {name} 需在 {lo}~{hi}"
+    return n, None
+
+
+def build_walk_forward(n_eval, config=None, min_eval=MIN_EVAL_BARS):
+    """把可评估根数切成 fold_count 个 IS/OOS 窗口（相对 eval_idx 的索引）。
+
+    每个 fold 的 OOS 紧接 IS，默认 step=OOS 长度（OOS 不重叠）；
+    rolling 的 IS 起点每折前移 step，anchored 的 IS 起点固定、长度递增。
+    数据不够时从请求折数逐级降到 3 折；仍不够返回 WF_INSUFFICIENT_BARS。
+    """
+    cfg = dict(config or {})
+    allowed = set(DEFAULT_WALK_FORWARD)
+    extra = [k for k in cfg if k not in allowed]
+    if extra:
+        return None, f"WF_CONFIG_INVALID: 不认识的键 {extra}"
+    folds_req, err = _cfg_int(cfg.get("folds", DEFAULT_WALK_FORWARD["folds"]),
+                              "folds", 3, 10)
+    if err:
+        return None, err
+    top_k, err = _cfg_int(cfg.get("top_k", DEFAULT_WALK_FORWARD["top_k"]),
+                          "top_k", 1, 3)
+    if err:
+        return None, err
+    try:
+        is_ratio = float(cfg.get("is_ratio", DEFAULT_WALK_FORWARD["is_ratio"]))
+    except (TypeError, ValueError):
+        return None, "WF_CONFIG_INVALID: is_ratio 需要数字"
+    if not (0.5 <= is_ratio <= 0.9):
+        return None, "WF_CONFIG_INVALID: is_ratio 需在 0.5~0.9（0.75=3:1）"
+    min_oos, err = _cfg_int(cfg.get("min_oos_bars", DEFAULT_WALK_FORWARD["min_oos_bars"]),
+                             "min_oos_bars", max(min_eval, 5), 5000)
+    if err:
+        return None, err
+    window = str(cfg.get("window", DEFAULT_WALK_FORWARD["window"]) or "rolling").lower()
+    if window not in ("rolling", "anchored"):
+        return None, "WF_CONFIG_INVALID: window 需为 rolling 或 anchored"
+    step_in = cfg.get("step", DEFAULT_WALK_FORWARD["step"])
+    step = None
+    if step_in is not None:
+        step, err = _cfg_int(step_in, "step", 1, 100000)
+        if err:
+            return None, err
+
+    try:
+        n_eval = int(n_eval)
+    except (TypeError, ValueError):
+        return None, "WF_INSUFFICIENT_BARS: 可评估根数不是整数"
+    if n_eval < max(min_eval * 3, min_oos * 3):
+        need = int(math.ceil((min_eval / (1.0 - is_ratio)) + min_oos)) * 3
+        return None, (f"WF_INSUFFICIENT_BARS: 可评估 {n_eval} 根，至少需要约 "
+                      f"{need} 根（3 折 × 每折 OOS≥{min_oos}）")
+
+    r = is_ratio / (1.0 - is_ratio)
+    chosen = None
+    for f in range(folds_req, 2, -1):
+        if step is None:
+            o = int(math.floor(n_eval / (r + f) + 1e-9))
+            st = o
+        else:
+            st = step
+            o = int(math.floor((n_eval - (f - 1) * st) / (r + 1.0) + 1e-9))
+        while o >= min_oos:
+            i = int(math.floor(r * o + 1e-9))
+            end = i + (f - 1) * st + o
+            if i >= min_eval and st >= o and end <= n_eval:
+                chosen = (f, i, o, st, end)
+                break
+            o -= 1
+        if chosen:
+            break
+    if not chosen:
+        need = int(math.ceil((r + 3) * min_oos))
+        return None, (f"WF_INSUFFICIENT_BARS: 可评估 {n_eval} 根，按 "
+                      f"IS:OOS={is_ratio:.0%}:{1 - is_ratio:.0%} 切不出 3 折；"
+                      f"至少需要约 {need} 根（或调小 min_oos_bars）")
+
+    f, i, o, st, end = chosen
+    warnings = []
+    if f < folds_req:
+        warnings.append({
+            "code": "WF_FOLDS_REDUCED",
+            "message": (f"数据只够 {f} 折，已从请求的 {folds_req} 折自动降低；"
+                        f"每折 IS {i} 根 / OOS {o} 根"),
+        })
+    if st > o:
+        warnings.append({
+            "code": "WF_STEP_GAP",
+            "message": f"step={st} 大于 OOS={o}，相邻测试段之间有 {st - o} 根空档",
+        })
+    unused = n_eval - end
+    windows = []
+    for k in range(f):
+        is_start = (k * st) if window == "rolling" else 0
+        is_end = i + k * st
+        oos_start = is_end
+        oos_end = oos_start + o
+        windows.append({
+            "index": k,
+            "is_start": is_start, "is_end": is_end,
+            "oos_start": oos_start, "oos_end": oos_end,
+            "is_bars": (i + k * st) if window == "anchored" else i,
+            "oos_bars": o,
+        })
+    return {
+        "folds_requested": folds_req, "fold_count": f, "top_k": top_k,
+        "window": window, "is_ratio": is_ratio,
+        "is_bars": i, "oos_bars": o, "step_bars": st,
+        "unused_bars": max(0, unused), "windows": windows,
+        "warnings": warnings,
+    }, None
+
+
+def parse_stability(config):
+    """校验参数邻域配置；返回 (cfg, err)。"""
+    cfg = dict(config or {})
+    allowed = set(DEFAULT_STABILITY)
+    extra = [k for k in cfg if k not in allowed]
+    if extra:
+        return None, f"STABILITY_CONFIG_INVALID: 不认识的键 {extra}"
+    out = dict(DEFAULT_STABILITY)
+    out.update(cfg)
+    if not isinstance(out.get("enabled"), bool):
+        return None, "STABILITY_CONFIG_INVALID: enabled 需要布尔"
+    mode = str(out["mode"] or "auto").lower()
+    if mode not in ("auto", "step", "percent"):
+        return None, "STABILITY_CONFIG_INVALID: mode 需为 auto/step/percent"
+    out["mode"] = mode
+    scope = str(out["scope"] or "one_at_a_time").lower()
+    if scope not in ("one_at_a_time", "top2", "full"):
+        return None, "STABILITY_CONFIG_INVALID: scope 需为 one_at_a_time/top2/full"
+    out["scope"] = scope
+    radius, err = _cfg_int(out["radius"], "radius", 1, 2)
+    if err:
+        return None, err
+    max_runs, err = _cfg_int(out["max_runs"], "max_runs", 2, 100)
+    if err:
+        return None, err
+    try:
+        pass_ratio = float(out["pass_ratio"])
+        plateau_ratio = float(out["plateau_ratio"])
+    except (TypeError, ValueError):
+        return None, "STABILITY_CONFIG_INVALID: pass_ratio/plateau_ratio 需要数字"
+    if not (0.1 <= pass_ratio <= 0.9):
+        return None, "STABILITY_CONFIG_INVALID: pass_ratio 需在 0.1~0.9"
+    if not (0.1 <= plateau_ratio <= 1.0):
+        return None, "STABILITY_CONFIG_INVALID: plateau_ratio 需在 0.1~1.0"
+    out.update({"radius": radius, "max_runs": max_runs,
+                "pass_ratio": pass_ratio, "plateau_ratio": plateau_ratio})
+    return out, None
+
+
+def _neighbor_values(values, center, meta, mode, radius):
+    """单个参数的邻域候选：离散空间按索引 ±半径，连续空间按 ±10%。"""
+    vals = list(values or [])
+    if len(vals) <= 1:
+        return []
+    typ = str((meta or {}).get("type") or type(center).__name__)
+    if typ not in ("int", "float"):
+        return []
+    mode = mode if mode in ("step", "percent") else ("step" if typ == "int" else "percent")
+    if mode == "step":
+        try:
+            idx = vals.index(center)
+        except ValueError:
+            idx = min(range(len(vals)), key=lambda j: abs(float(vals[j]) - float(center)))
+        out = []
+        for d in range(-radius, radius + 1):
+            j = idx + d
+            if d and 0 <= j < len(vals) and vals[j] not in out:
+                out.append(vals[j])
+        return out
+    # percent：先按 ±10% 算目标，再吸附到最近的离散候选值；整数至少 1 步
+    try:
+        base = float(center)
+    except (TypeError, ValueError):
+        base = 0.0
+    pct = 0.1
+    step0 = abs(base) * pct
+    raw_step = (meta or {}).get("step")
+    try:
+        if raw_step is not None and float(raw_step) > 0:
+            step0 = max(step0, float(raw_step))
+    except (TypeError, ValueError):
+        pass
+    if typ == "int":
+        step0 = max(1.0, round(step0))
+    out = []
+    for d in (-1, 1):
+        target = base + d * step0 * max(1, radius)
+        near = min(vals, key=lambda v: abs(float(v) - target))
+        if near != center and near not in out:
+            out.append(near)
+    return out
+
+
+def build_neighbors(values, center, meta, config=None):
+    """围绕 center 生成邻域候选（含 center 本身）。
+
+    one_at_a_time：每个参数单独动，其余固定（默认，1+2P 次）；
+    top2：前两个参数做二维网格；full：全部参数笛卡尔积（受 max_runs 截断）。
+    """
+    cfg, err = parse_stability(config)
+    if err:
+        return None, err
+    values = values or {}
+    center = center or {}
+    base = {k: center.get(k, (vals[0] if vals else None)) for k, vals in values.items()}
+    neighbor = {}
+    for k, vals in values.items():
+        neighbor[k] = _neighbor_values(vals, base[k], (meta or {}).get(k) or {},
+                                       cfg["mode"], cfg["radius"])
+    keys = [k for k in values if neighbor.get(k)]
+    candidates = [dict(base)]
+
+    def add(cand):
+        if all(cand.get(k) == base.get(k) for k in values):
+            return
+        key = _key(cand)
+        if key not in seen:
+            seen.add(key)
+            candidates.append(cand)
+
+    seen = {_key(base)}
+    if cfg["scope"] == "one_at_a_time" or not keys:
+        for k in keys:
+            for v in neighbor[k]:
+                c = dict(base)
+                c[k] = v
+                add(c)
+    elif cfg["scope"] == "top2":
+        top = keys[:2]
+        if len(top) == 1:
+            for v in neighbor[top[0]]:
+                c = dict(base)
+                c[top[0]] = v
+                add(c)
+        else:
+            for a in [base[top[0]]] + neighbor[top[0]]:
+                for b in [base[top[1]]] + neighbor[top[1]]:
+                    c = dict(base)
+                    c[top[0]], c[top[1]] = a, b
+                    add(c)
+    else:
+        pools = [[base[k]] + neighbor[k] for k in keys]
+        for combo in itertools.product(*pools):
+            c = dict(base)
+            c.update(dict(zip(keys, combo)))
+            add(c)
+            if len(candidates) >= cfg["max_runs"]:
+                break
+    return candidates[:cfg["max_runs"]], None
+
+
+def stability_summary(runs, center, pass_ratio=0.5, plateau_ratio=0.8):
+    """邻域结果 → 稳定分/孤峰判定；runs 里用 oos_score 排序（越大越好）。"""
+    valid = [r for r in (runs or []) if r.get("oos_score") is not None]
+    out = {
+        "runs": len(runs or []), "valid": len(valid),
+        "pass_ratio": 0.0, "plateau_ratio": 0.0,
+        "best_to_median": None, "isolated_peak": False,
+        "center_is_best": False, "warnings": [],
+    }
+    if not valid:
+        out["warnings"].append({"code": "STABILITY_NO_VALID",
+                                "message": "邻域没有可评分的 OOS 试次"})
+        return out
+    best = max(float(r["oos_score"]) for r in valid)
+    med = sorted(float(r["oos_score"]) for r in valid)[len(valid) // 2]
+    margin_pass = abs(best) * (1.0 - float(pass_ratio))
+    margin_plateau = abs(best) * (1.0 - float(plateau_ratio))
+    passed = [r for r in valid if float(r["oos_score"]) >= best - margin_pass]
+    plateau = [r for r in valid if float(r["oos_score"]) >= best - margin_plateau]
+    out["pass_ratio"] = len(passed) / len(valid)
+    out["plateau_ratio"] = len(plateau) / len(valid)
+    out["best_to_median"] = (best / med) if abs(med) > 1e-12 else None
+    ckey = _key(center or {})
+    center_run = next((r for r in valid if _key(r.get("params") or {}) == ckey), None)
+    out["center_is_best"] = bool(center_run and abs(float(center_run["oos_score"]) - best) < 1e-12)
+    if len(valid) < 3:
+        out["warnings"].append({"code": "STABILITY_FEW_RUNS",
+                                "message": f"只有 {len(valid)} 个有效邻域，结论偏弱"})
+    if out["pass_ratio"] < float(pass_ratio):
+        out["isolated_peak"] = True
+        out["warnings"].append({
+            "code": "PARAM_ISOLATED_PEAK",
+            "message": (f"仅 {out['pass_ratio']:.0%} 邻域达到最优的 "
+                        f"{float(pass_ratio):.0%} 阈值，最优参数可能是孤峰"),
+        })
+    if center_run is None:
+        out["warnings"].append({"code": "STABILITY_CENTER_MISSING",
+                                "message": "中心参数没有有效 OOS 试次"})
+    return out

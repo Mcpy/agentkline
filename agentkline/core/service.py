@@ -6,6 +6,7 @@ FastAPI 与 MCP server 共用此层，不依赖任何传输协议。
 import csv
 import hashlib
 import logging
+import math
 import sqlite3
 import time
 import uuid
@@ -36,7 +37,7 @@ def _to_ms(v):
 class AgentKlineService:
     """AgentKline 业务核心"""
 
-    VERSION = "0.6.6"
+    VERSION = "0.6.7"
 
     def __init__(self, scripts_dir: str, limits: dict = None, data_dir: str = None):
         limits = limits or {}
@@ -1380,7 +1381,7 @@ class AgentKlineService:
             return ctx
         return self._execute_run(ctx, params, timeout=timeout)
 
-    # ============ 参数寻优（v0.6.5：目标 + 约束 + 样本外验证） ============
+    # ============ 参数寻优（v0.6.5 目标/约束/样本外；v0.6.7 WF + 邻域 + 落盘） ============
 
     def _opt_label(self, ctx, params, suffix=""):
         base = ((ctx.get("info") or {}).get("name") or "").strip() \
@@ -1563,12 +1564,17 @@ class AgentKlineService:
                          direction="long_only", initial_cash=10000.0, fee_bps=5.0,
                          slippage_bps=5.0, protection=None, start_time=None,
                          end_time=None, limit=20000, backfill_budget=20.0,
-                         timeout=120.0, optimizer_params=None):
+                         timeout=120.0, optimizer_params=None,
+                         mode="single", walk_forward=None, stability=None):
         """参数寻优：冻结窗口 → 优化器脚本逐组提议 → Top K 做样本外验证并登记。
 
         method 可以是 optimizer/grid 或旧别名 grid/random/bayes；自定义优化器传
         optimizer/xxx。优化器只负责提议/排序，跑引擎、预算、样本外与登记留在内核。
+        v0.6.7：mode=walk_forward 时逐折重新寻优；stability 开启时对最优参数做邻域扫描。
         """
+        mode = str(mode or "single").strip().lower()
+        if mode not in ("single", "walk_forward"):
+            return {"error": "OPTIMIZE_MODE_INVALID: mode 需为 single 或 walk_forward"}
         method_ref = self._opt_method_ref(method)
         info = self.script_engine.optimizer_meta(method_ref)
         if info.get("error"):
@@ -1603,6 +1609,11 @@ class AgentKlineService:
         hol, err = self._opt_holdout(holdout)
         if err:
             return {"error": err}
+        if stability is None:
+            stability = {} if mode == "single" else {"enabled": False}
+        stab, err = opt.parse_stability(stability)
+        if err:
+            return {"error": err}
         try:
             seed = int(seed) if seed is not None else int(time.time() * 1000) % (2 ** 32)
         except (TypeError, ValueError):
@@ -1628,34 +1639,52 @@ class AgentKlineService:
         if caps.get("requires_full_space") and space_out["size"] > bud["max_runs"]:
             return {"error": (f"OPTIMIZE_BUDGET: 网格共有 {space_out['size']} 组，"
                               f"超过预算 {bud['max_runs']}（改小空间或换随机/贝叶斯）")}
-        if caps.get("requires_full_space"):
-            total = int(space_out["size"])
-        elif caps.get("continuous"):
-            total = int(bud["max_runs"])
-        else:
-            total = min(int(bud["max_runs"]), int(space_out["size"]))
-
         n_eval = len(ctx["bars"]) - ctx["eval_idx"]
-        is_n, oos_n, err = opt.split_eval_bars(n_eval, hol["ratio"])
-        if err:
-            return {"error": err}
-        is_ctx = ctx
-        oos_ctx = None
-        split_time = None
-        if hol["ratio"] > 0:
-            split_abs = ctx["eval_idx"] + is_n
-            split_time = int(ctx["bars"][split_abs]["timestamp"])
-            is_bars = [dict(b) for b in ctx["bars"][:split_abs]]
-            is_ctx = dict(ctx, bars=is_bars, end_ms=split_time - 1,
-                          want=len(is_bars) - ctx["eval_idx"])
-            lead = min(int(ctx["warmup"]), split_abs)
-            oos_bars = [dict(b) for b in ctx["bars"][split_abs - lead:]]
-            oos_ctx = dict(ctx, bars=oos_bars, eval_idx=lead,
-                           start_ms=int(oos_bars[lead]["timestamp"]),
-                           end_ms=int(oos_bars[-1]["timestamp"]),
-                           want=len(oos_bars) - lead, clipped=False)
-        holdout_meta = {"ratio": hol["ratio"], "top_k": hol["top_k"],
-                        "is_bars": is_n, "oos_bars": oos_n, "split_time": split_time}
+        wf = None
+        if mode == "walk_forward":
+            wf, err = opt.build_walk_forward(n_eval, walk_forward)
+            if err:
+                return {"error": err}
+            per_fold = int(space_out["size"]) if caps.get("requires_full_space") \
+                else (int(bud["max_runs"]) if caps.get("continuous")
+                      else min(int(bud["max_runs"]), int(space_out["size"])))
+            total = int(wf["fold_count"]) * per_fold
+            holdout_meta = {
+                "ratio": 1.0 - wf["is_ratio"], "top_k": wf["top_k"],
+                "is_bars": wf["is_bars"], "oos_bars": wf["oos_bars"],
+                "split_time": None, "mode": "walk_forward",
+                "folds": wf["fold_count"], "window": wf["window"],
+            }
+            is_ctx, oos_ctx = ctx, None
+        else:
+            per_fold = 0
+            if caps.get("requires_full_space"):
+                total = int(space_out["size"])
+            elif caps.get("continuous"):
+                total = int(bud["max_runs"])
+            else:
+                total = min(int(bud["max_runs"]), int(space_out["size"]))
+            is_n, oos_n, err = opt.split_eval_bars(n_eval, hol["ratio"])
+            if err:
+                return {"error": err}
+            is_ctx = ctx
+            oos_ctx = None
+            split_time = None
+            if hol["ratio"] > 0:
+                split_abs = ctx["eval_idx"] + is_n
+                split_time = int(ctx["bars"][split_abs]["timestamp"])
+                is_bars = [dict(b) for b in ctx["bars"][:split_abs]]
+                is_ctx = dict(ctx, bars=is_bars, end_ms=split_time - 1,
+                              want=len(is_bars) - ctx["eval_idx"])
+                lead = min(int(ctx["warmup"]), split_abs)
+                oos_bars = [dict(b) for b in ctx["bars"][split_abs - lead:]]
+                oos_ctx = dict(ctx, bars=oos_bars, eval_idx=lead,
+                               start_ms=int(oos_bars[lead]["timestamp"]),
+                               end_ms=int(oos_bars[-1]["timestamp"]),
+                               want=len(oos_bars) - lead, clipped=False)
+            holdout_meta = {"ratio": hol["ratio"], "top_k": hol["top_k"],
+                            "is_bars": is_n, "oos_bars": oos_n,
+                            "split_time": split_time, "mode": "single"}
 
         loaded = self.script_engine.load_optimizer(method_ref)
         if loaded.get("error"):
@@ -1666,7 +1695,8 @@ class AgentKlineService:
         job_id = f"opt_{int(time.time())}_{uuid.uuid4().hex[:6]}"
         rng = __import__("random").Random(seed)
         job = {
-            "job_id": job_id, "status": "running", "phase": "is",
+            "job_id": job_id, "status": "running",
+            "phase": "wf" if mode == "walk_forward" else "is",
             "created_at": time.time(), "finished_at": None, "elapsed_ms": None,
             "board_id": board_id, "timeframe": ctx["tf"], "script": ctx["script"] or "",
             "method": method_short, "optimizer_id": method_ref,
@@ -1684,7 +1714,16 @@ class AgentKlineService:
             "cancel": False, "space_exhausted": False, "timeout": timeout,
             "namespace": namespace, "state": {}, "rng": rng,
             "t_start": time.monotonic(), "ranked_by": None, "extra": {},
+            "mode": mode, "walk_forward": wf, "stability": stab,
+            "folds": [], "stability_report": None, "per_fold_total": per_fold,
         }
+        if wf:
+            for w in wf.get("warnings") or []:
+                job["warnings"].append(w)
+        if mode == "walk_forward" and holdout is not None:
+            job["warnings"].append({
+                "code": "WF_HOLDOUT_IGNORED",
+                "message": "walk_forward 模式使用每折的 IS/OOS，holdout 参数已忽略"})
         init_fn = namespace.get("init")
         if callable(init_fn):
             try:
@@ -1700,63 +1739,101 @@ class AgentKlineService:
         self._bc({"type": "optimize_started", "job_id": job_id, "board_id": board_id,
                   "timeframe": ctx["tf"], "method": method_short,
                   "optimizer": job["optimizer"], "total": total,
-                  "objective": obj, "holdout": holdout_meta,
+                  "objective": obj, "holdout": holdout_meta, "mode": mode,
+                  "walk_forward": wf, "stability": stab,
                   "optimizer_params": oparams})
-        th = __import__("threading").Thread(target=self._optimize_worker, args=(job_id,),
+        target = self._walkforward_worker if mode == "walk_forward" else self._optimize_worker
+        th = __import__("threading").Thread(target=target, args=(job_id,),
                                             daemon=True, name=f"optimize-{job_id}")
         th.start()
         return {"status": "ok", "job_id": job_id, "method": method_short,
                 "optimizer_id": method_ref, "optimizer": job["optimizer"],
                 "optimizer_params": oparams, "total": total,
-                "phase": "is", "space": space_out["values"], "objective": obj,
-                "constraints": cons, "budget": bud, "holdout": holdout_meta,
-                "ranked_by": None}
+                "phase": job["phase"], "mode": mode, "walk_forward": wf,
+                "stability": stab, "space": space_out["values"],
+                "objective": obj, "constraints": cons, "budget": bud,
+                "holdout": holdout_meta, "ranked_by": None}
+
+    @staticmethod
+    def _opt_cancelled(job):
+        if job.get("cancel"):
+            return True
+        parent = job.get("parent")
+        return bool(parent and parent.get("cancel"))
+
+    def _opt_search(self, job):
+        """跑一组优化器提议循环（单次寻优或某一折共用）；不负责 OOS/登记。"""
+        namespace = job["namespace"]
+        state = job["state"]
+        t0 = job["t_start"]
+        i = 0
+        while job["done"] < job["total"] and not self._opt_cancelled(job):
+            if time.monotonic() - t0 > job["budget"]["max_seconds"]:
+                job["warnings"].append({"code": "TIME_BUDGET",
+                                        "message": "达到时间预算，提前结束搜索"})
+                break
+            ask = namespace.get("ask")
+            try:
+                raw = ask(state, self._opt_ctx(job))
+            except Exception as exc:
+                raise RuntimeError(f"OPTIMIZER_ASK_FAILED: {exc}") from exc
+            if raw is None:
+                job["space_exhausted"] = True
+                break
+            combo, err = self._opt_candidate(job, raw)
+            if err:
+                trial = self._opt_bad_candidate(job, raw, i, err)
+            else:
+                trial = self._opt_one(job, combo, i)
+            tell = namespace.get("tell")
+            if callable(tell):
+                try:
+                    tell(state, self._opt_ctx(job), trial)
+                except Exception as exc:
+                    raise RuntimeError(f"OPTIMIZER_TELL_FAILED: {exc}") from exc
+            parent = job.get("parent")
+            if parent is not None:
+                parent["done"] = int(parent.get("done") or 0) + 1
+            i += 1
+
+    def _opt_summarize(self, job):
+        summarize = job["namespace"].get("summarize")
+        if callable(summarize):
+            try:
+                extra = summarize(job["state"], self._opt_ctx(job))
+                if isinstance(extra, dict):
+                    job["extra"] = extra
+            except Exception as exc:
+                job["warnings"].append({"code": "OPTIMIZER_SUMMARIZE_FAILED",
+                                        "message": str(exc)})
+
+    def _opt_finish(self, job):
+        t0 = job.get("t_start") or time.monotonic()
+        if job["status"] == "running":
+            job["status"] = "cancelled" if job.get("cancel") else "done"
+        job["phase"] = "done"
+        job["finished_at"] = time.time()
+        job["elapsed_ms"] = int((time.monotonic() - t0) * 1000)
+        job["current"] = None
+        self._persist_optimization(job)
+        self._bc({"type": "optimize_done", "job_id": job["job_id"],
+                  "board_id": job["board_id"], "timeframe": job["timeframe"],
+                  "status": job["status"], "total": job["total"],
+                  "done": job["done"], "best": job.get("best"),
+                  "result_ids": list(job["registered_result_ids"]),
+                  "warnings": job["warnings"]})
 
     def _optimize_worker(self, job_id):
         job = self._optimize_jobs.get(job_id)
         if not job:
             return
-        namespace = job["namespace"]
-        state = job["state"]
-        t0 = job["t_start"]
         try:
-            i = 0
-            while job["done"] < job["total"] and not job.get("cancel"):
-                if time.monotonic() - t0 > job["budget"]["max_seconds"]:
-                    job["warnings"].append({"code": "TIME_BUDGET",
-                                            "message": "达到时间预算，提前结束搜索"})
-                    break
-                ask = namespace.get("ask")
-                try:
-                    raw = ask(state, self._opt_ctx(job))
-                except Exception as exc:
-                    raise RuntimeError(f"OPTIMIZER_ASK_FAILED: {exc}") from exc
-                if raw is None:
-                    job["space_exhausted"] = True
-                    break
-                combo, err = self._opt_candidate(job, raw)
-                if err:
-                    trial = self._opt_bad_candidate(job, raw, i, err)
-                else:
-                    trial = self._opt_one(job, combo, i)
-                tell = namespace.get("tell")
-                if callable(tell):
-                    try:
-                        tell(state, self._opt_ctx(job), trial)
-                    except Exception as exc:
-                        raise RuntimeError(f"OPTIMIZER_TELL_FAILED: {exc}") from exc
-                i += 1
+            self._opt_search(job)
             if not job.get("cancel"):
                 self._opt_after_search(job)
-                summarize = namespace.get("summarize")
-                if callable(summarize):
-                    try:
-                        extra = summarize(state, self._opt_ctx(job))
-                        if isinstance(extra, dict):
-                            job["extra"] = extra
-                    except Exception as exc:
-                        job["warnings"].append({"code": "OPTIMIZER_SUMMARIZE_FAILED",
-                                                "message": str(exc)})
+                self._opt_maybe_stability(job, job.get("is_ctx"), job.get("oos_ctx"),
+                                          job.get("best"))
+                self._opt_summarize(job)
         except Exception as exc:  # pragma: no cover - 兜底：作业别静默卡 running
             logger.exception("参数寻优作业失败: %s", job_id)
             job["status"] = "failed"
@@ -1764,18 +1841,316 @@ class AgentKlineService:
             job["warnings"].append({"code": "OPTIMIZE_FAILED",
                                     "message": f"作业异常结束：{exc}"})
         finally:
-            if job["status"] == "running":
-                job["status"] = "cancelled" if job.get("cancel") else "done"
-            job["phase"] = "done"
-            job["finished_at"] = time.time()
-            job["elapsed_ms"] = int((time.monotonic() - t0) * 1000)
-            job["current"] = None
-            self._bc({"type": "optimize_done", "job_id": job_id,
+            self._opt_finish(job)
+
+    def _opt_fold_ctx(self, ctx, win):
+        """把相对 fold 窗口映射到冻结 bars 的 IS/OOS 上下文。"""
+        ev = int(ctx["eval_idx"])
+        is_end_abs = ev + int(win["is_end"])
+        is_bars = [dict(b) for b in ctx["bars"][:is_end_abs]]
+        is_ctx = dict(ctx, bars=is_bars, end_ms=int(is_bars[-1]["timestamp"]),
+                      want=max(1, len(is_bars) - ev))
+        oos_start_abs = ev + int(win["oos_start"])
+        oos_end_abs = ev + int(win["oos_end"])
+        lead = min(int(ctx["warmup"]), oos_start_abs)
+        oos_bars = [dict(b) for b in ctx["bars"][oos_start_abs - lead:oos_end_abs]]
+        oos_ctx = dict(ctx, bars=oos_bars, eval_idx=lead,
+                       start_ms=int(oos_bars[lead]["timestamp"]),
+                       end_ms=int(oos_bars[-1]["timestamp"]),
+                       want=len(oos_bars) - lead, clipped=False)
+        return is_ctx, oos_ctx
+
+    def _opt_fold_job(self, job, k, win, is_ctx, oos_ctx):
+        fold_job = {
+            "job_id": job["job_id"], "board_id": job["board_id"],
+            "timeframe": job["timeframe"], "script": job["script"],
+            "method": job["method"], "optimizer": job["optimizer"],
+            "optimizer_params": job["optimizer_params"],
+            "multi_objective": job["multi_objective"], "caps": job["caps"],
+            "objective": job["objective"], "constraints": job["constraints"],
+            "budget": {"max_runs": int(job["per_fold_total"]),
+                       "max_seconds": float(job["budget"]["max_seconds"])},
+            "holdout": {"ratio": 1.0, "top_k": int(job["walk_forward"]["top_k"]),
+                        "is_bars": int(win["is_bars"]), "oos_bars": int(win["oos_bars"]),
+                        "split_time": None, "mode": "walk_forward"},
+            "seed": int(job["seed"]) + k, "space": job["space"],
+            "space_parsed": job["space_parsed"], "space_size": job["space_size"],
+            "is_ctx": is_ctx, "oos_ctx": oos_ctx,
+            "total": int(job["per_fold_total"]), "done": 0, "oos_done": 0,
+            "current": None, "trials": [], "top": [], "best": None,
+            "warnings": job["warnings"], "errors": job["errors"],
+            "registered_result_ids": job["registered_result_ids"],
+            "cancel": False, "space_exhausted": False, "timeout": job["timeout"],
+            "namespace": job["namespace"], "state": {}, "rng":
+                __import__("random").Random(int(job["seed"]) + k),
+            "t_start": time.monotonic(), "ranked_by": None, "extra": {},
+            "parent": job, "fold": k, "phase": "wf", "progress_phase": "wf",
+            "batch_kind": "walkforward",
+            "batch_extra": {"fold": k, "folds": int(job["walk_forward"]["fold_count"]),
+                            "window": job["walk_forward"]["window"]},
+        }
+        init_fn = job["namespace"].get("init")
+        if callable(init_fn):
+            state = init_fn(self._opt_ctx(fold_job))
+            if not isinstance(state, dict):
+                raise RuntimeError("OPTIMIZER_INIT_FAILED: init 必须返回 dict")
+            fold_job["state"] = state
+        return fold_job
+
+    def _opt_fold_record(self, job, fold_job, win):
+        best = fold_job.get("best")
+        is_ctx, oos_ctx = fold_job["is_ctx"], fold_job["oos_ctx"]
+        ev = int(is_ctx["eval_idx"])
+        is_start = int(is_ctx["bars"][ev + int(win["is_start"])]["timestamp"])
+        is_end = int(is_ctx["bars"][-1]["timestamp"])
+        oos_start = int(oos_ctx["bars"][oos_ctx["eval_idx"]]["timestamp"])
+        oos_end = int(oos_ctx["bars"][-1]["timestamp"])
+        return {
+            "index": int(win["index"]), "is_bars": int(win["is_bars"]),
+            "oos_bars": int(win["oos_bars"]), "is_start": is_start,
+            "is_end": is_end, "oos_start": oos_start, "oos_end": oos_end,
+            "best": best, "top": fold_job.get("top") or [],
+            "params": (best or {}).get("params"),
+            "result_id": (best or {}).get("result_id"),
+            "is_stats": (best or {}).get("is_stats"),
+            "oos_stats": (best or {}).get("oos_stats"),
+            "is_score": (best or {}).get("score"),
+            "oos_score": (best or {}).get("oos_score"),
+            "overfit_gap": (best or {}).get("overfit_gap"),
+            "overfit_ratio": (best or {}).get("overfit_ratio"),
+            "ranked_by": fold_job.get("ranked_by"),
+            "error": None if best else "该折没有有效 OOS 候选",
+        }
+
+    def _opt_stitch(self, folds):
+        """把各折 OOS 权益按首点归一后拼接；仅用于报告曲线。"""
+        times, values = [], []
+        level = 1.0
+        for f in folds:
+            rid = f.get("result_id")
+            if not rid:
+                continue
+            res = self.state.get_result(rid) or {}
+            eq = res.get("equity") or {}
+            ts, vs = eq.get("times") or [], eq.get("values") or []
+            if not ts or len(ts) != len(vs):
+                continue
+            base = float(vs[0]) if abs(float(vs[0])) > 1e-12 else 1.0
+            for t, v in zip(ts, vs):
+                times.append(int(t))
+                values.append(level * float(v) / base)
+            if vs:
+                level = values[-1]
+        return {"times": times, "values": values}
+
+    def _opt_wf_summary(self, job):
+        """WF 汇总：正折数、WFE、参数漂移、拼接 OOS 曲线。"""
+        wf = job.get("walk_forward") or {}
+        folds = job.get("folds") or []
+        valid = [f for f in folds if f.get("best") and f.get("oos_stats")]
+        metric = (job.get("objective") or {}).get("metric") or "sharpe"
+        is_vals, oos_vals = [], []
+        for f in valid:
+            try:
+                iv = float((f.get("is_stats") or {}).get(metric))
+                ov = float((f.get("oos_stats") or {}).get(metric))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(iv) and math.isfinite(ov):
+                is_vals.append(iv)
+                oos_vals.append(ov)
+        wfe = None
+        ratios = [ov / iv for iv, ov in zip(is_vals, oos_vals) if abs(iv) > 1e-12]
+        if ratios:
+            ratios.sort()
+            wfe = ratios[len(ratios) // 2]
+        rets = [float((f.get("oos_stats") or {}).get("total_return") or 0)
+                for f in valid]
+        positive = sum(1 for r in rets if r > 0)
+        negative = sum(1 for r in rets if r < 0)
+        flat = len(rets) - positive - negative
+        drifts = {}
+        keys = set()
+        for f in valid:
+            keys.update((f.get("params") or {}).keys())
+        for k in sorted(keys):
+            vals = []
+            for f in valid:
+                v = (f.get("params") or {}).get(k)
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    vals.append(float(v))
+            if len(vals) >= 2:
+                drifts[k] = {"min": min(vals), "max": max(vals),
+                             "range": max(vals) - min(vals)}
+        wf["summary"] = {
+            "fold_count": len(folds), "valid_folds": len(valid),
+            "positive_folds": positive, "negative_folds": negative,
+            "flat_folds": flat, "wfe": wfe, "parameter_drift": drifts,
+        }
+        wf["stitched_oos"] = self._opt_stitch(folds)
+        job["walk_forward"] = wf
+        if negative:
+            job["warnings"].append({
+                "code": "WF_FOLD_NEGATIVE",
+                "message": f"{negative}/{len(valid)} 折 OOS 收益为负"})
+        if wfe is not None and wfe < 0.5:
+            job["warnings"].append({
+                "code": "WF_DEGRADED",
+                "message": f"Walk-forward efficiency 中位数 {wfe:.0%} < 50%，衰减明显"})
+        for k, d in drifts.items():
+            if d["range"] > max(abs(d["max"]) * 0.5, 1e-9) and d["range"] > 0:
+                job["warnings"].append({
+                    "code": "WF_PARAM_DRIFT", "param": k,
+                    "message": f"{k} 在各折最优值漂移 {d['min']}–{d['max']}"})
+        return wf
+
+    def _walkforward_worker(self, job_id):
+        job = self._optimize_jobs.get(job_id)
+        if not job:
+            return
+        last_ctx = None
+        try:
+            wf = job["walk_forward"]
+            for k, win in enumerate(wf["windows"]):
+                if self._opt_cancelled(job):
+                    break
+                is_ctx, oos_ctx = self._opt_fold_ctx(job["is_ctx"], win)
+                job["current_fold"] = k + 1
+                self._bc({"type": "optimize_progress", "job_id": job["job_id"],
+                          "board_id": job["board_id"], "timeframe": job["timeframe"],
+                          "phase": "wf", "fold": k + 1,
+                          "fold_total": wf["fold_count"], "done": job["done"],
+                          "total": job["total"], "current": None})
+                fold_job = self._opt_fold_job(job, k, win, is_ctx, oos_ctx)
+                self._opt_search(fold_job)
+                if self._opt_cancelled(job):
+                    break
+                self._opt_after_search(fold_job)
+                rec = self._opt_fold_record(job, fold_job, win)
+                job["folds"].append(rec)
+                for t in fold_job.get("trials") or []:
+                    job["trials"].append({**t, "fold": k})
+                job["oos_done"] = int(job.get("oos_done") or 0) + \
+                    int(fold_job.get("oos_done") or 0)
+                if rec.get("best"):
+                    job["best"] = rec["best"]
+                    job["top"] = rec.get("top") or []
+                    job["ranked_by"] = rec.get("ranked_by")
+                    last_ctx = (is_ctx, oos_ctx)
+                self._bc({"type": "optimize_progress", "job_id": job["job_id"],
+                          "board_id": job["board_id"], "timeframe": job["timeframe"],
+                          "phase": "wf", "fold": k + 1,
+                          "fold_total": wf["fold_count"], "done": job["done"],
+                          "total": job["total"], "current": rec.get("params"),
+                          "fold_result": {kk: rec.get(kk) for kk in
+                                          ("index", "params", "result_id",
+                                           "is_score", "oos_score")}})
+            if not self._opt_cancelled(job):
+                self._opt_wf_summary(job)
+                if last_ctx and job.get("best"):
+                    self._opt_maybe_stability(job, last_ctx[0], last_ctx[1],
+                                              job.get("best"))
+                self._opt_summarize(job)
+        except Exception as exc:  # pragma: no cover
+            logger.exception("Walk-forward 作业失败: %s", job_id)
+            job["status"] = "failed"
+            job["errors"].append({"error": f"WALK_FORWARD_FAILED: {exc}"})
+            job["warnings"].append({"code": "WALK_FORWARD_FAILED",
+                                    "message": f"作业异常结束：{exc}"})
+        finally:
+            self._opt_finish(job)
+
+    def _opt_maybe_stability(self, job, is_ctx, oos_ctx, center):
+        cfg = job.get("stability") or {}
+        if not cfg.get("enabled"):
+            return
+        if job.get("multi_objective"):
+            job["warnings"].append({"code": "STABILITY_UNSUPPORTED_MULTI",
+                                    "message": "多目标优化暂不做参数邻域扫描"})
+            return
+        if not center or not is_ctx or not oos_ctx:
+            job["warnings"].append({"code": "STABILITY_NO_CENTER",
+                                    "message": "没有可用的最优参数或 OOS，跳过邻域扫描"})
+            return
+        try:
+            cands, err = opt.build_neighbors(
+                job["space_parsed"]["values"], center.get("params") or {},
+                job["space_parsed"]["meta"], cfg)
+        except Exception as exc:  # pragma: no cover
+            cands, err = None, f"STABILITY_BUILD_FAILED: {exc}"
+        if err:
+            job["warnings"].append({"code": "STABILITY_BUILD_FAILED", "message": err})
+            return
+        job["phase"] = "stability"
+        job["stability_done"] = 0
+        job["stability_total"] = len(cands)
+        runs = []
+        center_params = {k: (center.get("params") or {}).get(k, vals[0])
+                         for k, vals in job["space_parsed"]["values"].items()}
+        center_key = opt._key(center_params)
+        for idx, params in enumerate(cands):
+            if self._opt_cancelled(job):
+                break
+            is_center = opt._key(params) == center_key
+            if is_center:
+                is_stats = center.get("is_stats") or {}
+                oos_stats = center.get("oos_stats") or {}
+                is_scored = {"status": "ok", "score": center.get("score"),
+                             "value": center.get("value"), "reason": ""}
+                oos_scored = {"status": "ok", "score": center.get("oos_score"),
+                              "value": center.get("oos_value"), "reason": ""}
+            else:
+                try:
+                    ib = self._execute_run(is_ctx, params, timeout=job["timeout"],
+                                           display_name=self._opt_label(is_ctx, params, "邻域"),
+                                           register=False)
+                    ob = self._execute_run(oos_ctx, params, timeout=job["timeout"],
+                                           display_name=self._opt_label(is_ctx, params, "邻域OOS"),
+                                           register=False)
+                except Exception as exc:
+                    ib = {"error": f"STABILITY_RUN_FAILED: {exc}"}
+                    ob = ib
+                is_stats = ((ib.get("result") or {}).get("stats") or {})
+                oos_stats = ((ob.get("result") or {}).get("stats") or {})
+                is_scored = opt.score_stats(is_stats, job["objective"], job["constraints"])
+                oos_scored = opt.score_stats(oos_stats, job["objective"], job["constraints"])
+                if (ib or {}).get("error") or (ob or {}).get("error"):
+                    is_scored = {"status": "failed", "score": None, "value": None,
+                                 "reason": (ib.get("error") or ob.get("error"))}
+                    oos_scored = dict(is_scored)
+            runs.append({
+                "index": idx, "params": params,
+                "status": "ok" if oos_scored.get("status") == "ok" else
+                          (oos_scored.get("status") or "failed"),
+                "is_stats": is_stats, "oos_stats": oos_stats,
+                "is_score": is_scored.get("score"), "oos_score": oos_scored.get("score"),
+                "is_value": is_scored.get("value"), "oos_value": oos_scored.get("value"),
+                "reason": oos_scored.get("reason") or "",
+                "center": is_center,
+            })
+            job["stability_done"] = idx + 1
+            self._bc({"type": "optimize_progress", "job_id": job["job_id"],
                       "board_id": job["board_id"], "timeframe": job["timeframe"],
-                      "status": job["status"], "total": job["total"],
-                      "done": job["done"], "best": job.get("best"),
-                      "result_ids": list(job["registered_result_ids"]),
-                      "warnings": job["warnings"]})
+                      "phase": "stability", "done": idx + 1,
+                      "total": len(cands), "current": params})
+        report = opt.stability_summary(
+            runs, center_params,
+            cfg.get("pass_ratio", 0.5), cfg.get("plateau_ratio", 0.8))
+        report.update({
+            "enabled": True, "mode": cfg.get("mode"), "scope": cfg.get("scope"),
+            "radius": cfg.get("radius"), "max_runs": cfg.get("max_runs"),
+            "pass_threshold": cfg.get("pass_ratio"),
+            "plateau_threshold": cfg.get("plateau_ratio"),
+            "center": {"params": center_params,
+                       "is_stats": center.get("is_stats") or {},
+                       "oos_stats": center.get("oos_stats") or {},
+                       "is_score": center.get("score"),
+                       "oos_score": center.get("oos_score")},
+            "runs": runs,
+        })
+        job["stability_report"] = report
+        for w in report.get("warnings") or []:
+            job["warnings"].append({"phase": "stability", **w})
 
     def _opt_bad_candidate(self, job, raw, index, reason):
         """优化器返回了不合法的候选：记一行 invalid，不跑引擎，预算照常扣。"""
@@ -1787,7 +2162,8 @@ class AgentKlineService:
         job["errors"].append({"index": index, "params": trial["params"], "error": reason})
         self._bc({"type": "optimize_progress", "job_id": job["job_id"],
                   "board_id": job["board_id"], "timeframe": job["timeframe"],
-                  "phase": "is", "done": job["done"], "total": job["total"],
+                  "phase": job.get("progress_phase", "is"), "fold": job.get("fold"),
+                  "done": job["done"], "total": job["total"],
                   "current": trial["params"],
                   "trial": {"index": index, "status": "invalid",
                             "score": None, "value": None, "reason": reason}})
@@ -1798,7 +2174,8 @@ class AgentKlineService:
         job["current"] = combo
         self._bc({"type": "optimize_progress", "job_id": job["job_id"],
                   "board_id": job["board_id"], "timeframe": job["timeframe"],
-                  "phase": "is", "done": job["done"], "total": job["total"],
+                  "phase": job.get("progress_phase", "is"), "fold": job.get("fold"),
+                  "done": job["done"], "total": job["total"],
                   "current": combo})
         try:
             body = self._execute_run(
@@ -1817,7 +2194,8 @@ class AgentKlineService:
         job["done"] = int(job.get("done") or 0) + 1
         self._bc({"type": "optimize_progress", "job_id": job["job_id"],
                   "board_id": job["board_id"], "timeframe": job["timeframe"],
-                  "phase": "is", "done": job["done"], "total": job["total"],
+                  "phase": job.get("progress_phase", "is"), "fold": job.get("fold"),
+                  "done": job["done"], "total": job["total"],
                   "current": combo, "trial": {k: trial.get(k) for k in
                                                ("index", "status", "score", "value", "reason")}})
         return trial
@@ -1847,19 +2225,21 @@ class AgentKlineService:
             job["phase"] = "oos"
             valid = []
             for j, trial in enumerate(top):
-                if job.get("cancel"):
+                if self._opt_cancelled(job):
                     break
                 job["current"] = trial["params"]
                 self._bc({"type": "optimize_progress", "job_id": job["job_id"],
                           "board_id": job["board_id"], "timeframe": job["timeframe"],
-                          "phase": "oos", "done": j, "total": len(top),
+                          "phase": job.get("progress_phase", "oos"), "fold": job.get("fold"),
+                          "done": j, "total": len(top),
                           "current": trial["params"]})
-                batch = {"id": job["job_id"], "kind": "optimize",
+                batch = {"id": job["job_id"], "kind": job.get("batch_kind", "optimize"),
                          "method": job["method"], "index": j, "total": len(top),
                          "params": trial["params"], "phase": "oos",
                          "objective": job["objective"],
                          "is_stats": trial.get("is_stats"),
                          "is_score": trial.get("score")}
+                batch.update(job.get("batch_extra") or {})
                 try:
                     body = self._execute_run(
                         job["oos_ctx"], trial["params"], timeout=job["timeout"],
@@ -1872,8 +2252,11 @@ class AgentKlineService:
                     trial["oos_error"] = body["error"]
                     job["errors"].append({"index": trial["index"], "phase": "oos",
                                           "params": trial["params"], "error": body["error"]})
-                    job["warnings"].append({"code": "OOS_FAILED", "index": trial["index"],
-                                            "message": body["error"]})
+                    oos_warn = {"code": "OOS_FAILED", "index": trial["index"],
+                                "message": body["error"]}
+                    if job.get("fold") is not None:
+                        oos_warn["fold"] = job["fold"]
+                    job["warnings"].append(oos_warn)
                     continue
                 res = body.get("result") or {}
                 oos_stats = res.get("stats") or {}
@@ -1897,7 +2280,10 @@ class AgentKlineService:
                         "overfit_gap": over["gap"], "overfit_ratio": over["ratio"],
                     })
                 for w in over["warnings"]:
-                    job["warnings"].append({"index": trial["index"], **w})
+                    item = {"index": trial["index"], **w}
+                    if job.get("fold") is not None:
+                        item["fold"] = job["fold"]
+                    job["warnings"].append(item)
                 if trial.get("result_id"):
                     job["registered_result_ids"].append(trial["result_id"])
                     job["results"] = job.get("results") or []
@@ -1912,7 +2298,8 @@ class AgentKlineService:
                 job["oos_done"] = j + 1
                 self._bc({"type": "optimize_progress", "job_id": job["job_id"],
                           "board_id": job["board_id"], "timeframe": job["timeframe"],
-                          "phase": "oos", "done": j + 1, "total": len(top),
+                          "phase": job.get("progress_phase", "oos"), "fold": job.get("fold"),
+                          "done": j + 1, "total": len(top),
                           "current": trial["params"],
                           "trial": {"index": trial["index"],
                                     "status": scored["status"],
@@ -1932,19 +2319,20 @@ class AgentKlineService:
                                                "Top K 仅为样本内候选"})
             registered = []
             for j, trial in enumerate(top):
-                if job.get("cancel"):
+                if self._opt_cancelled(job):
                     break
                 job["current"] = trial["params"]
                 self._bc({"type": "optimize_progress", "job_id": job["job_id"],
                           "board_id": job["board_id"], "timeframe": job["timeframe"],
                           "phase": "register", "done": j, "total": len(top),
                           "current": trial["params"]})
-                batch = {"id": job["job_id"], "kind": "optimize",
+                batch = {"id": job["job_id"], "kind": job.get("batch_kind", "optimize"),
                          "method": job["method"], "index": j, "total": len(top),
                          "params": trial["params"], "phase": "is",
                          "objective": job["objective"],
                          "is_stats": trial.get("is_stats"),
                          "is_score": trial.get("score")}
+                batch.update(job.get("batch_extra") or {})
                 try:
                     body = self._execute_run(
                         job["is_ctx"], trial["params"], timeout=job["timeout"],
@@ -1966,17 +2354,23 @@ class AgentKlineService:
             job["top"] = registered
             job["best"] = registered[0] if registered else None
 
-    def get_optimization(self, job_id):
-        job = self._optimize_jobs.get(job_id)
-        if not job:
-            return {"error": f"OPTIMIZE_JOB_NOT_FOUND: {job_id}"}
+    def _optimization_payload(self, job, persisted=False):
         elapsed = job.get("elapsed_ms")
         if elapsed is None and job.get("created_at"):
             elapsed = int((time.time() - float(job["created_at"])) * 1000)
+        board = self.state.get_board(job["board_id"]) or None
+        lock = (board.source_lock if board else None) or {}
+        symbol = (lock.get("identity") or {}).get("symbol") or \
+            (board.name if board else "") or ""
+        strategy_name = ((job.get("is_ctx") or {}).get("info") or {}).get("name") or \
+            (job.get("script") or "").split("/")[-1]
         return {
             "job_id": job["job_id"], "status": job["status"], "phase": job["phase"],
             "board_id": job["board_id"], "timeframe": job["timeframe"],
             "script": job["script"], "method": job["method"],
+            "symbol": symbol, "board_name": (board.name if board else ""),
+            "strategy_name": strategy_name,
+            "mode": job.get("mode") or "single",
             "optimizer_id": job.get("optimizer_id"), "optimizer": job.get("optimizer"),
             "optimizer_params": job.get("optimizer_params") or {},
             "multi_objective": bool(job.get("multi_objective")),
@@ -1985,7 +2379,8 @@ class AgentKlineService:
             "budget": job["budget"], "holdout": job["holdout"], "seed": job["seed"],
             "space": job["space"], "space_size": job.get("space_size"),
             "total": job["total"], "done": job["done"], "oos_done": job.get("oos_done"),
-            "current": job.get("current"), "trials": job["trials"],
+            "current": job.get("current"), "fold": job.get("current_fold"),
+            "trials": job.get("trials") or [],
             "top": job.get("top") or [], "best": job.get("best"),
             "warnings": job["warnings"], "errors": job["errors"],
             "registered_result_ids": job["registered_result_ids"],
@@ -1993,7 +2388,81 @@ class AgentKlineService:
             "cancelled": job["status"] == "cancelled",
             "created_at": job["created_at"], "finished_at": job["finished_at"],
             "elapsed_ms": elapsed,
+            "walk_forward": job.get("walk_forward"),
+            "folds": job.get("folds") or [],
+            "stability": job.get("stability_report"),
+            "stability_config": job.get("stability") or {},
+            "stability_done": job.get("stability_done"),
+            "stability_total": job.get("stability_total"),
+            "persisted": bool(persisted),
         }
+
+    def _persist_optimization(self, job):
+        if self.store is None:
+            return
+        try:
+            self.store.save_optimization(self._optimization_payload(job))
+        except Exception:  # pragma: no cover - 落盘失败不应炸 worker
+            logger.exception("寻优报告落盘失败: %s", job.get("job_id"))
+
+    def get_optimization(self, job_id):
+        job = self._optimize_jobs.get(job_id)
+        if job:
+            return self._optimization_payload(job)
+        if self.store is not None:
+            saved = self.store.load_optimization(job_id)
+            if saved:
+                return saved
+        return {"error": f"OPTIMIZE_JOB_NOT_FOUND: {job_id}"}
+
+    def list_optimizations(self, board_id=None, limit=50):
+        if self.store is None:
+            return {"optimizations": [], "count": 0}
+        rows = self.store.list_optimizations(board_id=board_id, limit=limit)
+        # v0.6.7 兼容旧报告：旧摘要没有 symbol/strategy_name/script，读全文补一次。
+        meta_cache = {}
+        for row in rows:
+            jid = row.get("job_id")
+            if not row.get("script") or not row.get("strategy_name"):
+                rep = self.store.load_optimization(jid) or {}
+                if not row.get("script"):
+                    row["script"] = rep.get("script") or ""
+            if not row.get("strategy_name") and row.get("script"):
+                script = row["script"]
+                if script not in meta_cache:
+                    try:
+                        meta_cache[script] = self.strategy_meta(script=script) or {}
+                    except Exception:
+                        meta_cache[script] = {}
+                name = (meta_cache[script] or {}).get("name")
+                row["strategy_name"] = name or script.split("/")[-1]
+            if not row.get("symbol"):
+                board = self.state.get_board(row.get("board_id") or "")
+                if board:
+                    row["board_name"] = board.name
+                    row["symbol"] = ((board.source_lock or {}).get("identity") or {}).get(
+                        "symbol") or board.name
+                else:
+                    row["symbol"] = row.get("board_name") or row.get("board_id") or ""
+        return {"optimizations": rows, "count": len(rows)}
+
+    def delete_optimization(self, job_id):
+        """删除一份寻优/稳健性报告；不删已登记的结果。running 作业先拒绝。"""
+        job = self._optimize_jobs.get(job_id)
+        if job and job.get("status") == "running":
+            return {"error": "OPTIMIZE_RUNNING: 作业还在跑，先取消再删报告"}
+        deleted = False
+        if self.store is not None:
+            try:
+                deleted = self.store.delete_optimization(job_id)
+            except Exception as exc:
+                logger.exception("删除寻优报告失败: %s", job_id)
+                return {"error": f"OPTIMIZE_DELETE_FAILED: {exc}"}
+        if job is not None:
+            self._optimize_jobs.pop(job_id, None)
+        if not deleted and job is None:
+            return {"error": f"OPTIMIZE_REPORT_NOT_FOUND: {job_id}"}
+        return {"status": "ok", "deleted": job_id}
 
     def cancel_optimization(self, job_id):
         job = self._optimize_jobs.get(job_id)
