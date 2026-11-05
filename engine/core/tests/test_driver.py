@@ -120,6 +120,20 @@ class WindowTest(unittest.TestCase):
             run_signal(req, load_strategy(STRAT), _Engine())
         self.assertEqual(cm.exception.code, "INPUT_INVALID")
 
+    def test_start_flat_skips_carry_in(self):
+        req = _req("both", eval_start=3, start_flat=True)
+        res = run_signal(req, load_strategy(STRAT), _Engine())
+        self.assertTrue(res.fills)
+        # 从第 3 根空仓开始；第 3 根产生 target，下一根才成交
+        self.assertEqual(res.fills[0]["time"], req.bars[4]["timestamp"])
+
+    def test_no_flatten_keeps_position_marked_to_close(self):
+        req = _req("both", flatten=False)
+        res = run_signal(req, load_strategy(STRAT), _Engine())
+        self.assertTrue(res.fills)
+        self.assertNotIn("end_of_backtest", [f["reason"] for f in res.fills])
+        self.assertGreater(res.stats["final_value"], 0)
+
     def test_force_close_last_bar_eq_cash(self):
         req = _req("both")
         res = run_signal(req, load_strategy(STRAT), _Engine())

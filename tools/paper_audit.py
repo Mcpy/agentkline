@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""模拟盘审计（0.7.0）：用原始 K 线复核事件账本里的决策/成交/权益。
+"""模拟盘审计（0.7.1）：用原始 K 线复核事件账本里的决策/成交/权益，可附加对账。
 
 用法：
     python tools/paper_audit.py --session-id pp_xxx
     python tools/paper_audit.py --session-id pp_xxx --base http://127.0.0.1:8765
+    python tools/paper_audit.py --session-id pp_xxx --reconcile
 
-只读：不启动/停止/修改会话。退出码 0=全部可解释；1=发现不一致。
+只读：不启动/停止/修改会话。--reconcile 会额外跑一次 paper vs 回测对账。
+退出码 0=全部可解释；1=发现不一致。
 """
 from __future__ import annotations
 
@@ -22,6 +24,14 @@ PROTECTION_REASONS = {"stop_loss", "take_profit"}
 
 def get_json(url: str):
     with urllib.request.urlopen(url, timeout=10) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def post_json(url: str, payload: dict):
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=180) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
@@ -55,6 +65,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--session-id", required=True)
     ap.add_argument("--base", default="http://127.0.0.1:8765")
+    ap.add_argument("--reconcile", action="store_true",
+                    help="额外跑一次 paper vs 回测对账")
     args = ap.parse_args()
 
     base = args.base.rstrip("/")
@@ -154,6 +166,27 @@ def main() -> int:
             print("  ❌ " + e)
         return 1
     print("\n✅ 事件账本与原始 K 线一致（决策 close / next-open 成交 / 权益逐点）")
+
+    if args.reconcile:
+        try:
+            rep = post_json(f"{base}/api/paper/sessions/{sid}/reconcile", {})
+        except Exception as exc:  # noqa: BLE001
+            print(f"\n❌ 对账失败: {exc}")
+            return 2
+        if rep.get("error"):
+            print(f"\n❌ 对账失败: {rep['error']}")
+            return 2
+        print(f"\n对账 verdict={rep.get('verdict')}  "
+              f"coverage={rep.get('coverage')}")
+        print(f"  paper: {rep.get('paper')}")
+        print(f"  backtest: {rep.get('backtest')}")
+        print(f"  diff: {rep.get('diff_counts')}")
+        for x in rep.get("explanations") or []:
+            print(f"  ℹ {x.get('code')}: {x.get('message')}")
+        if rep.get("verdict") == "mismatch":
+            print("  ❌ 对账不一致")
+            return 1
+        print("  ✅ 对账一致或差异可解释")
     return 0
 
 

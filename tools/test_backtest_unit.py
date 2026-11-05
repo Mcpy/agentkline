@@ -68,6 +68,14 @@ class RunnerTest(unittest.TestCase):
         self.assertGreaterEqual(res["_elapsed_ms"], 0)
         self.assertEqual(res["engine"]["id"], "builtin")
 
+    def test_run_spec_reconcile_options(self):
+        run = {"initial_cash": 10000, "fee_bps": 0, "slippage_bps": 0,
+               "eval_start": 10, "start_flat": True, "flatten": False}
+        res = runner.run_spec(spec(run=run), timeout=60)
+        self.assertTrue(res["fills"])
+        self.assertEqual(res["fills"][0]["time"], BARS[11]["timestamp"])
+        self.assertNotIn("end_of_backtest", [f["reason"] for f in res["fills"]])
+
     def test_engine_error_code(self):
         with self.assertRaises(runner.EngineRunError) as cm:
             runner.run_spec(spec(source="NAME='x'"), timeout=60)

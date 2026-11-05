@@ -56,6 +56,9 @@ class RunRequest:
     timeframe: str = ""
     symbol: str = ""
     rebalance_tolerance: float = 0.0001  # 防抖：目标数量相对漂移小于此比例不动
+    # 0.7.1 对账选项：paper 逐窗求值、不在末根强平，回测要能对齐
+    flatten: bool = True       # False=末根不强平，权益按收盘价标记
+    start_flat: bool = False   # True=eval_start 当根不执行上一根留下的 pending
 
     def validate(self) -> None:
         if self.direction not in DIRECTIONS:
@@ -99,6 +102,8 @@ class RunRequest:
             "timeframe": self.timeframe,
             "symbol": self.symbol,
             "rebalance_tolerance": self.rebalance_tolerance,
+            "flatten": bool(self.flatten),
+            "start_flat": bool(self.start_flat),
         }
 
 

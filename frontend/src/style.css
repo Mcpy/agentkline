@@ -932,10 +932,10 @@ body.wb-resizing { cursor: ns-resize; user-select: none; }
 .wb-pane[data-pane="debug"] .log-content { flex: 1; min-height: 0; }
 .wb-empty { color: var(--text-faint); font-size: 13px; padding: 18px 4px; }
 
-/* ---- 模拟盘（v0.7.0 最小面板） ---- */
+/* ---- 模拟盘（v0.7.1 面板） ---- */
 .paper-wrap { display: flex; gap: 14px; height: 100%; min-height: 0; }
 .paper-side { width: 380px; flex: 0 0 380px; display: flex; flex-direction: column; gap: 8px; height: 100%; max-height: 100%; overflow-y: auto; padding-right: 4px; }
-.paper-main { flex: 1; min-width: 0; }
+.paper-main { flex: 1; min-width: 0; max-height: 100%; overflow-y: auto; padding-right: 4px; }
 .paper-head { display: flex; align-items: center; justify-content: space-between; }
 .paper-title { font-size: 13px; font-weight: 600; color: var(--text); }
 .paper-mini {
@@ -945,6 +945,7 @@ body.wb-resizing { cursor: ns-resize; user-select: none; }
 }
 .paper-mini:hover { color: var(--text); background: var(--bg-input); }
 .paper-mini.paper-danger:hover { color: var(--down); border-color: var(--down); }
+.paper-mini:disabled { opacity: .45; cursor: default; }
 .paper-list { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
 .paper-row {
     width: 100%; text-align: left; padding: 7px 9px; border-radius: var(--radius-s);
@@ -969,8 +970,8 @@ body.wb-resizing { cursor: ns-resize; user-select: none; }
     padding: 6px; display: flex; flex-direction: column; gap: 5px;
     max-height: calc(100% - 32px); overflow: hidden;
 }
-.paper-form-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.paper-form-heading { font-size: 12px; font-weight: 600; color: var(--text); }
+.paper-form-head { display: flex; flex-direction: column; align-items: flex-start; justify-content: space-between; gap: 1px; }
+.paper-form-heading { font-size: 12px; font-weight: 600; color: var(--text); white-space: nowrap; }
 .paper-form-hint { font-size: 10px; color: var(--text-faint); }
 .paper-form-scroll { min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 9px; padding-right: 2px; }
 .paper-form-section { display: flex; flex-direction: column; gap: 4px; }
@@ -1061,6 +1062,53 @@ body.wb-resizing { cursor: ns-resize; user-select: none; }
 .paper-line { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--text-dim); padding: 2px 0; }
 .paper-event-kind { color: var(--text-faint); width: 54px; flex: 0 0 54px; }
 .paper-muted { color: var(--text-faint); font-size: 12px; }
+.paper-tabs { display: flex; gap: 4px; flex-wrap: wrap; margin: 4px 0 7px; border-bottom: 1px solid var(--border); padding-bottom: 5px; }
+.paper-tab {
+    height: 22px; padding: 0 8px; font-size: 11px; color: var(--text-faint);
+    background: transparent; border: 1px solid transparent; border-radius: var(--radius-s);
+    cursor: pointer;
+}
+.paper-tab:hover { color: var(--text); background: var(--bg-input); }
+.paper-tab.on { color: var(--accent); border-color: var(--accent); background: var(--bg-input); }
+.paper-tab-body { min-height: 0; }
+.paper-overview { display: flex; flex-direction: column; gap: 7px; }
+.paper-window-line { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; font-size: 11px; color: var(--text-dim); }
+.paper-warn-text { color: var(--warn); }
+.paper-badge.paper-warn { color: var(--warn); border-color: var(--warn); }
+.paper-window-row { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.paper-window-row .paper-input { width: 68px; flex: 0 0 68px; }
+.paper-check-label { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; color: var(--text-faint); white-space: nowrap; }
+.paper-check { accent-color: var(--accent); }
+.paper-chart-wrap { display: flex; gap: 6px; align-items: stretch; }
+.paper-chart-y {
+    width: 62px; flex: 0 0 62px; height: 150px; padding: 4px 0;
+    display: flex; flex-direction: column; justify-content: space-between;
+    align-items: flex-end; font-size: 9px; color: var(--text-faint);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.paper-chart-main { flex: 1; min-width: 0; }
+.paper-chart-plot {
+    height: 150px; background: var(--bg-panel-2);
+    border: 1px solid var(--border); border-radius: var(--radius-s); overflow: hidden;
+}
+.paper-chart { width: 100%; height: 150px; display: block; }
+.paper-chart-grid { stroke: var(--border); stroke-width: 1; opacity: .7; }
+.paper-chart-axis { fill: none; stroke: var(--text-faint); stroke-width: 1; opacity: .7; }
+.paper-chart-base { stroke: var(--text-faint); stroke-width: 1; stroke-dasharray: 4 4; opacity: .55; }
+.paper-chart-line { fill: none; stroke: var(--up); stroke-width: 1.8; vector-effect: non-scaling-stroke; }
+.paper-chart-line.down { stroke: var(--down); }
+.paper-chart-x {
+    display: flex; justify-content: space-between; gap: 4px;
+    padding-top: 2px; font-size: 9px; color: var(--text-faint);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.paper-chart-legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 10px; color: var(--text-faint); margin-top: 3px; }
+.paper-chart-note { margin-top: 3px; font-size: 10px; color: var(--text-faint); }
+.paper-reconcile .paper-grid { margin: 5px 0; }
+.paper-reconcile-explain { margin-top: 6px; }
+.paper-reconcile-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.paper-reconcile-save { margin: 0; }
+.paper-equity-box { padding-bottom: 5px; }
 
 /* ---- 概览 ---- */
 .res-ov-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
@@ -1237,6 +1285,10 @@ body.wb-resizing { cursor: ns-resize; user-select: none; }
 .res-batch-tag {
     font-size: 9px; line-height: 1; padding: 2px 4px; border-radius: 3px;
     color: var(--text-faint); border: 1px solid var(--border); margin-left: 2px;
+}
+.res-paper-tag {
+    font-size: 9px; line-height: 1; padding: 2px 4px; border-radius: 3px;
+    color: var(--accent); border: 1px solid var(--accent); margin-left: 2px;
 }
 .res-trust { margin-top: 8px; border-top: 1px solid var(--border); padding-top: 6px; }
 .res-trust summary { font-size: 12px; color: var(--text-dim); cursor: pointer; }

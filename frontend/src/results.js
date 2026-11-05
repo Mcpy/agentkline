@@ -806,6 +806,19 @@ async function _savePresetFromResult(r) {
     }
 }
 
+function openPaperFromResult(r) {
+    const detail = {
+        script: (r.strategy && r.strategy.id) || '',
+        params: (r.strategy && r.strategy.params) || {},
+        direction: (r.execution_assumptions && r.execution_assumptions.direction)
+            || (r.engine && r.engine.config && r.engine.config.direction) || 'long_only',
+        timeframe: (r.data && r.data.timeframe) || '',
+        board_id: r.board_id || state.currentBoard || '',
+    };
+    window.dispatchEvent(new CustomEvent('ak:paper-create', { detail }));
+    openWorkbench('paper');
+}
+
 export function renderResultBar() {
     const bar = document.getElementById('result-bar');
     const chips = document.getElementById('result-chips');
@@ -828,6 +841,12 @@ export function renderResultBar() {
         x.title = t('result.remove_from_chart');
         x.addEventListener('click', (e) => { e.stopPropagation(); hideResult(id); });
         chip.append(dot, name, pct);
+        if (r.kind === 'paper' || (r.batch && r.batch.kind === 'paper')) {
+            chip.appendChild(_el('span', 'res-paper-tag', t('result.paper_tag')));
+        } else if (r.kind === 'paper_reconcile'
+                   || (r.batch && r.batch.kind === 'paper_reconcile')) {
+            chip.appendChild(_el('span', 'res-paper-tag', t('result.reconcile_tag')));
+        }
         let extra = '';
         if (r.batch && Number(r.batch.total) > 1) {
             chip.appendChild(_el('span', 'res-batch-tag',
@@ -858,7 +877,20 @@ export function renderResultBar() {
                     { label: t('result.rerun_params'), onClick: () => openBacktestDialog({
                         script: r.strategy.id, params: r.strategy.params,
                     }) },
+                    { label: t('result.create_paper'), onClick: () => openPaperFromResult(r) },
                 );
+            }
+            if (r.batch && ['paper', 'paper_reconcile'].includes(r.batch.kind)
+                    && r.batch.session_id) {
+                items.push({
+                    label: t('result.open_paper'),
+                    onClick: () => {
+                        window.dispatchEvent(new CustomEvent('ak:open-paper', {
+                            detail: { session_id: r.batch.session_id },
+                        }));
+                        openWorkbench('paper');
+                    },
+                });
             }
             items.push(
                 { label: t('result.rename'), onClick: () => renameResult(id) },
@@ -1030,6 +1062,22 @@ export function fillOverview() {
         const cb = _el('button', 'btn-ghost', t('result.copy_params'));
         cb.addEventListener('click', () => copyParams(a));
         actions.append(sb, cb);
+    }
+    if (a.strategy && a.strategy.id) {
+        const pb = _el('button', 'btn-ghost', t('result.create_paper'));
+        pb.addEventListener('click', () => openPaperFromResult(a));
+        actions.appendChild(pb);
+    }
+    if (a.batch && ['paper', 'paper_reconcile'].includes(a.batch.kind)
+            && a.batch.session_id) {
+        const ob = _el('button', 'btn-ghost', t('result.open_paper'));
+        ob.addEventListener('click', () => {
+            window.dispatchEvent(new CustomEvent('ak:open-paper', {
+                detail: { session_id: a.batch.session_id },
+            }));
+            openWorkbench('paper');
+        });
+        actions.appendChild(ob);
     }
     const rb = _el('button', 'btn-ghost', t('result.rename'));
     rb.addEventListener('click', () => renameResult(a.result_id));

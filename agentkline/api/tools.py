@@ -649,7 +649,7 @@ def run_backtest(board_id: str, timeframe: Optional[str] = None, engine: str = "
         start_time=start_time, end_time=end_time, limit=limit, timeout=timeout)
 
 
-# ============ 模拟盘（v0.7.0） ============
+# ============ 模拟盘（v0.7.1） ============
 @api_tool(group="read", path="/api/paper/sessions")
 def list_paper_sessions(board_id: Optional[str] = None, status: Optional[str] = None):
     """列出模拟盘会话（可按画板/状态过滤）。运行中读内存快照，不阻塞数据轮询。"""
@@ -666,7 +666,8 @@ def create_paper_session(board_id: str, timeframe: Optional[str] = None,
                          preset_id: Optional[str] = None,
                          source: Optional[str] = None):
     """创建一个模拟盘会话（不自动启动）。冻结策略源码/参数/费用/保护；
-    启动点=当前最新已收盘 bar，第一笔决策等下一根新 bar。同一画板+周期只允许一个未结束会话。"""
+    启动点=当前最新已收盘 bar，第一笔决策等下一根新 bar。同一画板+周期只允许一个未结束会话。
+    window_bars 缺省/0=自动 max(500, WARMUP+100)；显式正数=手动窗口。"""
     return service.paper.create(
         board_id, timeframe=timeframe, script=script, params=params,
         direction=direction, initial_cash=initial_cash, fee_bps=fee_bps,
@@ -725,8 +726,20 @@ def paper_events(session_id: str, after_seq: int = 0, limit: int = 200):
 
 @api_tool(group="read", path="/api/paper/sessions/{session_id}/equity", err_status=404)
 def paper_equity(session_id: str, offset: int = 0, limit: int = 0):
-    """读模拟盘净值曲线；limit=0 返回全部（0.7.0 最小面板用）。"""
+    """读模拟盘净值曲线；limit=0 返回全部（面板曲线用）。"""
     return service.paper.equity(session_id, offset=offset, limit=limit)
+
+
+@api_tool(group="user_write", method="POST",
+          path="/api/paper/sessions/{session_id}/reconcile", err_status=400)
+def reconcile_paper_session(session_id: str, timeout: float = 120.0,
+                            save_result: bool = False):
+    """用同一段 bars/参数/窗口跑区间回测，和模拟盘的权益/成交/回合逐项对账。
+    返回 verdict=match/explainable/mismatch，以及差异分类和明细。
+    save_result=true 时把这次区间回测登记成结果（kind=paper_reconcile），
+    可直接在结果栏打开并画到 K 线上。"""
+    return service.paper.reconcile(
+        session_id, timeout=timeout, save_result=save_result)
 
 
 @api_tool(group="read", path="/api/presets")

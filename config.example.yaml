@@ -21,7 +21,7 @@ limits:
   max_window: 5000          # 指标重算尾窗（根数）；脚本长记忆参数勿超窗
   max_bars_per_slot: 50000  # 每槽上限：越界截最旧 + dropped 回报（防 AI 手滑大内嵌）
   init_window: 2000         # init/switch 携带窗口=最近 N 根；左滚历史走 backfill 按需
-  paper_window_bars: 5000   # v0.7 模拟盘策略窗口（含预热；上限 50000）
+  paper_window_bars: 0      # v0.7.1 模拟盘窗口：0=自动 max(500,WARMUP+100)，正数=手动上限 50000
   paper_max_catchup_bars: 500  # 一次补处理超过此数转 paused_gap，人工恢复时跳过
   paper_settle_ms: 15000    # bar 收盘后静默 15s 再处理，避开交易所最后一跳修订
 

@@ -687,13 +687,26 @@ const openOptimizeReport = (st) => {
 
     const foot = el('div', 'dialog-foot');
     const savedHint = el('span', 'bt-opt-saved-hint', t('bt.opt.report_saved'));
+    const paperBest = el('button', 'btn-ghost', t('result.create_paper'));
+    paperBest.type = 'button';
+    paperBest.onclick = () => {
+        ov.remove();
+        window.dispatchEvent(new CustomEvent('ak:paper-create', {
+            detail: {
+                script: st.script || '',
+                params: (best && best.params) || st.best_params || {},
+                timeframe: st.timeframe || '',
+            },
+        }));
+    };
+    if (!(best && (best.params || st.best_params)) && !st.script) paperBest.style.display = 'none';
     const hist = el('button', 'btn-ghost', t('bt.opt.history'));
     hist.type = 'button';
     hist.onclick = () => { ov.remove(); openOptimizeHistory(); };
     const closeBtn = el('button', 'btn-primary', t('common.close'));
     closeBtn.type = 'button';
     closeBtn.onclick = () => ov.remove();
-    foot.append(savedHint, hist, closeBtn);
+    foot.append(savedHint, paperBest, hist, closeBtn);
     card.appendChild(foot);
     const onKey = (e) => {
         if (e.key === 'Escape') { e.stopPropagation(); ov.remove(); }
@@ -1016,6 +1029,16 @@ export async function openBacktestDialog(opts = {}) {
             use.type = 'button';
             use.onclick = () => usePreset(p);
             acts.appendChild(use);
+            const pp = el('button', 'btn-ghost', t('result.create_paper'));
+            pp.type = 'button';
+            pp.onclick = () => {
+                closeOv();
+                window.dispatchEvent(new CustomEvent('ak:paper-create', {
+                    detail: { script: p.script, params: p.params || {},
+                              timeframe: p.timeframe || '' },
+                }));
+            };
+            acts.appendChild(pp);
             const cp = el('button', 'btn-ghost', t('bt.preset_copy'));
             cp.type = 'button';
             cp.onclick = async () => {

@@ -96,6 +96,9 @@ export function bindWorkbench() {
     window.addEventListener('resize', () => { if (_open) _applyHeight(); });
     // 左划回补走 Vela 原生 loadRange，不经过 WS：由 adapter 广播后刷新状态条
     window.addEventListener('ak:bars-changed', updateWorkbenchStatus);
+    // 结果/方案 → 开模拟盘：统一由工作坞切页，避免各模块互相 import
+    window.addEventListener('ak:paper-create', () => setWorkbenchTab('paper'));
+    window.addEventListener('ak:open-paper', () => setWorkbenchTab('paper'));
     apply();
 }
 
@@ -121,7 +124,7 @@ export function setWorkbenchTab(tab) {
     _tab = tab;
     _open = true;
     // 模拟盘表单字段多：首次打开给足高度，避免表单/参数区被压成一条缝
-    if (tab === 'paper' && _h < 500) _h = Math.min(_maxH(), 500);
+    if (tab === 'paper' && _h < 560) _h = Math.min(_maxH(), 560);
     apply();
 }
 

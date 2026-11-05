@@ -163,6 +163,9 @@ def run_signal(req: RunRequest, strategy: Strategy, engine: Engine) -> RunResult
     for i in range(eval_end + 1):
         _deadline_check(req)
         bar = view[i]
+        # 对账模式：eval_start 当根从 paper 的空仓开始，不执行预热期留下的 pending
+        if req.start_flat and i == eval_start:
+            pending = None
         if pending is not None and i >= eval_start:
             target, reason = pending
             # 定仓用执行 bar 的开盘权益（与 Vibe 一致：用能成交的价格重估）
@@ -178,9 +181,10 @@ def run_signal(req: RunRequest, strategy: Strategy, engine: Engine) -> RunResult
             pending = None
 
     last_bar = view[-1]
-    matcher.force_close(last_bar)
-    if eq_values:
-        eq_values[-1] = matcher.cash
+    if req.flatten:
+        matcher.force_close(last_bar)
+        if eq_values:
+            eq_values[-1] = matcher.cash
 
     fills = matcher.fills
     trades = matcher.trades

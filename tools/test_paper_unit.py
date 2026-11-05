@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""模拟盘单测（0.7.0）：schema v5 / 会话 / 游标去重 / 暂停跳过 / 缺口门禁 / 停止物化。
+"""模拟盘单测（0.7.1）：schema v5 / 会话 / 自动窗口 / 游标去重 / 暂停跳过 / 缺口门禁 / 停止物化 / 对账。
 
 无 pytest 依赖：python tools/test_paper_unit.py
 """
@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agentkline.core.service import AgentKlineService
 from agentkline.core.store import SCHEMA_VERSION
-from agentkline.core.paper import _is_closed
+from agentkline.core.paper import _is_closed, resolve_window_bars
 
 ok = 0
 bad = []
@@ -66,6 +66,13 @@ def main():
         check("settle 未到不处理", not _is_closed(bar, "15m", now, 15_000))
         check("settle 到后才处理", _is_closed(bar, "15m", now + 15_000, 15_000))
         check("schema v5", SCHEMA_VERSION == 5 and svc.store.stats()["schema"] == 5)
+        auto = resolve_window_bars(30, None)
+        check("自动窗口=max(500,WARMUP+100)",
+              auto["mode"] == "auto" and auto["resolved"] == 500, str(auto))
+        manual = resolve_window_bars(30, 20)
+        check("手动窗口过小向上夹取",
+              manual["mode"] == "manual" and manual["resolved"] == 100
+              and manual["adjusted"], str(manual))
         tables = {r[0] for r in svc.store._rows(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         check("paper 三表建齐",
@@ -83,6 +90,15 @@ def main():
 
         started = svc.paper.start(sid)
         check("启动", started.get("status") == "running")
+        win = svc.paper.get(sid).get("window") or {}
+        check("创建默认自动窗口/记录实际",
+              win.get("mode") == "auto" and win.get("resolved") == 500
+              and win.get("actual") == len(bars) and not win.get("short"), str(win))
+        ev = svc.paper.get(sid, include_events=True).get("events") or []
+        check("大于 WARMUP 的短窗口不告警",
+              not any(e["kind"] == "warning"
+                      and e["payload"].get("code") == "PAPER_WINDOW_SHORT" for e in ev),
+              str([e["payload"].get("code") for e in ev]))
         time.sleep(0.2)
         check("启动不回溯历史", svc.paper.get(sid).get("bars_processed") == 0)
         check("运行中禁止删除", svc.paper.delete(sid).get("code") == "PAPER_RUNNING")
@@ -106,7 +122,17 @@ def main():
         check("next-open 成交（含滑点）",
               fill and abs(fill["payload"]["price"] - want) < 1e-8,
               f"{fill and fill['payload']['price']} vs {want}")
-        check("权益点入账", svc.paper.equity(sid).get("total") == 1)
+        ev = svc.paper.get(sid, include_events=True).get("events") or []
+        check("处理 bar 也不误报窗口不足",
+              not any(e["kind"] == "warning"
+                      and e["payload"].get("code") == "PAPER_WINDOW_SHORT" for e in ev),
+              str([e["payload"].get("code") for e in ev]))
+        eq_ledger = svc.paper.equity(sid)
+        check("权益点入账（启动初始 + 首根 B）", eq_ledger.get("total") == 2,
+              str(eq_ledger.get("total")))
+        check("启动权益从初始资金开始",
+              abs(float((eq_ledger.get("points") or [[0, 0]])[0][1]) - 10000.0) < 1e-9,
+              str((eq_ledger.get("points") or [])[:2]))
         internal = svc.paper._get(sid)["state"]
         check("fill 带 bar index",
               all(int(f.get("index", -1)) >= 0 for f in internal.get("fills") or []),
@@ -120,6 +146,36 @@ def main():
         svc.paper.on_bars("p1", "1d", allbars, allbars)
         time.sleep(0.25)
         check("重复 bar 不重复处理", svc.paper.get(sid).get("bars_processed") == 1)
+
+        rec = svc.paper.reconcile(sid)
+        check("对账返回 verdict", rec.get("verdict") == "match", str(rec)[:300])
+        check("对账权益/成交/回合无差异",
+              (rec.get("diff_counts") or {}).get("equity") == 0
+              and (rec.get("diff_counts") or {}).get("fills_missing") == 0
+              and (rec.get("diff_counts") or {}).get("fills_extra") == 0
+              and (rec.get("diff_counts") or {}).get("trades_mismatch") == 0,
+              str(rec.get("diff_counts")))
+        last_rec = svc.paper.get(sid).get("last_reconcile") or {}
+        check("对账结论写回会话",
+              last_rec.get("verdict") == "match" and "diff" in last_rec)
+        rec_saved = svc.paper.reconcile(sid, save_result=True)
+        rid_rec = rec_saved.get("result_id")
+        rrec = svc.state.get_board("p1").results.get(rid_rec)
+        check("对账可选存为结果并上图",
+              bool(rid_rec) and rrec and rrec.get("kind") == "paper_reconcile"
+              and rrec.get("batch", {}).get("kind") == "paper_reconcile",
+              f"{rid_rec} {rrec and rrec.get('kind')}")
+        rec_saved2 = svc.paper.reconcile(sid, save_result=True)
+        paper_recs = [r for r in svc.state.get_board("p1").results.values()
+                      if (r.get("batch") or {}).get("kind") == "paper_reconcile"]
+        check("同区间重复保存不建重复结果",
+              rec_saved2.get("result_id") == rid_rec and len(paper_recs) == 1,
+              f"{rid_rec} -> {rec_saved2.get('result_id')} n={len(paper_recs)}")
+        svc.state.get_board("p1").results.pop(rid_rec, None)
+        stale = svc.paper.get(sid).get("last_reconcile") or {}
+        check("对账结果被删后不再显示入口",
+              not stale.get("result_id") and stale.get("result_missing"),
+              str(stale.get("result_id")))
 
         # 暂停：暂停期 bar 不处理；恢复默认跳过
         svc.paper.pause(sid)
@@ -158,6 +214,16 @@ def main():
         svc.paper.on_bars("p1", "1d", allbars[:-1], allbars)
         s = wait_bars(svc, sid, 2)
         check("恢复后继续处理", s.get("bars_processed") == 2, str(s.get("bars_processed")))
+        svc.paper._reconciling.add(sid)
+        busy = svc.paper.reconcile(sid)
+        svc.paper._reconciling.discard(sid)
+        check("对账并发直接拒绝 BUSY",
+              busy.get("code") == "PAPER_RECONCILE_BUSY", str(busy)[:200])
+        rec2 = svc.paper.reconcile(sid)
+        codes = {x.get("code") for x in (rec2.get("explanations") or [])}
+        check("暂停跳过的对账差异可解释",
+              rec2.get("verdict") == "explainable"
+              and "PAPER_RESUME_SKIP" in codes, str(rec2)[:300])
         stopped = svc.paper.stop(sid)
         check("停止", stopped.get("status") == "stopped")
         time.sleep(0.2)
@@ -185,6 +251,39 @@ def main():
         d = svc.paper.delete(p2sid)
         check("created 会话可删除", d.get("status") == "deleted"
               and svc.paper.get(p2sid).get("code") == "PAPER_NOT_FOUND", str(d))
+
+        # 连续 flip 的独立会话：对账必须连成交回合也一致
+        flip_src = (
+            'STRATEGY_MODE = "signal"\nNAME = "flip"\nWARMUP = 1\nPARAMS = {}\n'
+            'def main(p, o):\n'
+            '    return {"target": [0.0] + [1.0 if i % 4 < 2 else -1.0 '
+            'for i in range(1, len(o))]}\n')
+        svc.state.create_board("p3", name="P3", intervals=["1d"])
+        b3, bars3 = make_bars(n=60, start=50.0)
+        svc.state.set_ohlcv("p3", "1d", bars3)
+        s3 = svc.paper.create("p3", "1d", source=flip_src)
+        sid3 = s3["session_id"]
+        svc.paper.start(sid3)
+        all3 = bars3[:]
+        for i in range(8):
+            nb = new_bar(b3, len(all3), all3[-1]["close"])
+            all3.append(nb)
+            svc.state.set_ohlcv("p3", "1d", all3)
+            svc.paper.on_bars("p3", "1d", all3[:-1], all3)
+            wait_bars(svc, sid3, i + 1, timeout=4)
+        rec3 = svc.paper.reconcile(sid3)
+        check("对账覆盖已平回合",
+              (rec3.get("paper") or {}).get("trades", 0) > 0
+              and (rec3.get("diff_counts") or {}).get("trades_mismatch") == 0
+              and (rec3.get("diff_counts") or {}).get("trades_missing") == 0
+              and (rec3.get("diff_counts") or {}).get("trades_extra") == 0,
+              str(rec3.get("diff_counts")))
+        check("对账覆盖多笔成交",
+              (rec3.get("paper") or {}).get("fills", 0) >= 2
+              and (rec3.get("diff_counts") or {}).get("fills_mismatch") == 0,
+              str(rec3.get("diff_counts")))
+        svc.paper.stop(sid3)
+        svc.paper.delete(sid3)
 
         # 重启去重：同一现场库再起一个 service
         svc.store.close()

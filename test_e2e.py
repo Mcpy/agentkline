@@ -81,6 +81,7 @@ TOOL_REST_MAP = {
     "delete_paper_session": ("delete", "/api/paper/sessions/"),
     "paper_events": ("get", "/api/paper/sessions/"),
     "paper_equity": ("get", "/api/paper/sessions/"),
+    "reconcile_paper_session": ("post", "/api/paper/sessions/"),
     "focus_result_trade": ("post", "/api/result/"),
     "list_presets": ("get", "/api/presets"),
     "save_preset": ("post", "/api/presets"),
@@ -468,7 +469,7 @@ def test(port: int, token: str = None):
     print("🔗 两表面对齐")
     try:
         tools = mcp_tools(base, s)
-        check("MCP 工具数=76", len(tools) == 76, f"got {len(tools)}")
+        check("MCP 工具数=77", len(tools) == 77, f"got {len(tools)}")
         missing = [t for t in tools if t not in TOOL_REST_MAP and t not in MCP_ONLY]
         check("无未映射工具", not missing, str(missing))
         spec = s.get(f"{base}/openapi.json").json()
@@ -1176,6 +1177,9 @@ def test(port: int, token: str = None):
     check("模拟盘恢复", s.post(f"{base}/api/paper/sessions/{psid}/resume").status_code == 200)
     check("模拟盘事件账本", s.get(f"{base}/api/paper/sessions/{psid}/events")
           .json().get("returned", 0) >= 1)
+    r = s.post(f"{base}/api/paper/sessions/{psid}/reconcile", json={})
+    check("模拟盘对账空会话明确报错",
+          r.status_code == 400 and "PAPER_RECONCILE_EMPTY" in r.text, r.text[:160])
     check("模拟盘停止", s.post(f"{base}/api/paper/sessions/{psid}/stop").status_code == 200
           and s.get(f"{base}/api/paper/sessions/{psid}").json().get("status") == "stopped")
     r = s.delete(f"{base}/api/paper/sessions/{psid}")

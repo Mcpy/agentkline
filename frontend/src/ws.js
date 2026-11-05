@@ -309,6 +309,7 @@ case 'subplot_remove':
             case 'paper_equity':
             case 'paper_warning':
             case 'paper_error':
+            case 'paper_reconcile':
             case 'paper_deleted':
                 window.dispatchEvent(new CustomEvent('ak:paper-event', { detail: msg }));
                 break;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AgentKline UI smoke (v0.7.0) — 30 browser checks on a disposable instance.
+"""AgentKline UI smoke (v0.7.1) — 32 browser checks on a disposable instance.
 
 Why this exists: test_e2e.py covers the API/MCP surface, not the browser UI.
 These checks protect the surfaces that 0.5.3–0.6.5 changed by hand:
@@ -910,6 +910,11 @@ def run_checks(page, base: str, agent_base: str = None,
     page.wait_for_selector("#paper-new", timeout=10000)
     page.locator("#paper-new").click()
     page.wait_for_selector("#paper-create", timeout=10000)
+    auto_checked = page.locator("#paper-window-auto").is_checked()
+    window_disabled = page.locator("#paper-window").is_disabled()
+    check("0.7.1：窗口默认自动且输入禁用",
+          auto_checked and window_disabled,
+          f"auto={auto_checked} disabled={window_disabled}")
     page.locator("#paper-script").select_option("strategy/ma_cross")
     page.wait_for_timeout(200)
     param_inputs = page.locator("#paper-params [data-paper-param]").count()
@@ -922,6 +927,12 @@ def run_checks(page, base: str, agent_base: str = None,
     page.locator('[data-paper-action="start"]').click()
     page.wait_for_selector(".paper-badge.paper-running", timeout=10000)
     running = page.locator(".paper-badge.paper-running").count() >= 1
+    tab_count = page.locator(".paper-tab").count()
+    win_text = page.locator(".paper-window-line").inner_text()
+    reconcile_entry = page.locator('[data-paper-action="reconcile"]').count()
+    check("0.7.1：分栏/窗口/对账入口",
+          tab_count >= 5 and reconcile_entry >= 1 and "500" in win_text,
+          f"tabs={tab_count} reconcile={reconcile_entry} window={win_text[:80]}")
     page.locator('[data-paper-action="stop"]').click()
     page.wait_for_selector(".paper-badge.paper-stopped", timeout=15000)
     stopped = page.locator(".paper-badge.paper-stopped").count() >= 1
@@ -974,7 +985,7 @@ def main() -> int:
             page.wait_for_selector(".ind-add", timeout=15000)
             _wait_app(page)
 
-            print("\nUI smoke（30 条）")
+            print("\nUI smoke（32 条）")
             passed, failed = run_checks(page, server.base, server.agent_base, server.token)
 
             # Console errors are a hard failure, but not a numbered check.

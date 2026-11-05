@@ -108,6 +108,8 @@ def build_request(spec: dict, engine_override: str | None = None,
         timeframe=str(spec.get("timeframe") or run.get("timeframe") or ""),
         symbol=str(spec.get("symbol") or ""),
         rebalance_tolerance=run.get("rebalance_tolerance", 0.0001),
+        flatten=bool(run.get("flatten", True)),
+        start_flat=bool(run.get("start_flat", False)),
         deadline=(time.monotonic() + timeout) if timeout else None,
     )
     req.validate()
