@@ -10,6 +10,7 @@ import { applyStatic, t, lang, setLang, availableLangs } from './i18n.js';
 import { showContextMenu } from './menu.js';
 import { bindResults } from './results.js';
 import { bindWorkbench } from './workbench.js';
+import { bindPaper } from './paper.js';
 
 // ============================================================
 // 初始化
@@ -30,6 +31,7 @@ async function init() {
     bindWatchlist();
     bindResults();
     bindWorkbench();
+    bindPaper();
 
     // v0.4.5 语言切换（0.6.0 起在顶栏右端；点击出下拉菜单，菜单项=语言本名，当前项 ✓）
     const langBtn = document.createElement('button');

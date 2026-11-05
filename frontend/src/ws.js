@@ -300,6 +300,18 @@ case 'subplot_remove':
             case 'result_focus':
                 onResultFocus(msg);
                 break;
+            case 'paper_started':
+            case 'paper_resumed':
+            case 'paper_paused':
+            case 'paper_stopped':
+            case 'paper_decision':
+            case 'paper_fill':
+            case 'paper_equity':
+            case 'paper_warning':
+            case 'paper_error':
+            case 'paper_deleted':
+                window.dispatchEvent(new CustomEvent('ak:paper-event', { detail: msg }));
+                break;
             case 'pong':
                 break;
             default:

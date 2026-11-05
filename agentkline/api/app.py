@@ -73,6 +73,8 @@ async def _serve():
     finally:
         service.datasource.stop_all()
         service.watchlist.stop()
+        if getattr(service, "paper", None) is not None:
+            service.paper.stop_all()
         if service.store is not None:   # v0.6.3：收尾 checkpoint WAL，正常停机不留 -wal 尾巴
             service.store.close()
         logger.info("AgentKline stopped.")

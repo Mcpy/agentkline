@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AgentKline UI smoke (v0.6.7) — 27 browser checks on a disposable instance.
+"""AgentKline UI smoke (v0.7.0) — 30 browser checks on a disposable instance.
 
 Why this exists: test_e2e.py covers the API/MCP surface, not the browser UI.
 These checks protect the surfaces that 0.5.3–0.6.5 changed by hand:
@@ -905,6 +905,38 @@ def run_checks(page, base: str, agent_base: str = None,
     check("0.6.3：自动淘汰有 toast 明示",
           "自动删除" in toast_text and "100" in toast_text, f"toast={toast_text[:80]}")
 
+    # 19) 0.7.0：模拟盘页签 → 新建 → 启动 → 停止
+    page.locator('#wb-tabs .wb-tab[data-tab="paper"]').click()
+    page.wait_for_selector("#paper-new", timeout=10000)
+    page.locator("#paper-new").click()
+    page.wait_for_selector("#paper-create", timeout=10000)
+    page.locator("#paper-script").select_option("strategy/ma_cross")
+    page.wait_for_timeout(200)
+    param_inputs = page.locator("#paper-params [data-paper-param]").count()
+    params_visible = page.locator("#paper-params").is_visible()
+    check("0.7.0：模拟盘策略参数可见", param_inputs >= 2 and params_visible,
+          f"inputs={param_inputs} visible={params_visible}")
+    page.locator("#paper-create").click()
+    page.wait_for_selector(".paper-row", timeout=10000)
+    paper_rows = page.locator(".paper-row").count()
+    page.locator('[data-paper-action="start"]').click()
+    page.wait_for_selector(".paper-badge.paper-running", timeout=10000)
+    running = page.locator(".paper-badge.paper-running").count() >= 1
+    page.locator('[data-paper-action="stop"]').click()
+    page.wait_for_selector(".paper-badge.paper-stopped", timeout=15000)
+    stopped = page.locator(".paper-badge.paper-stopped").count() >= 1
+    check("0.7.0：模拟盘页签/新建/启动/停止",
+          paper_rows >= 1 and running and stopped,
+          f"rows={paper_rows} running={running} stopped={stopped}")
+    page.locator('[data-paper-action="delete"]').click()
+    page.wait_for_selector(".dialog-card", timeout=5000)
+    dialog_ok = page.locator(".dialog-card .btn-danger").count() == 1
+    page.locator(".dialog-card .btn-danger").click()
+    page.wait_for_timeout(800)
+    paper_after = page.locator(".paper-row").count()
+    check("0.7.0：模拟盘会话可删除", dialog_ok and paper_after == 0,
+          f"dialog={dialog_ok} rows={paper_after}")
+
     return passed, failed
 
 
@@ -942,7 +974,7 @@ def main() -> int:
             page.wait_for_selector(".ind-add", timeout=15000)
             _wait_app(page)
 
-            print("\nUI smoke（27 条）")
+            print("\nUI smoke（30 条）")
             passed, failed = run_checks(page, server.base, server.agent_base, server.token)
 
             # Console errors are a hard failure, but not a numbered check.

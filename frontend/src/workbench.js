@@ -1,10 +1,11 @@
 // ============================================================
-// 底部工作坞（v0.6.0）：概览 / 动态 / 调试
+// 底部工作坞（v0.6.0）：概览 / 模拟盘 / 动态 / 调试
 // 收起 = 32px 状态条；展开默认 380px，顶边可拖动调高；日志降级到隐藏的调试页
 // ============================================================
 import { state } from './state.js';
 import { t } from './i18n.js';
 import { renderActivity } from './activity.js';
+import { renderPaper } from './paper.js';
 
 const H_KEY = 'ak_wb_h';
 const H_MIN = 140;
@@ -119,6 +120,8 @@ export function toggleWorkbench() {
 export function setWorkbenchTab(tab) {
     _tab = tab;
     _open = true;
+    // 模拟盘表单字段多：首次打开给足高度，避免表单/参数区被压成一条缝
+    if (tab === 'paper' && _h < 500) _h = Math.min(_maxH(), 500);
     apply();
 }
 
@@ -164,4 +167,5 @@ function apply() {
     });
     updateWorkbenchStatus();
     if (_open && _tab === 'activity') renderActivity();
+    if (_open && _tab === 'paper') renderPaper();
 }

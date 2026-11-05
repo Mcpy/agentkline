@@ -37,10 +37,11 @@ def _to_ms(v):
 class AgentKlineService:
     """AgentKline 业务核心"""
 
-    VERSION = "0.6.7"
+    VERSION = "0.7.0"
 
     def __init__(self, scripts_dir: str, limits: dict = None, data_dir: str = None):
         limits = limits or {}
+        self.limits = limits
         self.state = StateManager()
         self.script_engine = ScriptEngine(scripts_dir)
         self.datasource = DataSourceManager(self.state, self.script_engine, self)
@@ -77,6 +78,9 @@ class AgentKlineService:
         self.optimize_max_runs = int(limits.get("optimize_max_runs", 200))
         self._optimize_jobs: dict[str, dict] = {}
         self._optimize_lock = _th.Lock()
+        # v0.7.0 模拟盘：会话恢复 = running 的 worker 先等数据源喂第一根 bar
+        from .paper import PaperManager
+        self.paper = PaperManager(self)
 
     def _build_index(self, sid):
         """建单源索引（防重入：warmup 与搜索请求撞车不重复建）。返回 True=建成/已有，False=他人构建中。"""
@@ -273,6 +277,8 @@ class AgentKlineService:
         if board:
             for tf in list(board.timeframes.keys()):
                 self.datasource.stop_sync(board_id, tf)
+        if hasattr(self, "paper"):
+            self.paper.on_board_deleted(board_id)
         result = self.state.delete_board(board_id)
         if not result.get("error"):
             self._bc({"type": "board_remove", "board_id": board_id,
@@ -318,6 +324,8 @@ class AgentKlineService:
     def delete_timeframe(self, board_id, tf):
         result = self.state.delete_timeframe(board_id, tf)
         if not result.get("error"):
+            if hasattr(self, "paper"):
+                self.paper.on_timeframe_deleted(board_id, tf)
             self._bc({"type": "timeframe_remove", "board_id": board_id, "interval": tf,
                       "default_timeframe": result.get("default_timeframe")})
             # 删除最后一个周期 → 自动补默认 1d，保证画板永远有周期

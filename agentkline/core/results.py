@@ -538,6 +538,7 @@ def normalize_result(payload, board_id, timeframe, bars=None, version="0.6.0",
     result = {
         "schema": SCHEMA,
         "result_id": str(payload.get("result_id") or ""),
+        "kind": str(payload.get("kind") or "backtest"),
         "display_name": str(payload.get("display_name") or strategy["id"].split("/")[-1] or "回测结果"),
         "created_at": int(payload.get("created_at") or now_ms()),
         "source": str(payload.get("source") or engine["id"]),

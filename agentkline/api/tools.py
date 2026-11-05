@@ -649,6 +649,86 @@ def run_backtest(board_id: str, timeframe: Optional[str] = None, engine: str = "
         start_time=start_time, end_time=end_time, limit=limit, timeout=timeout)
 
 
+# ============ 模拟盘（v0.7.0） ============
+@api_tool(group="read", path="/api/paper/sessions")
+def list_paper_sessions(board_id: Optional[str] = None, status: Optional[str] = None):
+    """列出模拟盘会话（可按画板/状态过滤）。运行中读内存快照，不阻塞数据轮询。"""
+    return service.paper.list(board_id=board_id, status=status)
+
+
+@api_tool(group="user_write", method="POST", path="/api/paper/sessions", err_status=400)
+def create_paper_session(board_id: str, timeframe: Optional[str] = None,
+                         script: Optional[str] = None, params: Optional[dict] = None,
+                         direction: str = "long_only", initial_cash: float = 10000.0,
+                         fee_bps: float = 5.0, slippage_bps: float = 5.0,
+                         protection: Optional[dict] = None,
+                         window_bars: Optional[int] = None,
+                         preset_id: Optional[str] = None,
+                         source: Optional[str] = None):
+    """创建一个模拟盘会话（不自动启动）。冻结策略源码/参数/费用/保护；
+    启动点=当前最新已收盘 bar，第一笔决策等下一根新 bar。同一画板+周期只允许一个未结束会话。"""
+    return service.paper.create(
+        board_id, timeframe=timeframe, script=script, params=params,
+        direction=direction, initial_cash=initial_cash, fee_bps=fee_bps,
+        slippage_bps=slippage_bps, protection=protection, window_bars=window_bars,
+        preset_id=preset_id, source=source)
+
+
+@api_tool(group="read", path="/api/paper/sessions/{session_id}", err_status=404)
+def get_paper_session(session_id: str, include_events: bool = False):
+    """读一个模拟盘会话：状态/持仓/浮盈/游标/最近决策；include_events=true 带最近 30 条事件。"""
+    return service.paper.get(session_id, include_events=include_events)
+
+
+@api_tool(group="user_write", method="POST", path="/api/paper/sessions/{session_id}/start",
+          err_status=400)
+def start_paper_session(session_id: str):
+    """启动模拟盘。创建后第一次启动会把起点对齐到最新已收盘 bar，不回溯历史。"""
+    return service.paper.start(session_id)
+
+
+@api_tool(group="user_write", method="POST", path="/api/paper/sessions/{session_id}/pause",
+          err_status=400)
+def pause_paper_session(session_id: str):
+    """暂停模拟盘；暂停期间的 bar 不再处理。"""
+    return service.paper.pause(session_id)
+
+
+@api_tool(group="user_write", method="POST", path="/api/paper/sessions/{session_id}/resume",
+          err_status=400)
+def resume_paper_session(session_id: str):
+    """恢复模拟盘；默认跳过暂停/断线期间，从最新已收盘 bar 继续（PAPER_RESUME_SKIP）。"""
+    return service.paper.resume(session_id)
+
+
+@api_tool(group="user_write", method="POST", path="/api/paper/sessions/{session_id}/stop",
+          err_status=400)
+def stop_paper_session(session_id: str):
+    """停止模拟盘并物化成 kind=paper 结果（结果栏可直接打开）。"""
+    return service.paper.stop(session_id)
+
+
+@api_tool(group="user_write", method="DELETE", path="/api/paper/sessions/{session_id}",
+          err_status=400)
+def delete_paper_session(session_id: str, delete_result: bool = False):
+    """删除非运行中的模拟盘会话与事件/净值账本；运行中的会话必须先 stop。
+    停止后物化的 kind=paper 结果默认保留（结果可在结果栏单独删除）；
+    delete_result=true 时一并删除该结果。"""
+    return service.paper.delete(session_id, delete_result=delete_result)
+
+
+@api_tool(group="read", path="/api/paper/sessions/{session_id}/events", err_status=404)
+def paper_events(session_id: str, after_seq: int = 0, limit: int = 200):
+    """分页读模拟盘事件账本（decision/fill/equity/warning/...）。"""
+    return service.paper.events(session_id, after_seq=after_seq, limit=limit)
+
+
+@api_tool(group="read", path="/api/paper/sessions/{session_id}/equity", err_status=404)
+def paper_equity(session_id: str, offset: int = 0, limit: int = 0):
+    """读模拟盘净值曲线；limit=0 返回全部（0.7.0 最小面板用）。"""
+    return service.paper.equity(session_id, offset=offset, limit=limit)
+
+
 @api_tool(group="read", path="/api/presets")
 def list_presets(board_id: Optional[str] = None, script: Optional[str] = None):
     """列出参数方案（按画板标的过滤）。参数方案=命名后的参数集，绑定 源+标的+周期+策略，

@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from .errors import AKError
 
@@ -47,10 +47,36 @@ class MatchingEngine:
         self.trades: list[dict] = []
         self._trade: _Trade | None = None
 
-    # ---------------------------- 查询 ----------------------------
+    # ---------------------------- 查询 / 快照 ----------------------------
 
     def equity(self, price: float) -> float:
         return self.cash + self.pos * price
+
+    def snapshot(self) -> dict:
+        """可 JSON 化的撮合状态（paper 会话持久化用；不含策略/行情）。"""
+        return {
+            "cash": self.cash,
+            "pos": self.pos,
+            "avg_price": self.avg_price,
+            "fills": [dict(f) for f in self.fills],
+            "trades": [dict(t) for t in self.trades],
+            "trade": asdict(self._trade) if self._trade is not None else None,
+        }
+
+    def restore(self, snapshot: dict) -> None:
+        """从 snapshot() 恢复；坏数据抛 ENGINE_INTERNAL，绝不静默归零。"""
+        if not isinstance(snapshot, dict):
+            raise AKError("ENGINE_INTERNAL", "撮合快照必须是对象")
+        try:
+            self.cash = float(snapshot.get("cash", self.cash))
+            self.pos = float(snapshot.get("pos", 0.0))
+            self.avg_price = float(snapshot.get("avg_price", 0.0))
+            self.fills = [dict(f) for f in (snapshot.get("fills") or [])]
+            self.trades = [dict(t) for t in (snapshot.get("trades") or [])]
+            trade = snapshot.get("trade")
+            self._trade = _Trade(**trade) if isinstance(trade, dict) else None
+        except (TypeError, ValueError) as exc:
+            raise AKError("ENGINE_INTERNAL", f"撮合快照恢复失败: {exc}") from exc
 
     def _sizes(self, target: float, price: float, equity: float) -> tuple[float, float]:
         """返回 (同向价下的目标数量, 反向价下的目标数量)，均为正数。

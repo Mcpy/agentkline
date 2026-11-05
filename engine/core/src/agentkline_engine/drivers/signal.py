@@ -4,10 +4,10 @@ from __future__ import annotations
 import math
 import time
 
-from ..bars import bars_meta
+from ..bars import bars_meta, normalize_bars
 from ..contract import DEFAULT_ASSUMPTIONS, Engine, RunRequest, RunResult
 from ..errors import AKError, RunTimeout
-from ..loader import Strategy
+from ..loader import Strategy, load_strategy
 from ..matching import MatchingEngine
 from ..metrics import compute_stats_full, observed_bars_per_year
 from ..result import build_result
@@ -222,3 +222,46 @@ def run_signal(req: RunRequest, strategy: Strategy, engine: Engine) -> RunResult
         warnings=warnings,
         assumptions=assumptions,
     )
+
+
+def signal_last(bars: list[dict], strategy_source: str, params: dict | None = None,
+                direction: str = "long_only", timeframe: str = "") -> dict:
+    """只求“最后一根 bar 收盘后的目标仓位”，不撮合、不记权益。
+
+    paper 执行器用它把策略求值留在引擎子进程里；输入窗口最后一根必须是
+    已确认的决策 bar P，输出 target 就是下一根 B 开盘要执行的目标。
+    """
+    if direction not in ("long_only", "short_only", "both"):
+        raise AKError("INPUT_INVALID", f"direction 必须为 long_only/short_only/both，收到 {direction!r}")
+    view, bars_warnings = normalize_bars(bars, source="paper bars")
+    if not view:
+        raise AKError("BARS_INVALID", "paper bars 不能为空")
+    strategy = load_strategy(strategy_source)
+    warmup = max(int(strategy.warmup or 0), 0)
+    if len(view) <= warmup:
+        raise AKError("WARMUP_SHORT",
+                      f"paper 窗口只有 {len(view)} 根，不够策略预热 WARMUP={warmup}")
+    strategy_view = [{k: v for k, v in b.items() if k != "index"} for b in view]
+    try:
+        payload = strategy.main(strategy.resolved(params or {}), strategy_view)
+    except AKError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 用户代码异常统一转引擎错误
+        raise AKError("ENGINE_INTERNAL",
+                      f"策略执行失败: {type(exc).__name__}: {exc}") from exc
+
+    targets, reasons, warnings = normalize_targets(payload, len(view))
+    targets, clamped = apply_direction(targets, direction)
+    if clamped:
+        warnings.append(f"direction_clamped={clamped}")
+    return {
+        "status": "ok",
+        "target": float(targets[-1]),
+        "reason": str(reasons[-1] or "") if reasons else "",
+        "warnings": bars_warnings + warnings,
+        "warmup": warmup,
+        "bars": len(view),
+        "timeframe": timeframe,
+        "protection": merge_protection(strategy.protection, None),
+        "source_sha256": strategy.source_sha256,
+    }

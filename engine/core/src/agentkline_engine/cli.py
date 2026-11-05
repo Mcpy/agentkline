@@ -1,4 +1,4 @@
-"""`ak-engine` CLI：list / run / validate-strategy。
+"""`ak-engine` CLI：list / run / signal / validate-strategy。
 
 stdout 只走哨兵 + 结果 JSON；策略与引擎的 print 全部重定向到 stderr。
 """
@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .bars import load_bars
 from .contract import ENGINE_API, RunRequest
+from .drivers.signal import signal_last
 from .errors import AKError, EXIT_ENGINE, EXIT_OK, exit_code_for
 from .loader import check_source, describe_source, load_strategy
 from .registry import get_engine, list_engines
@@ -134,6 +135,34 @@ def cmd_run(args) -> int:
     return EXIT_OK
 
 
+def cmd_signal(args) -> int:
+    """只求最后一根 bar 的目标仓位；不撮合、不产生结果。"""
+    spec, base_dir = _read_spec(args)
+    api = spec.get("api", ENGINE_API)
+    if int(api) != ENGINE_API:
+        raise AKError("API_MISMATCH", f"spec.api={api}，本框架支持 {ENGINE_API}")
+    run = spec.get("run") if isinstance(spec.get("run"), dict) else {}
+    bars_src = spec.get("bars")
+    if isinstance(bars_src, dict) and bars_src.get("path"):
+        bars_src = dict(bars_src)
+        bars_src["path"] = _resolve_path(bars_src["path"], base_dir)
+    bars = load_bars(bars_src)
+    source = _spec_strategy(spec, base_dir)
+    real_stdout = sys.stdout
+    sys.stdout = sys.stderr  # 策略 print 不得污染协议
+    try:
+        payload = signal_last(
+            bars, source,
+            params=run.get("params") or {},
+            direction=run.get("direction", "long_only"),
+            timeframe=str(spec.get("timeframe") or run.get("timeframe") or ""),
+        )
+    finally:
+        sys.stdout = real_stdout
+    _emit(payload)
+    return EXIT_OK
+
+
 def cmd_list(args) -> int:
     engines = list_engines()
     if args.json:
@@ -184,6 +213,11 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--out", help="结果另存为 JSON")
     pr.add_argument("--timeout", type=float, default=None, help="协作式超时（秒）")
     pr.set_defaults(func=cmd_run)
+
+    ps = sub.add_parser("signal", help="只求最后一根 bar 的目标仓位（paper 执行器用）")
+    ps.add_argument("--spec", help="signal.json 路径")
+    ps.add_argument("--stdin", action="store_true", help="从 stdin 读 spec")
+    ps.set_defaults(func=cmd_signal)
 
     pv = sub.add_parser("validate-strategy", help="AST 校验策略（不执行）")
     pv.add_argument("path")

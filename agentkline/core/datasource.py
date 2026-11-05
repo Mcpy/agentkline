@@ -155,6 +155,15 @@ class DataSourceManager:
             b = board.get_board(config.get("board_id")) if board else None
             if b and getattr(b, "current_timeframe", None) == config.get("timeframe"):
                 return base
+        # v0.7.0：模拟盘所在槽即使不是当前图表，也按基础频率轮询；
+        # 否则 15m 模拟盘会被 1h 可见槽的降频规则拖到 60s，面板/bar 处理都变慢。
+        paper = getattr(self.service, "paper", None)
+        if paper is not None:
+            try:
+                if paper.is_active_timeframe(config.get("board_id"), config.get("timeframe")):
+                    return base
+            except Exception:
+                pass
         return self._decay_s(config.get("timeframe"))
 
     def poke(self, board_id: str, timeframe: str):
@@ -223,6 +232,14 @@ class DataSourceManager:
                     merged = self._merge_ohlcv(existing, data)
                     self.state.set_ohlcv(board_id, timeframe, merged)
                     if self.service:
+                        # v0.7.0：只唤醒 paper worker，不在这里跑策略/撮合
+                        paper = getattr(self.service, "paper", None)
+                        if paper is not None:
+                            try:
+                                paper.on_bars(board_id, timeframe, existing, merged)
+                            except Exception:
+                                logger.exception("paper on_bars 失败: %s:%s",
+                                                 board_id, timeframe)
                         self.service.recompute_indicators(board_id, timeframe)
                         self.service.bc_ohlcv_delta(board_id, timeframe, existing, merged)
         except Exception as e:

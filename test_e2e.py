@@ -71,6 +71,16 @@ TOOL_REST_MAP = {
     "optimization_cancel": ("post", "/api/backtest/optimize/"),
     "list_optimizations": ("get", "/api/backtest/optimizations"),
     "delete_optimization": ("delete", "/api/backtest/optimizations/"),
+    "list_paper_sessions": ("get", "/api/paper/sessions"),
+    "create_paper_session": ("post", "/api/paper/sessions"),
+    "get_paper_session": ("get", "/api/paper/sessions/"),
+    "start_paper_session": ("post", "/api/paper/sessions/"),
+    "pause_paper_session": ("post", "/api/paper/sessions/"),
+    "resume_paper_session": ("post", "/api/paper/sessions/"),
+    "stop_paper_session": ("post", "/api/paper/sessions/"),
+    "delete_paper_session": ("delete", "/api/paper/sessions/"),
+    "paper_events": ("get", "/api/paper/sessions/"),
+    "paper_equity": ("get", "/api/paper/sessions/"),
     "focus_result_trade": ("post", "/api/result/"),
     "list_presets": ("get", "/api/presets"),
     "save_preset": ("post", "/api/presets"),
@@ -458,7 +468,7 @@ def test(port: int, token: str = None):
     print("🔗 两表面对齐")
     try:
         tools = mcp_tools(base, s)
-        check("MCP 工具数=66", len(tools) == 66, f"got {len(tools)}")
+        check("MCP 工具数=76", len(tools) == 76, f"got {len(tools)}")
         missing = [t for t in tools if t not in TOOL_REST_MAP and t not in MCP_ONLY]
         check("无未映射工具", not missing, str(missing))
         spec = s.get(f"{base}/openapi.json").json()
@@ -1138,7 +1148,41 @@ def test(port: int, token: str = None):
                                              "script": "strategy/no_such"})
     check("策略不存在 SCRIPT_NOT_FOUND", r.status_code == 400 and "SCRIPT_NOT_FOUND" in r.text,
           r.text[:160])
+
+    # === 11.5 模拟盘（v0.7.0） ===
+    print("🧪 模拟盘")
+    r = s.post(f"{base}/api/board", json={"id": "paperb", "symbol": "PAPER/USDT:USDT",
+                                          "source": "datasource/mock_btc",
+                                          "params": {"days": 120}})
+    check("模拟盘板建板", r.status_code == 200, r.text[:160])
+    bars = 0
+    for _ in range(60):
+        r = s.get(f"{base}/api/overview?board_id=paperb&timeframe=1d")
+        bars = (r.json() or {}).get("bars") or 0
+        if bars > 0:
+            break
+        _tm.sleep(0.2)
+    check("模拟盘板有 K 线", bars > 0, f"bars={bars}")
+    r = s.post(f"{base}/api/paper/sessions", json={
+        "board_id": "paperb", "timeframe": "1d", "script": "strategy/ma_cross"})
+    ps = r.json()
+    check("模拟盘创建", r.status_code == 200 and ps.get("status") == "created",
+          r.text[:200])
+    psid = ps.get("session_id")
+    check("模拟盘列表", s.get(f"{base}/api/paper/sessions?board_id=paperb").json().get("count") >= 1)
+    check("模拟盘启动", s.post(f"{base}/api/paper/sessions/{psid}/start").status_code == 200
+          and s.get(f"{base}/api/paper/sessions/{psid}").json().get("status") == "running")
+    check("模拟盘暂停", s.post(f"{base}/api/paper/sessions/{psid}/pause").status_code == 200)
+    check("模拟盘恢复", s.post(f"{base}/api/paper/sessions/{psid}/resume").status_code == 200)
+    check("模拟盘事件账本", s.get(f"{base}/api/paper/sessions/{psid}/events")
+          .json().get("returned", 0) >= 1)
+    check("模拟盘停止", s.post(f"{base}/api/paper/sessions/{psid}/stop").status_code == 200
+          and s.get(f"{base}/api/paper/sessions/{psid}").json().get("status") == "stopped")
+    r = s.delete(f"{base}/api/paper/sessions/{psid}")
+    check("模拟盘删除", r.status_code == 200 and r.json().get("status") == "deleted"
+          and s.get(f"{base}/api/paper/sessions/{psid}").status_code == 404, r.text[:200])
     s.delete(f"{base}/api/board/btb")
+    s.delete(f"{base}/api/board/paperb")
 
     # === 12. 清理 ===
     print("🧹 清理")

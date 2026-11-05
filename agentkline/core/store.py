@@ -21,9 +21,11 @@ from .results import summarize
 
 logger = logging.getLogger("agentkline.store")
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 EQUITY_CHUNK = 500      # 净值分块：每块 500 点 [[ts,value],…]
 EVENTS_KEEP = 5000      # 事件账本上限（超出裁旧）
+PAPER_EVENTS_KEEP = 20000
+OPTIMIZE_REPORTS_KEEP = 200
 
 _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS meta (
@@ -85,6 +87,48 @@ _SCHEMA = (
            finished_at INTEGER)""",
     """CREATE INDEX IF NOT EXISTS optimize_reports_board
            ON optimize_reports(board_id, created_at DESC)""",
+    # v0.7.0 模拟盘：会话快照 + 只追加事件账本 + 净值分块
+    """CREATE TABLE IF NOT EXISTS paper_sessions (
+           session_id TEXT PRIMARY KEY,
+           board_id TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+           timeframe TEXT NOT NULL,
+           script TEXT NOT NULL,
+           source TEXT NOT NULL,
+           script_sha256 TEXT,
+           preset_id TEXT,
+           params TEXT NOT NULL,
+           direction TEXT NOT NULL,
+           initial_cash REAL NOT NULL,
+           fee_bps REAL NOT NULL,
+           slippage_bps REAL NOT NULL,
+           protection TEXT,
+           window_bars INTEGER NOT NULL DEFAULT 5000,
+           status TEXT NOT NULL,
+           cursor_ts INTEGER,
+           last_seen_ts INTEGER,
+           state TEXT NOT NULL,
+           result_id TEXT,
+           last_error TEXT,
+           created_at INTEGER NOT NULL,
+           started_at INTEGER,
+           stopped_at INTEGER)""",
+    """CREATE INDEX IF NOT EXISTS paper_sessions_board
+           ON paper_sessions(board_id, status, created_at DESC)""",
+    """CREATE TABLE IF NOT EXISTS paper_events (
+           session_id TEXT NOT NULL REFERENCES paper_sessions(session_id) ON DELETE CASCADE,
+           seq INTEGER NOT NULL,
+           ts INTEGER NOT NULL,
+           bar_ts INTEGER,
+           kind TEXT NOT NULL,
+           payload TEXT NOT NULL,
+           PRIMARY KEY(session_id, seq))""",
+    """CREATE INDEX IF NOT EXISTS paper_events_time
+           ON paper_events(session_id, ts, seq)""",
+    """CREATE TABLE IF NOT EXISTS paper_equity (
+           session_id TEXT NOT NULL REFERENCES paper_sessions(session_id) ON DELETE CASCADE,
+           chunk INTEGER NOT NULL,
+           points TEXT NOT NULL,
+           PRIMARY KEY(session_id, chunk))""",
 )
 
 
@@ -326,8 +370,8 @@ class Store:
                     """INSERT OR REPLACE INTO results
                        (result_id,board_id,tf,kind,status,summary,products,created_at)
                        VALUES(?,?,?,?,?,?,?,?)""",
-                    (rid, board_id, tf, "backtest", result.get("status"),
-                     _dumps(summary), _dumps(products),
+                    (rid, board_id, tf, str(result.get("kind") or "backtest"),
+                     result.get("status"), _dumps(summary), _dumps(products),
                      int(result.get("created_at") or 0)))
                 self._conn.execute("DELETE FROM result_equity WHERE result_id=?", (rid,))
                 self._conn.executemany(
@@ -387,6 +431,180 @@ class Store:
     def count_results(self) -> int:
         return int(self._rows("SELECT COUNT(*) AS n FROM results")[0]["n"])
 
+    # ---------- 模拟盘（v0.7.0） ----------
+    _PAPER_COLS = (
+        "session_id", "board_id", "timeframe", "script", "source", "script_sha256",
+        "preset_id", "params", "direction", "initial_cash", "fee_bps", "slippage_bps",
+        "protection", "window_bars", "status", "cursor_ts", "last_seen_ts", "state",
+        "result_id", "last_error", "created_at", "started_at", "stopped_at",
+    )
+
+    @staticmethod
+    def _paper_row(row) -> dict:
+        out = dict(row)
+        for key in ("params", "protection", "state"):
+            out[key] = _loads(out.get(key), {} if key != "protection" else None)
+        return out
+
+    def create_paper_session(self, session: dict) -> None:
+        vals = []
+        for col in self._PAPER_COLS:
+            val = session.get(col)
+            if col in ("params", "protection", "state"):
+                val = _dumps(val or ({} if col != "protection" else None))
+            vals.append(val)
+        sql = (f"INSERT INTO paper_sessions({','.join(self._PAPER_COLS)}) "
+               f"VALUES({','.join('?' for _ in self._PAPER_COLS)})")
+        self._write(sql, tuple(vals))
+
+    def update_paper_session(self, session_id: str, **fields) -> None:
+        allowed = {c for c in self._PAPER_COLS if c != "session_id"}
+        sets, args = [], []
+        for key, val in fields.items():
+            if key not in allowed:
+                raise ValueError(f"paper_sessions 不允许更新列: {key}")
+            if key in ("params", "protection", "state"):
+                val = _dumps(val)
+            sets.append(f"{key}=?")
+            args.append(val)
+        if not sets:
+            return
+        args.append(session_id)
+        self._write(f"UPDATE paper_sessions SET {','.join(sets)} WHERE session_id=?", tuple(args))
+
+    def load_paper_session(self, session_id: str) -> Optional[dict]:
+        rows = self._rows("SELECT * FROM paper_sessions WHERE session_id=?", (session_id,))
+        return self._paper_row(rows[0]) if rows else None
+
+    def list_paper_sessions(self, board_id: str = None, status: str = None,
+                            limit: int = 100) -> list[dict]:
+        sql = "SELECT * FROM paper_sessions WHERE 1=1"
+        args = []
+        if board_id:
+            sql += " AND board_id=?"
+            args.append(board_id)
+        if status:
+            sql += " AND status=?"
+            args.append(status)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        args.append(max(1, min(int(limit or 100), 500)))
+        return [self._paper_row(r) for r in self._rows(sql, tuple(args))]
+
+    def delete_paper_session(self, session_id: str) -> bool:
+        rows = self._rows("SELECT 1 FROM paper_sessions WHERE session_id=?", (session_id,))
+        if not rows:
+            return False
+        self._write("DELETE FROM paper_sessions WHERE session_id=?", (session_id,))
+        return True
+
+    def save_paper_step(self, session_id: str, *, state: dict, events: list[dict] | None = None,
+                        equity_points: list[list] | None = None,
+                        cursor_ts: int = None, last_seen_ts: int = None,
+                        status: str = None, last_error: str = None,
+                        result_id: str = None, stopped_at: int = None) -> int:
+        """状态 + 事件 + 权益点同一事务；返回最后一条事件的 seq（无事件时返回 0）。"""
+        events = events or []
+        equity_points = equity_points or []
+        with self._lock:
+            if self._conn is None:
+                raise sqlite3.ProgrammingError("现场库已关闭")
+            with self._conn:
+                sets = ["state=?"]
+                args = [_dumps(state)]
+                for col, val in (("cursor_ts", cursor_ts), ("last_seen_ts", last_seen_ts),
+                                 ("status", status), ("last_error", last_error),
+                                 ("result_id", result_id), ("stopped_at", stopped_at)):
+                    if val is not None:
+                        sets.append(f"{col}=?")
+                        args.append(val)
+                args.append(session_id)
+                self._conn.execute(
+                    f"UPDATE paper_sessions SET {','.join(sets)} WHERE session_id=?", tuple(args))
+
+                row = self._conn.execute(
+                    "SELECT COALESCE(MAX(seq),0) AS m FROM paper_events WHERE session_id=?",
+                    (session_id,)).fetchone()
+                seq = int(row["m"] or 0)
+                for ev in events:
+                    seq += 1
+                    self._conn.execute(
+                        "INSERT INTO paper_events(session_id,seq,ts,bar_ts,kind,payload) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (session_id, seq, int(ev.get("ts") or 0), ev.get("bar_ts"),
+                         str(ev.get("kind") or "event"), _dumps(ev.get("payload") or {})))
+                if events:
+                    floor = max(0, seq - PAPER_EVENTS_KEEP)
+                    if floor:
+                        self._conn.execute(
+                            "DELETE FROM paper_events WHERE session_id=? AND seq<=?",
+                            (session_id, floor))
+
+                if equity_points:
+                    self._append_paper_equity_locked(session_id, equity_points)
+            return seq
+
+    def _append_paper_equity_locked(self, session_id: str, points: list) -> None:
+        rows = self._conn.execute(
+            "SELECT chunk,points FROM paper_equity WHERE session_id=? ORDER BY chunk DESC LIMIT 1",
+            (session_id,)).fetchall()
+        chunk = 0
+        current = []
+        if rows:
+            chunk = int(rows[0]["chunk"])
+            current = _loads(rows[0]["points"], []) or []
+        for p in points:
+            if len(current) >= EQUITY_CHUNK:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO paper_equity(session_id,chunk,points) VALUES(?,?,?)",
+                    (session_id, chunk, _dumps(current)))
+                chunk += 1
+                current = []
+            current.append([int(p[0]), float(p[1])])
+        self._conn.execute(
+            "INSERT OR REPLACE INTO paper_equity(session_id,chunk,points) VALUES(?,?,?)",
+            (session_id, chunk, _dumps(current)))
+
+    def load_paper_events(self, session_id: str, after_seq: int = 0,
+                          limit: int = 200) -> dict:
+        after_seq = max(0, int(after_seq or 0))
+        limit = max(1, min(int(limit or 200), 1000))
+        total = int(self._rows(
+            "SELECT COUNT(*) AS n FROM paper_events WHERE session_id=? AND seq>?",
+            (session_id, after_seq))[0]["n"])
+        rows = self._rows(
+            "SELECT * FROM paper_events WHERE session_id=? AND seq>? ORDER BY seq LIMIT ?",
+            (session_id, after_seq, limit))
+        items = [{"seq": int(r["seq"]), "ts": int(r["ts"]), "bar_ts": r["bar_ts"],
+                  "kind": r["kind"], "payload": _loads(r["payload"], {}) or {}}
+                 for r in rows]
+        return {"session_id": session_id, "items": items, "after_seq": after_seq,
+                "total": total, "returned": len(items),
+                "next_after_seq": items[-1]["seq"] if items else after_seq,
+                "truncated": total > len(items)}
+
+    def load_paper_equity(self, session_id: str, offset: int = 0, limit: int = 0) -> dict:
+        offset = max(0, int(offset or 0))
+        rows = self._rows(
+            "SELECT points FROM paper_equity WHERE session_id=? ORDER BY chunk", (session_id,))
+        points = []
+        for r in rows:
+            for p in (_loads(r["points"], []) or []):
+                try:
+                    points.append([int(p[0]), float(p[1])])
+                except (TypeError, ValueError, IndexError):
+                    continue
+        total = len(points)
+        end = total if not limit else min(total, offset + int(limit))
+        return {"session_id": session_id, "points": points[offset:end], "total": total,
+                "offset": offset, "returned": max(0, end - offset),
+                "truncated": end < total, "next_offset": end if end < total else None}
+
+    def count_paper_sessions(self, status: str = None) -> int:
+        if status:
+            return int(self._rows("SELECT COUNT(*) AS n FROM paper_sessions WHERE status=?",
+                                  (status,))[0]["n"])
+        return int(self._rows("SELECT COUNT(*) AS n FROM paper_sessions")[0]["n"])
+
     # ---------- 寻优/稳健性报告（v0.6.7） ----------
     def save_optimization(self, report: dict) -> None:
         """整份报告落盘；summary 单独存一份，供历史列表快速读。"""
@@ -425,6 +643,13 @@ class Store:
             (jid, summary["board_id"], summary["timeframe"], summary["status"],
              _dumps(summary), _dumps(report), int(summary["created_at"] or 0),
              int(summary["finished_at"] or 0)))
+        # 0.6.7 报告会无限长；0.7 起每板保留最近 200 份（列表本来也只读近期）。
+        self._write(
+            """DELETE FROM optimize_reports
+               WHERE board_id=? AND job_id NOT IN (
+                   SELECT job_id FROM optimize_reports WHERE board_id=?
+                   ORDER BY created_at DESC LIMIT ?)""",
+            (summary["board_id"], summary["board_id"], OPTIMIZE_REPORTS_KEEP))
 
     def load_optimization(self, job_id: str) -> Optional[dict]:
         rows = self._rows("SELECT report FROM optimize_reports WHERE job_id=?", (job_id,))

@@ -124,3 +124,8 @@ def list_engines(timeout: float = 30.0) -> list[dict]:
 
 def run_spec(spec: dict, timeout: float = 120.0) -> dict:
     return invoke(["run", "--stdin"], json.dumps(spec, ensure_ascii=False), timeout=timeout)
+
+
+def signal_spec(spec: dict, timeout: float = 60.0) -> dict:
+    """只求最后一根 bar 的目标仓位；策略仍在引擎子进程里执行。"""
+    return invoke(["signal", "--stdin"], json.dumps(spec, ensure_ascii=False), timeout=timeout)

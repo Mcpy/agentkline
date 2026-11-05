@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 
 from agentkline.core import optimizer as opt
 from agentkline.core.service import AgentKlineService
-from agentkline.core.store import Store
+from agentkline.core.store import Store, SCHEMA_VERSION
 
 ok = 0
 bad = []
@@ -229,8 +229,8 @@ def test_store_migration_and_hash():
         conn.close()
         st = Store(db, app_version="0.6.5")
         cols = {r[1] for r in st._conn.execute("PRAGMA table_info(presets)").fetchall()}
-        check("v2 → v4 迁移加 script_sha256", "script_sha256" in cols
-              and st.stats()["schema"] == 4, str(cols))
+        check("v2 → latest 迁移加 script_sha256", "script_sha256" in cols
+              and st.stats()["schema"] == SCHEMA_VERSION, str(cols))
         st.close()
 
         # 方案记录策略哈希 + 策略变更提示
