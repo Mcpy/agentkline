@@ -1,10 +1,10 @@
 #!/bin/bash
 # AgentKline 服务管理脚本
-# 用法：./scripts/service.sh start|stop|restart|status|logs [n]
+# 用法：./service.sh start|stop|restart|status|logs [n]
 # 优先委托 user systemd 单元（独立 cgroup，dsh 重启不受牵连；未 enable、Restart=no，
 # 遵循用户裁决：不做任何自动拉起——掉了手动 start 或喊助手）。
 # 无单元文件时回落 pidfile 单实例管理（规避 pkill 误杀）。
-DIR="$(cd "$(dirname "$0")/.." && pwd)"
+DIR="$(cd "$(dirname "$0")" && pwd)"
 UNIT="$HOME/.config/systemd/user/agentkline.service"
 PIDFILE="$DIR/.agentkline.pid"
 LOG="${AGENTKLINE_LOG:-/tmp/agentkline.log}"

@@ -18,6 +18,7 @@ from typing import Optional, Callable
 from .state import StateManager
 from .script_engine import ScriptEngine
 from .datasource import DataSourceManager
+from .marketdata import MarketDataHub
 from .results import normalize_result, next_result_id, summarize, slice_section
 from .store import Store
 from . import optimizer as opt
@@ -37,14 +38,17 @@ def _to_ms(v):
 class AgentKlineService:
     """AgentKline 业务核心"""
 
-    VERSION = "0.7.1"
+    VERSION = "0.7.2"
 
     def __init__(self, scripts_dir: str, limits: dict = None, data_dir: str = None):
         limits = limits or {}
         self.limits = limits
         self.state = StateManager()
         self.script_engine = ScriptEngine(scripts_dir)
-        self.datasource = DataSourceManager(self.state, self.script_engine, self)
+        # v0.7.2：中心化行情请求合并（single-flight/TTL/预算/退避）
+        self.marketdata = MarketDataHub(limits)
+        self.datasource = DataSourceManager(self.state, self.script_engine, self,
+                                            hub=self.marketdata)
         from .watchlist import WatchlistManager
         self.watchlist = WatchlistManager(self, poll_s=limits.get("quotes_poll_s", 5))
         # v0.6.3 现场库：给 data_dir 才落盘（测试/一次性实例保持纯内存）
@@ -2798,7 +2802,8 @@ class AgentKlineService:
             # 建板响应永不被烂网/慢源阻塞（曾致 hang 源建板 45s+ 连带搜索全瘫）
             from concurrent.futures import ThreadPoolExecutor
             _ex = ThreadPoolExecutor(max_workers=1)
-            _f = _ex.submit(self.script_engine.run_script, script, params)
+            _f = _ex.submit(self.datasource._fetch, script, params, tf,
+                            board_id=board_id)
             try:
                 result = _f.result(timeout=fetch_timeout)
             except Exception:
@@ -2807,7 +2812,7 @@ class AgentKlineService:
                           f"（源网络限流窗/不可达）——建板失败，请稍后重试"}
             _ex.shutdown(wait=False, cancel_futures=True)
         else:
-            result = self.script_engine.run_script(script, params)
+            result = self.datasource._fetch(script, params, tf, board_id=board_id)
         if result.get("error"):
             return result
         data = result.get("data", [])
@@ -2857,7 +2862,8 @@ class AgentKlineService:
     def refresh_timeframe(self, board_id, tf):
         ds = self.datasource.get(board_id, tf)
         if ds and ds.get("script"):
-            result = self.script_engine.run_script(ds["script"], ds.get("params", {}))
+            result = self.datasource._fetch(
+                ds["script"], ds.get("params", {}), tf, board_id=board_id, force=True)
             if not result.get("error"):
                 self.state.set_ohlcv(board_id, tf, result.get("data", []))
         self.recompute_indicators(board_id, tf)
@@ -2878,7 +2884,8 @@ class AgentKlineService:
         params = dict(ds.get("params", {}))
         params.pop("until", None)  # until 是调用参数，走签名不走 params
         params["limit"] = limit
-        result = self.script_engine.run_script(ds["script"], params, until=earliest)
+        result = self.datasource._fetch(
+            ds["script"], params, tf, board_id=board_id, until=earliest, force=True)
         if result.get("error"):
             return {"prepended": 0, "error": result["error"]}
         older = [b for b in result.get("data", []) if b["timestamp"] < earliest]

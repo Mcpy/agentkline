@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AgentKline - 端到端测试脚本（v0.4 硬切版；打 agent 端口，需 Bearer token）
-运行: python test_e2e.py [--port 8766] [--token <token>]
+运行: python tools/test_e2e.py [--port 8766] [--token <token>]
      token 也可用环境变量 AGENTKLINE_TOKEN 提供。
 覆盖：建板即锁/板锁全等+SOURCE_LOCKED+suggestion/kline_source 幂等/poll_only/backfill 门控/
 指标实例(inst_id/INST_EXISTS/BLOB_SCOPE/重算/过滤)/save_script 校验/搜索/护栏截断/
@@ -13,6 +13,9 @@ import json
 import argparse
 import sys
 import requests
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 MCP_ONLY = {"take_snapshot"}  # 判决：刻意无 REST 触发
 # MCP 工具 → REST 路由（method, path 子串）对齐表（防漂移断言用）
@@ -72,6 +75,7 @@ TOOL_REST_MAP = {
     "list_optimizations": ("get", "/api/backtest/optimizations"),
     "delete_optimization": ("delete", "/api/backtest/optimizations/"),
     "list_paper_sessions": ("get", "/api/paper/sessions"),
+    "paper_runtime": ("get", "/api/paper/runtime"),
     "create_paper_session": ("post", "/api/paper/sessions"),
     "get_paper_session": ("get", "/api/paper/sessions/"),
     "start_paper_session": ("post", "/api/paper/sessions/"),
@@ -469,7 +473,7 @@ def test(port: int, token: str = None):
     print("🔗 两表面对齐")
     try:
         tools = mcp_tools(base, s)
-        check("MCP 工具数=77", len(tools) == 77, f"got {len(tools)}")
+        check("MCP 工具数=78", len(tools) == 78, f"got {len(tools)}")
         missing = [t for t in tools if t not in TOOL_REST_MAP and t not in MCP_ONLY]
         check("无未映射工具", not missing, str(missing))
         spec = s.get(f"{base}/openapi.json").json()
@@ -739,7 +743,7 @@ def test(port: int, token: str = None):
     # === 11.9 前端护栏（v0.4.3 C：DAG 判环 + 跨模块未 import 门） ===
     print("🛡 前端护栏")
     import subprocess as _sp
-    gr = _sp.run([sys.executable, "scripts/check_fe_guards.py"], capture_output=True, text=True)
+    gr = _sp.run([sys.executable, str(PROJECT_ROOT / "tools/check_fe_guards.py")], capture_output=True, text=True)
     check("护栏：无环+无漏 import", gr.returncode == 0, (gr.stdout + gr.stderr)[:200])
 
     # === 11.35 内置 A 股源元数据（v0.4.4；不碰真网） ===
@@ -908,7 +912,7 @@ def test(port: int, token: str = None):
         from_idx = next(i for i, b in enumerate(bars_all)
                         if b["timestamp"] == int(run_info["from"]))
         bars = bars_all[max(0, from_idx - warm):to_idx + 1]
-        strat_src = open(os.path.join(os.path.dirname(__file__),
+        strat_src = open(os.path.join(str(PROJECT_ROOT),
                                       "agentkline/resources/scripts/strategy/ma_cross.py"),
                          encoding="utf-8").read()
         spec_obj = {"api": 1, "engine": "builtin", "bars": bars,
@@ -917,9 +921,10 @@ def test(port: int, token: str = None):
                             "direction": "long_only", "params": {}, "eval_start": warm},
                     "timeframe": "1d"}
         import subprocess as _sp
-        ak = os.path.join(os.path.dirname(__file__), ".venv", "bin", "ak-engine")
+        ak = os.path.join(str(PROJECT_ROOT), ".venv", "bin", "ak-engine")
         proc = _sp.run([ak, "run", "--stdin"], input=json.dumps(spec_obj),
-                       capture_output=True, text=True, timeout=120)
+                       capture_output=True, text=True, timeout=120,
+                       env={**os.environ, "PYTHONPATH": str(PROJECT_ROOT)})
         lines = proc.stdout.splitlines()
         cli = json.loads(lines[1]) if lines and lines[0] == "__AK_RESULT__" else {}
         eq_api = s.get(f"{base}/api/result/{rid1}?section=equity&limit=0").json()
@@ -1171,6 +1176,11 @@ def test(port: int, token: str = None):
           r.text[:200])
     psid = ps.get("session_id")
     check("模拟盘列表", s.get(f"{base}/api/paper/sessions?board_id=paperb").json().get("count") >= 1)
+    rt = s.get(f"{base}/api/paper/runtime")
+    rj = rt.json() if rt.status_code == 200 else {}
+    check("模拟盘运行观测 REST", rt.status_code == 200
+          and isinstance(rj.get("marketdata"), dict)
+          and "paper" in rj, rt.text[:200])
     check("模拟盘启动", s.post(f"{base}/api/paper/sessions/{psid}/start").status_code == 200
           and s.get(f"{base}/api/paper/sessions/{psid}").json().get("status") == "running")
     check("模拟盘暂停", s.post(f"{base}/api/paper/sessions/{psid}/pause").status_code == 200)
@@ -1195,7 +1205,7 @@ def test(port: int, token: str = None):
         check(f"delete {bid}", r.status_code == 200, r.text)
     # e2e 自己写的夹具不留在仓库（save_script 无删除 API，直接清文件）
     scripts_root = (os.environ.get("AGENTKLINE_SCRIPTS_DIR")
-                    or os.path.join(os.path.dirname(__file__), "scripts"))
+                    or os.path.join(str(PROJECT_ROOT), "scripts"))
     for rel in ("indicator/tenp.py", "datasource/big.py", "datasource/ivsrc.py",
                 "datasource/nobf.py", "datasource/pfsrc.py", "datasource/slowsrc.py",
                 "datasource/syms_test.py", "optimizer/e2e_rank.py"):
@@ -1213,7 +1223,7 @@ def section_docstring_jargon(check):
     import ast as _ast
     JARGON = ["把手", "窄身", "登记处", "物化", "二元组", "前插", "槽", "锁字段",
               "重声明配方", "identity 快照", "回落默认组", "徽章"]
-    tree = _ast.parse(open(os.path.join(os.path.dirname(__file__), "agentkline/api/tools.py")).read())
+    tree = _ast.parse(open(os.path.join(str(PROJECT_ROOT), "agentkline/api/tools.py")).read())
     bad = []
     for node in tree.body:
         if not isinstance(node, _ast.FunctionDef):
@@ -1227,7 +1237,7 @@ def section_docstring_jargon(check):
     # ---- v0.4.5 前端 i18n 门禁：组件零中文硬编码（串表唯一源=i18n.js） ----
     import re as _re2
     bad_i18n = []
-    src_dir = os.path.join(os.path.dirname(__file__), "frontend", "src")
+    src_dir = os.path.join(str(PROJECT_ROOT), "frontend", "src")
     for fn in sorted(os.listdir(src_dir)):
         if not fn.endswith(".js") or fn == "i18n.js":
             continue  # locales/ 语言包=串表唯一源，核心 i18n.js 零串
@@ -1240,7 +1250,7 @@ def section_docstring_jargon(check):
 
     # ---- MCP 面黑话门禁 ----
     import ast as _ast
-    _tree = _ast.parse(open(os.path.join(os.path.dirname(__file__),
+    _tree = _ast.parse(open(os.path.join(str(PROJECT_ROOT),
                                          "agentkline", "api", "tools.py")).read())
     bad = []
     for node in _ast.walk(_tree):
@@ -1254,7 +1264,7 @@ def section_docstring_jargon(check):
     # skills 禁版本标记：消费方 agent 只应"读了就能用"，版本-技能匹配是发布方义务
     import glob as _glob, re as _re
     vb = []
-    for f in _glob.glob(os.path.join(os.path.dirname(__file__), "skills/*.md")):
+    for f in _glob.glob(os.path.join(str(PROJECT_ROOT), "skills/*.md")):
         for i, line in enumerate(open(f), 1):
             if _re.search(r"v0\.\d", line):
                 vb.append(f"{os.path.basename(f)}:{i}")

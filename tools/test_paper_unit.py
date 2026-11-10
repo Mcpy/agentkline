@@ -229,6 +229,13 @@ def main():
         time.sleep(0.2)
         s = svc.paper.get(sid)
         check("停止物化 result_id", bool(s.get("result_id")), str(s.get("result_id")))
+        rid_stop = s.get("result_id")
+        again = svc.paper.stop(sid)
+        paper_res = [r for r in svc.state.get_board("p1").results.values()
+                     if (r.get("batch") or {}).get("kind") == "paper"]
+        check("重复 stop 幂等且不重复建结果",
+              again.get("result_id") == rid_stop and len(paper_res) == 1,
+              f"{rid_stop} -> {again.get('result_id')} n={len(paper_res)}")
         res = svc.state.get_board("p1").results.get(s.get("result_id"))
         check("结果 kind=paper", res and res.get("kind") == "paper", str(res and res.get("kind")))
         check("结果 batch 带 session",

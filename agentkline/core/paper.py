@@ -1,9 +1,9 @@
-"""模拟盘（paper）会话 / 账本 / bar 执行器（v0.7.1）。
+"""模拟盘（paper）会话 / 账本 / bar 执行器（v0.7.2）。
 
 口径与回测相同：P 收盘算 target，下一根 B 开盘成交，B 的 high/low 查保护，
 B 收盘记权益；复用 `MatchingEngine`，不引入“当前价成交”。
 
-0.7.1 只做一个会话一个标的/周期/策略；线程模型是每会话一个 worker，
+0.7 只做一个会话一个标的/周期/策略；线程模型是每会话一个 worker，
 bar 到达只唤醒 worker，不阻塞数据源轮询线程。
 """
 from __future__ import annotations
@@ -32,6 +32,7 @@ MAX_WINDOW_BARS = 50000
 DEFAULT_MAX_CATCHUP_BARS = 500
 MAX_CATCHUP_BARS = 5000
 DEFAULT_SETTLE_MS = 15_000   # bar 收盘后再等 15s，避开交易所最后一跳修订
+DEFAULT_LEDGER_KEEP = 10_000  # fills/trades 内存/账本上限（防长跑无限增长）
 
 _ACTIVE_STATUSES = ("created", "running", "paused", "paused_gap", "error")
 _TERMINAL = ("stopped",)
@@ -124,13 +125,24 @@ class PaperManager:
             10, MAX_CATCHUP_BARS)
         self.settle_ms = self._clamp_int(
             limits.get("paper_settle_ms", DEFAULT_SETTLE_MS), 0, 300_000)
+        self.ledger_keep = self._clamp_int(
+            limits.get("paper_ledger_keep", DEFAULT_LEDGER_KEEP), 100, 1_000_000)
         self.sessions: dict[str, dict] = {}
         self._wake: dict[str, threading.Event] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._processing: set[str] = set()
         self._reconciling: set[str] = set()
         self._lock = threading.RLock()
+        self._stopping = False
+        self._stop_evt = threading.Event()
+        self._process_errors = 0
+        # 仅测试用故障注入：callable(point, **meta)；生产默认为 None。
+        self.fault_hook = None
         self._load()
+        # 数据源彻底挂住（无错误回调）时，也由独立 watchdog 负责 stale 告警。
+        self._watchdog_thread = threading.Thread(
+            target=self._watchdog, daemon=True, name="ak-paper-watchdog")
+        self._watchdog_thread.start()
 
     @staticmethod
     def _clamp_int(v, lo, hi) -> int:
@@ -149,14 +161,32 @@ class PaperManager:
         except Exception:
             logger.exception("paper 会话恢复失败")
             return
+        resumed = []
         for s in rows:
             self._ensure_window_meta(s)
             self.sessions[s["session_id"]] = s
             if s.get("status") == "running":
+                # v0.7.2：服务重启/崩溃后 running 会话自动继续；用户主动暂停仍是 paused。
+                # 先记一条恢复事件，再启动 worker；窗口/参数/游标全部保持冻结。
+                ev = {"ts": _now_ms(), "bar_ts": s.get("last_seen_ts"),
+                      "kind": "resumed",
+                      "payload": {"code": "PAPER_RESUMED_AFTER_RESTART",
+                                  "reason": "service_restart",
+                                  "message": "服务重启后自动恢复运行",
+                                  "cursor_ts": s.get("cursor_ts"),
+                                  "last_seen_ts": s.get("last_seen_ts")}}
+                if self.store:
+                    try:
+                        self.store.save_paper_step(
+                            s["session_id"], state=s.get("state") or {}, events=[ev])
+                    except Exception:
+                        logger.exception("paper 恢复事件写入失败: %s", s["session_id"])
+                resumed.append(s["session_id"])
                 self._ensure_worker(s["session_id"])
         if rows:
-            logger.info("paper 恢复: %d 个会话（running=%d）", len(rows),
-                        sum(1 for s in rows if s.get("status") == "running"))
+            logger.info("paper 恢复: %d 个会话（running=%d, auto_resume=%d）",
+                        len(rows), sum(1 for s in rows if s.get("status") == "running"),
+                        len(resumed))
 
     def _ensure_window_meta(self, s: dict) -> None:
         """兼容 0.7.0 会话：补齐窗口元数据，不改已冻结的 window_bars。"""
@@ -232,6 +262,67 @@ class PaperManager:
                     "offset": offset, "returned": 0, "truncated": False,
                     "next_offset": None}
         return self.store.load_paper_equity(session_id, offset, limit)
+
+    def runtime(self, session_id: str = None) -> dict:
+        """0.7.2 运行观测：会话运行态 + Hub 请求/缓存/退避指标。
+
+        REST `/api/paper/runtime` 与 MCP `paper_runtime` 共用本方法；不读行情、
+        不触发任何上游请求，可安全高频调用。
+        """
+        with self._lock:
+            rows = list(self.sessions.values())
+            if session_id:
+                rows = [s for s in rows if s.get("session_id") == session_id]
+                if not rows:
+                    return {"error": "PAPER_NOT_FOUND: 会话不存在",
+                            "code": "PAPER_NOT_FOUND"}
+            by_status = {}
+            out = []
+            now = _now_ms()
+            for s in rows:
+                st = s.get("state") or {}
+                status = s.get("status")
+                by_status[status] = by_status.get(status, 0) + 1
+                last_seen = s.get("last_seen_ts")
+                out.append({
+                    "session_id": s.get("session_id"),
+                    "board_id": s.get("board_id"),
+                    "timeframe": s.get("timeframe"),
+                    "status": status,
+                    "bars_processed": int(st.get("bars_processed") or 0),
+                    "cursor_ts": s.get("cursor_ts"),
+                    "last_seen_ts": last_seen,
+                    "data_age_s": round((now - int(last_seen)) / 1000.0, 3)
+                    if last_seen else None,
+                    "processing": s.get("session_id") in self._processing,
+                    "wake_pending": bool(
+                        self._wake.get(s.get("session_id"), threading.Event()).is_set()),
+                    "last_error": s.get("last_error"),
+                    "equity": st.get("equity"),
+                    "window_actual": self._window_info(s).get("actual"),
+                })
+            hub = self.service.marketdata.snapshot() if getattr(
+                self.service, "marketdata", None) is not None else None
+            try:
+                from .store import PAPER_EVENTS_KEEP
+            except Exception:
+                PAPER_EVENTS_KEEP = None
+            return {
+                "version": self.service.VERSION,
+                "now": now,
+                "paper": {
+                    "sessions": len(rows),
+                    "by_status": by_status,
+                    "processing": len(self._processing),
+                    "worker_errors": self._process_errors,
+                    "max_catchup": self.max_catchup,
+                    "settle_ms": self.settle_ms,
+                    "ledger_keep": self.ledger_keep,
+                    "events_keep": PAPER_EVENTS_KEEP,
+                },
+                "sessions": out,
+                "marketdata": hub,
+            }
 
     # ---------------------------- 创建 / 控制 ----------------------------
     def create(self, board_id: str, timeframe: str = None, script: str = None,
@@ -476,6 +567,16 @@ class PaperManager:
             if not s:
                 return {"error": "PAPER_NOT_FOUND: 会话不存在", "code": "PAPER_NOT_FOUND"}
             if s["status"] == "stopped":
+                # v0.7.2：stop 物化可能被 kill -9 打断；重复 stop 必须补物化且不重复建结果。
+                if not s.get("result_id"):
+                    try:
+                        rid = self._materialize_result(s)
+                        if rid:
+                            s["result_id"] = rid
+                            if self.store:
+                                self.store.update_paper_session(session_id, result_id=rid)
+                    except Exception:
+                        logger.exception("paper 停止补物化失败: %s", session_id)
                 return self._public(s)
             bars = self.service.state.get_ohlcv(s["board_id"], s["timeframe"]) or []
             latest = _latest_closed(bars, s["timeframe"], _now_ms(), self.settle_ms)
@@ -919,13 +1020,27 @@ class PaperManager:
             self._bc("paper_paused", s)
 
     def stop_all(self) -> None:
+        """进程退出：只停 worker，不改持久化状态。
+
+        v0.7.2 起 running 状态在库里保留，下次启动按 running 自动恢复；
+        用户主动 pause 的 paused 状态不会被这里改写。
+        """
         with self._lock:
-            for sid, s in list(self.sessions.items()):
-                if s.get("status") == "running":
-                    s["status"] = "paused"
+            self._stopping = True
+            self._stop_evt.set()
+            for sid in list(self.sessions):
                 ev = self._wake.get(sid)
                 if ev:
                     ev.set()
+            threads = list(self._threads.values())
+        # 等当前 bar 事务收尾，避免 stop_all 后 store.close 与 worker 写库竞争。
+        # 单根策略最多 60s，但正常停机只等当前一小段；超时后进程仍会退出。
+        import threading as _th
+        me = _th.current_thread()
+        for th in threads:
+            if th is me or not th.is_alive():
+                continue
+            th.join(timeout=10.0)
 
     # ---------------------------- 数据回调 ----------------------------
     def is_active_timeframe(self, board_id: str, timeframe: str) -> bool:
@@ -949,6 +1064,8 @@ class PaperManager:
         while True:
             ev.wait()
             ev.clear()
+            if self._stopping:
+                break
             s = self._get(session_id)
             if not s or s.get("status") in _TERMINAL:
                 break
@@ -957,8 +1074,20 @@ class PaperManager:
             try:
                 self._process(session_id)
             except Exception as exc:  # noqa: BLE001 - 单会话失败不能拖死线程
+                self._process_errors += 1
                 logger.exception("paper worker 失败: %s", session_id)
                 self._fail(session_id, exc)
+
+    def _fault(self, point: str, **meta) -> None:
+        hook = self.fault_hook
+        if hook is None:
+            return
+        try:
+            hook(point, **meta)
+        except SystemExit:
+            raise
+        except Exception:
+            logger.exception("paper fault hook 失败: %s", point)
 
     def _process(self, session_id: str, now_ms: int = None) -> None:
         with self._lock:
@@ -985,10 +1114,29 @@ class PaperManager:
             return
         latest = closed[-1]
         last_seen = s.get("last_seen_ts")
-        # 用 last_seen 判新 bar（cursor 是最后决策 bar P，天然落后一根，不能拿来去重）
-        new = [b for b in closed
-               if last_seen is None or int(b["timestamp"]) > int(last_seen)]
+        # 用 last_seen 判新 bar（cursor 是最后决策 bar P，天然落后一根，不能拿来去重）；
+        # timestamp 是唯一键：同一批 bars 内重复/上游重复都只留第一条。
+        seen = set()
+        new = []
+        for b in closed:
+            try:
+                ts = int(b["timestamp"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if last_seen is not None and ts <= int(last_seen):
+                continue
+            if ts in seen:
+                continue
+            seen.add(ts)
+            new.append(b)
+
+        # 已处理 bar 被修订：只告警，不改游标/历史账本（重启后仍以旧决策为准）。
+        self._check_revision(s, bars)
+        self._check_stale(s, now)
+
         if not new:
+            # 没有新 bar 时也要检测“短历史替换”：数据源窗口变短会让策略实际窗口骤降。
+            self._sync_window_actual(s, bars, latest)
             if int(latest["timestamp"]) > int(s.get("last_seen_ts") or 0):
                 s["last_seen_ts"] = int(latest["timestamp"])
                 if self.store:
@@ -1000,12 +1148,18 @@ class PaperManager:
             self._pause_gap(s, len(new), new[0], new[-1])
             return
 
+        gap_events = self._gap_events(s, last_seen, new)
+        self._fault("after_receive", session_id=session_id,
+                    bars=len(new), first_ts=int(new[0]["timestamp"]),
+                    last_ts=int(new[-1]["timestamp"]))
         ts_list = [int(b["timestamp"]) for b in bars]
         for B in new:
             with self._lock:
                 s = self._get(session_id)
                 if not s or s.get("status") != "running":
                     return
+            if self._stopping:
+                return
             b_idx = bisect_left(ts_list, int(B["timestamp"]))
             p_idx = b_idx - 1
             if p_idx < 0:
@@ -1021,11 +1175,13 @@ class PaperManager:
                         or AUTO_WINDOW_MIN)
             window = bars[max(0, p_idx + 1 - limit):p_idx + 1]
             actual = len(window)
+            prev_actual = s["state"].get("window_actual")
             short = actual <= int(s["state"].get("warmup") or 0)
             truncated = (p_idx + 1) > actual
             s["state"]["window_actual"] = actual
             s["state"]["window_short"] = short
             s["state"]["window_truncated"] = truncated
+            win_event = self._window_change_event(s, prev_actual, actual, P)
             spec = {
                 "api": 1, "engine": "builtin", "bars": window,
                 "strategy": {"source": s["source"]},
@@ -1065,18 +1221,29 @@ class PaperManager:
             if fills:
                 state["last_fill"] = fills[-1]
 
-            evs = [{"ts": now, "bar_ts": int(P["timestamp"]), "kind": "decision",
-                    "payload": {"target": target, "reason": reason,
-                                "close": float(P["close"]),
-                                "bar_ts": int(P["timestamp"])}}]
+            evs = []
+            gap_ev = gap_events.pop(int(B["timestamp"]), None)
+            if gap_ev:
+                evs.append(gap_ev)
+            if win_event:
+                evs.append(win_event)
+            evs.append({"ts": now, "bar_ts": int(P["timestamp"]), "kind": "decision",
+                        "payload": {"target": target, "reason": reason,
+                                    "close": float(P["close"]),
+                                    "bar_ts": int(P["timestamp"])}})
             for f in fills:
                 evs.append({"ts": now, "bar_ts": int(B["timestamp"]), "kind": "fill",
                             "payload": dict(f)})
             evs.append({"ts": now, "bar_ts": int(B["timestamp"]), "kind": "equity",
                         "payload": {"equity": equity, "cash": matcher.cash,
                                     "pos": matcher.pos, "price": float(B["close"])}})
+            trim_ev = self._trim_ledger(state)
+            if trim_ev:
+                evs.append(trim_ev)
             s["cursor_ts"] = int(P["timestamp"])
             s["last_seen_ts"] = int(B["timestamp"])
+            self._fault("before_persist", session_id=session_id,
+                        bar_ts=int(B["timestamp"]), events=len(evs))
             with self._lock:
                 cur = self._get(session_id)
                 if not cur or cur.get("status") != "running":
@@ -1086,7 +1253,185 @@ class PaperManager:
                     session_id, state=state, events=evs,
                     equity_points=[[int(B["timestamp"]), equity]],
                     cursor_ts=s["cursor_ts"], last_seen_ts=s["last_seen_ts"])
+            self._fault("after_persist", session_id=session_id,
+                        bar_ts=int(B["timestamp"]), events=len(evs))
             self._broadcast_events(s, evs)
+
+    def _check_stale(self, s: dict, now_ms: int = None) -> bool:
+        """数据超过 2 个周期仍未更新：写一次 PAPER_DATA_STALE，不阻塞 worker。"""
+        last = s.get("last_seen_ts")
+        span = _tf_ms(s.get("timeframe"))
+        if not last or not span:
+            return False
+        now = int(now_ms or _now_ms())
+        age = now - int(last)
+        # 2 个周期 + settle 只是理论到期；再留半个周期/30s 的抓取宽限，避免整点误报。
+        grace = max(30_000, span // 2)
+        with self._lock:
+            st = s["state"]
+            if age <= 2 * span + self.settle_ms + grace:
+                # 数据恢复：允许下一个停滞 episode 再告警
+                if st.get("stale_alerted"):
+                    st["stale_alerted"] = False
+                return False
+            if st.get("stale_alerted") and st.get("stale_alerted_ts") == int(last):
+                return True
+            st["stale_alerted"] = True
+            st["stale_alerted_ts"] = int(last)
+            ev = {"ts": now, "bar_ts": int(last), "kind": "warning",
+                  "payload": {"code": "PAPER_DATA_STALE",
+                              "message": f"行情已 {age / 60000:.0f} 分钟未更新",
+                              "age_s": round(age / 1000.0, 1),
+                              "timeframe": s.get("timeframe")}}
+        if self.store:
+            try:
+                self.store.save_paper_step(s["session_id"], state=st, events=[ev])
+            except Exception:
+                logger.debug("paper stale 事件落盘失败", exc_info=True)
+        self._broadcast_events(s, [ev])
+        return True
+
+    def _watchdog(self) -> None:
+        while not self._stop_evt.wait(30.0):
+            if self._stopping:
+                break
+            try:
+                with self._lock:
+                    rows = [s for s in self.sessions.values()
+                            if s.get("status") == "running"]
+                for s in rows:
+                    self._check_stale(s)
+            except Exception:
+                logger.debug("paper watchdog 检查失败", exc_info=True)
+
+    def on_source_error(self, board_id: str, timeframe: str, error: str = None) -> None:
+        """数据源连续失败时由轮询线程调用；只检查是否跨过 stale 阈值。"""
+        with self._lock:
+            rows = [s for s in self.sessions.values()
+                    if s.get("board_id") == board_id and s.get("timeframe") == timeframe
+                    and s.get("status") == "running"]
+        for s in rows:
+            try:
+                self._check_stale(s)
+            except Exception:
+                logger.debug("paper stale 检查失败: %s", s.get("session_id"), exc_info=True)
+
+    def _sync_window_actual(self, s: dict, bars: list[dict], latest: dict) -> None:
+        """无新 bar 时也把实际窗口与当前行情对齐，并在骤降时写一次告警。"""
+        limit = int(s.get("window_bars") or (s.get("state") or {}).get("window_resolved")
+                    or AUTO_WINDOW_MIN)
+        ts = int(latest["timestamp"])
+        idx = next((i for i, b in enumerate(bars)
+                    if int(b.get("timestamp") or 0) == ts), len(bars) - 1)
+        actual = max(0, min(limit, idx + 1))
+        prev = (s.get("state") or {}).get("window_actual")
+        if prev == actual:
+            return
+        s["state"]["window_actual"] = actual
+        s["state"]["window_short"] = actual <= int(
+            (s.get("state") or {}).get("warmup") or 0)
+        s["state"]["window_truncated"] = len(bars) > actual
+        ev = self._window_change_event(s, prev, actual, latest)
+        if ev and self.store:
+            self.store.save_paper_step(s["session_id"], state=s["state"], events=[ev])
+            self._broadcast_events(s, [ev])
+
+    def _check_revision(self, s: dict, bars: list[dict]) -> None:
+        """已处理决策 bar 被数据源修订：不重写历史，只记一次 PAPER_BAR_REVISED。"""
+        ld = (s.get("state") or {}).get("last_decision")
+        if not isinstance(ld, dict) or ld.get("bar_ts") is None or "close" not in ld:
+            return
+        ts = int(ld["bar_ts"])
+        ts_list = [int(b["timestamp"]) for b in bars]
+        idx = bisect_left(ts_list, ts)
+        if idx >= len(bars) or int(bars[idx]["timestamp"]) != ts:
+            return
+        try:
+            revised = float(bars[idx]["close"])
+        except (KeyError, TypeError, ValueError):
+            return
+        old = float(ld.get("close") or 0.0)
+        if abs(revised - old) <= max(1e-9, abs(old) * 1e-9):
+            return
+        seen = s["state"].setdefault("revision_seen", [])
+        marker = f"{ts}:{old:.12g}:{revised:.12g}"
+        if marker in seen:
+            return
+        seen.append(marker)
+        if len(seen) > 50:
+            del seen[:-50]
+        ev = {"ts": _now_ms(), "bar_ts": ts, "kind": "warning",
+              "payload": {"code": "PAPER_BAR_REVISED",
+                          "message": "已处理决策 bar 的收盘价被数据源修订；历史不重写",
+                          "bar_ts": ts, "old_close": old, "new_close": revised}}
+        if self.store:
+            self.store.save_paper_step(s["session_id"], state=s["state"], events=[ev])
+        self._broadcast_events(s, [ev])
+
+    def _gap_events(self, s: dict, last_seen, new: list[dict]) -> dict:
+        """按 timestamp 检测缺口；只告警，不伪造缺失 bar，也不改变补处理上限。"""
+        span = _tf_ms(s["timeframe"])
+        if not span or last_seen is None:
+            return {}
+        out = {}
+        prev = int(last_seen)
+        seen = s["state"].setdefault("gap_seen", [])
+        for b in new:
+            ts = int(b["timestamp"])
+            delta = ts - prev
+            if delta > span * 1.5:
+                missing = max(1, int(round(delta / float(span))) - 1)
+                marker = f"{prev}:{ts}"
+                if marker not in seen:
+                    seen.append(marker)
+                    if len(seen) > 50:
+                        del seen[:-50]
+                    out[ts] = {
+                        "ts": _now_ms(), "bar_ts": ts, "kind": "warning",
+                        "payload": {"code": "PAPER_BAR_GAP",
+                                    "message": f"检测到缺口：{missing} 根缺失 bar",
+                                    "from_ts": prev, "to_ts": ts,
+                                    "missing_bars": missing}}
+            prev = ts
+        return out
+
+    def _window_change_event(self, s: dict, prev, actual: int, P: dict):
+        """数据源短历史替换导致窗口骤降时告警；自然增长不刷屏。"""
+        try:
+            prev = int(prev)
+        except (TypeError, ValueError):
+            return None
+        if prev <= 0 or actual >= prev:
+            return None
+        if prev - actual < max(50, int(prev * 0.5)):
+            return None
+        seen = s["state"].setdefault("window_change_seen", [])
+        marker = f"{prev}->{actual}"
+        if marker in seen:
+            return None
+        seen.append(marker)
+        if len(seen) > 20:
+            del seen[:-20]
+        return {"ts": _now_ms(), "bar_ts": int(P["timestamp"]), "kind": "warning",
+                "payload": {"code": "PAPER_WINDOW_ACTUAL_CHANGED",
+                            "message": "数据源可用历史变短，策略窗口实际根数下降",
+                            "from": prev, "to": actual}}
+
+    def _trim_ledger(self, state: dict):
+        """fills/trades 上限保护；仅裁最旧，保留对账所需的尾部。"""
+        changed = False
+        for key in ("fills", "trades"):
+            rows = state.get(key)
+            if isinstance(rows, list) and len(rows) > self.ledger_keep:
+                del rows[:-self.ledger_keep]
+                changed = True
+        if not changed or state.get("ledger_truncated"):
+            return None
+        state["ledger_truncated"] = True
+        return {"ts": _now_ms(), "bar_ts": state.get("last_decision", {}).get("bar_ts"),
+                "kind": "warning",
+                "payload": {"code": "PAPER_LEDGER_TRUNCATED",
+                            "message": f"fills/trades 超过 {self.ledger_keep} 条，已裁最旧"}}
 
     def _pause_gap(self, s: dict, n: int, first: dict, last: dict) -> None:
         now = _now_ms()
@@ -1112,8 +1457,12 @@ class PaperManager:
             ev = {"ts": _now_ms(), "bar_ts": s.get("last_seen_ts"), "kind": "error",
                   "payload": {"code": "PAPER_ERROR", "message": msg[:2000]}}
             if self.store:
-                self.store.save_paper_step(session_id, state=s["state"], events=[ev],
-                                           status="error", last_error=msg[:2000])
+                try:
+                    self.store.save_paper_step(session_id, state=s["state"], events=[ev],
+                                               status="error", last_error=msg[:2000])
+                except Exception:
+                    # 停机窗口内 store 已关闭：内存态已标记 error，不再二次抛出。
+                    logger.debug("paper error 落盘失败（停机中）", exc_info=True)
         self._broadcast_events(s, [ev])
         self._bc("paper_error", s)
 
@@ -1211,6 +1560,13 @@ class PaperManager:
     def _materialize_result(self, s: dict):
         if not self.store:
             return None
+        # v0.7.2：stop 可能在“结果已登记、session.result_id 未写”之间被杀；
+        # 先按 batch 找回已有 paper 结果，保证重复 stop 不建重复结果。
+        board = self.service.state.get_board(s["board_id"])
+        for rid, old in ((board.results if board else {}) or {}).items():
+            batch = old.get("batch") or {}
+            if batch.get("kind") == "paper" and batch.get("session_id") == s["session_id"]:
+                return rid
         eq = self.store.load_paper_equity(s["session_id"], 0, 0)
         points = eq.get("points") or []
         if not points:

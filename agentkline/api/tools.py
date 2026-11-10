@@ -649,11 +649,18 @@ def run_backtest(board_id: str, timeframe: Optional[str] = None, engine: str = "
         start_time=start_time, end_time=end_time, limit=limit, timeout=timeout)
 
 
-# ============ 模拟盘（v0.7.1） ============
+# ============ 模拟盘（v0.7.2） ============
 @api_tool(group="read", path="/api/paper/sessions")
 def list_paper_sessions(board_id: Optional[str] = None, status: Optional[str] = None):
     """列出模拟盘会话（可按画板/状态过滤）。运行中读内存快照，不阻塞数据轮询。"""
     return service.paper.list(board_id=board_id, status=status)
+
+
+@api_tool(group="read", path="/api/paper/runtime", err_status=404)
+def paper_runtime(session_id: Optional[str] = None):
+    """读模拟盘运行观测：会话状态/游标/处理中标记 + MarketDataHub 请求合并、
+    缓存命中、上游请求、429/退避、延迟指标。不触发上游请求，可高频轮询。"""
+    return service.paper.runtime(session_id=session_id)
 
 
 @api_tool(group="user_write", method="POST", path="/api/paper/sessions", err_status=400)

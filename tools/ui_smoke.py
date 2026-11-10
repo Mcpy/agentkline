@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """AgentKline UI smoke (v0.7.1) — 32 browser checks on a disposable instance.
 
-Why this exists: test_e2e.py covers the API/MCP surface, not the browser UI.
+Why this exists: tools/test_e2e.py covers the API/MCP surface, not the browser UI.
 These checks protect the surfaces that 0.5.3–0.6.5 changed by hand:
 
   1. indicator library opens (75 builtins, fixed nav entries) + search filters

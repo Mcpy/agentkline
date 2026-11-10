@@ -2,7 +2,7 @@
 """
 AgentKline - API 参考附录生成器（防漂移三件套③）
 从运行中服务生成 REST 路由表 + MCP 工具表，输出 Markdown 到 stdout（可重定向进文档附录）。
-用法: python scripts/gen_api_ref.py [--port 8766] [--token T]
+用法: python tools/gen_api_ref.py [--port 8766] [--token T]
 """
 import argparse
 import json

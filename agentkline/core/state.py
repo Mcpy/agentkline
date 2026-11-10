@@ -425,6 +425,20 @@ class StateManager:
         if not board:
             return {"error": f"Board '{board_id}' not found"}
         tf_state = board.ensure_tf(timeframe)
+        # v0.7.2：timestamp 唯一键；上游重复 bar 在入口处丢弃（保留首次出现）。
+        if ohlcv:
+            dedup, seen = [], set()
+            for b in ohlcv:
+                try:
+                    ts = int(b["timestamp"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if ts in seen:
+                    continue
+                seen.add(ts)
+                dedup.append(b)
+            if len(dedup) != len(ohlcv):
+                ohlcv = dedup
         dropped = 0
         if len(ohlcv) > self.MAX_BARS_PER_SLOT:
             dropped = len(ohlcv) - self.MAX_BARS_PER_SLOT

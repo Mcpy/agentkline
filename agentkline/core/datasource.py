@@ -3,6 +3,7 @@ AgentKline - 数据源管理
 管理轮询数据源（异步任务）
 """
 import asyncio
+import json
 import threading
 import logging
 from typing import Optional
@@ -14,10 +15,12 @@ logger = logging.getLogger("agentkline.datasource")
 class DataSourceManager:
     """数据源管理器（轮询）"""
 
-    def __init__(self, state, script_engine, service=None):
+    def __init__(self, state, script_engine, service=None, hub=None):
         self.state = state
         self.script_engine = script_engine
         self.service = service  # 指标重算委托（v0.4 实例模型）
+        # v0.7.2：可选的行情请求合并层；None 时保持旧路径（测试/一次性实例）
+        self.hub = hub
         self.tasks: dict[str, 'threading.Thread'] = {}  # key -> poll thread（v0.4.3：asyncio task+executor 链两度不可解释挂起，换线程模型，watchlist Timer 先例稳定）
         self._stop_flags: dict[str, bool] = {}
         self._wake: dict[str, 'threading.Event'] = {}  # v0.4.3 bug5 根治：可中断 sleep（view 上报/切槽唤醒长睡 loop）
@@ -36,6 +39,47 @@ class DataSourceManager:
 
     def _key(self, board_id: str, timeframe: str) -> str:
         return f"{board_id}:{timeframe}"
+
+    # ---- v0.7.2 行情合并键/热度 ----
+    @staticmethod
+    def _hub_key(script: str, params: dict, timeframe: str, until=None) -> str:
+        """同一源+同一组参数+同一周期=同一 key；until 只用于回补，单独区分。"""
+        payload = json.dumps(params or {}, sort_keys=True, ensure_ascii=False,
+                             default=str, separators=(",", ":"))
+        suffix = f"|until={until}" if until is not None else ""
+        return f"{script}|{timeframe}|{payload}{suffix}"
+
+    def _is_hot(self, board_id: str, timeframe: str) -> bool:
+        """当前图表/模拟盘所在槽=热；其余槽可以缓存更久。"""
+        view = getattr(self.service, "current_view", None) or {}
+        if view.get("board_id") == board_id and view.get("timeframe") == timeframe:
+            return True
+        board = getattr(self.state, "get_board", lambda _x: None)(board_id)
+        if board is not None and getattr(board, "current_timeframe", None) == timeframe:
+            return True
+        paper = getattr(self.service, "paper", None) if self.service else None
+        if paper is not None:
+            try:
+                if paper.is_active_timeframe(board_id, timeframe):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _fetch(self, script: str, params: dict, timeframe: str, *,
+               board_id: str = None, until=None, force: bool = False) -> dict:
+        """统一取数入口：有 hub 则 single-flight/TTL/预算；否则旧直连。"""
+        if self.hub is None:
+            return self.script_engine.run_script(script, params, until=until)
+        key = self._hub_key(script, params, timeframe, until=until)
+        if force:
+            self.hub.invalidate(key=key)
+        ttl = 0.0 if until is not None else (
+            self.hub.ttl_active_s if (board_id and self._is_hot(board_id, timeframe))
+            else self.hub.ttl_idle_s)
+        return self.hub.fetch(key, script,
+                              lambda: self.script_engine.run_script(script, params, until=until),
+                              ttl_s=ttl)
 
     def set_config(self, board_id: str, timeframe: str, script: str, params: dict, poll_s: int = None):
         """记录槽配置（纯配置，永远 JSON 可序列化）；script 为 id（kind/name）。
@@ -122,13 +166,24 @@ class DataSourceManager:
 
     @staticmethod
     def _merge_ohlcv(existing: list, new: list) -> list:
-        """合并K线：保留比新窗口更早的历史 + 新窗口（更新/追加近期）"""
-        if not existing:
-            return sorted(new, key=lambda b: b["timestamp"])
-        new_sorted = sorted(new, key=lambda b: b["timestamp"])
-        new_earliest = new_sorted[0]["timestamp"]
-        older = [b for b in existing if b["timestamp"] < new_earliest]
-        return older + new_sorted
+        """合并 K 线：保留更早历史 + 新窗口；按 timestamp 去重（后者覆盖前者）。
+
+        v0.7.2：上游重复 bar 不再进入内存时间轴，避免 paper 重复决策；
+        排序保证 bisect/新 bar 判定稳定。"""
+        if not new:
+            return sorted(existing or [], key=lambda b: int(b["timestamp"]))
+        by_ts = {}
+        for b in (existing or []):
+            try:
+                by_ts[int(b["timestamp"])] = b
+            except (KeyError, TypeError, ValueError):
+                continue
+        for b in new:
+            try:
+                by_ts[int(b["timestamp"])] = b
+            except (KeyError, TypeError, ValueError):
+                continue
+        return [by_ts[k] for k in sorted(by_ts)]
 
     # ---- v0.4.1 性能①：可见性分级轮询 ----
     @staticmethod
@@ -196,7 +251,7 @@ class DataSourceManager:
                     break
                 _c0 = _t.time()
                 try:
-                    result = self.script_engine.run_script(script, params)
+                    result = self._fetch(script, params, timeframe, board_id=board_id)
                 except Exception as e:
                     result = {"error": f"POLL_EXCEPTION: {e}"}
                 _fetch_s = _t.time() - _c0
@@ -209,6 +264,12 @@ class DataSourceManager:
                     st = self.status.setdefault(key, {})
                     st["last_error"] = result["error"]
                     st["last_fetch"] = datetime.now().isoformat()
+                    paper = getattr(self.service, "paper", None) if self.service else None
+                    if paper is not None:
+                        try:
+                            paper.on_source_error(board_id, timeframe, result["error"])
+                        except Exception:
+                            logger.debug("paper stale 调度失败", exc_info=True)
                     if self.error_counts[key] >= 3 and self.ws_manager:
                         self.service.notify({"type": "datasource_error",
                                              "board_id": board_id, "timeframe": timeframe,

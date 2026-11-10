@@ -3,7 +3,7 @@
 C1 import 图判环（0.4.1 循环绑定坏绑定教训：ws→watchlist→ui→ws 曾静默炸渲染）；
 C2 跨模块导出名在本文件被调用但未 import 且未本地定义（老 bug1 教训：
    ui.js 调 renderChart / ws.js 调 refreshSearch 漏 import = ReferenceError 断链）。
-用法：python scripts/check_fe_guards.py  → 违例打印并 exit 1；干净 exit 0。
+用法：python tools/check_fe_guards.py  → 违例打印并 exit 1；干净 exit 0。
 """
 import re
 import sys

@@ -43,6 +43,18 @@
 | POST | `/api/markers` | Set Markers |
 | GET | `/api/optimizers` | List Optimizers |
 | GET | `/api/overview` | Overview |
+| GET | `/api/paper/runtime` | Paper Runtime |
+| GET | `/api/paper/sessions` | List Paper Sessions |
+| POST | `/api/paper/sessions` | Create Paper Session |
+| GET | `/api/paper/sessions/{session_id}` | Get Paper Session |
+| DELETE | `/api/paper/sessions/{session_id}` | Delete Paper Session |
+| GET | `/api/paper/sessions/{session_id}/equity` | Paper Equity |
+| GET | `/api/paper/sessions/{session_id}/events` | Paper Events |
+| POST | `/api/paper/sessions/{session_id}/pause` | Pause Paper Session |
+| POST | `/api/paper/sessions/{session_id}/reconcile` | Reconcile Paper Session |
+| POST | `/api/paper/sessions/{session_id}/resume` | Resume Paper Session |
+| POST | `/api/paper/sessions/{session_id}/start` | Start Paper Session |
+| POST | `/api/paper/sessions/{session_id}/stop` | Stop Paper Session |
 | GET | `/api/presets` | List Presets |
 | POST | `/api/presets` | Save Preset |
 | PUT | `/api/presets/{preset_id}` | Update Preset |
@@ -139,6 +151,18 @@
 | `strategy_meta` | 读取策略脚本的声明（NAME/DESC/WARMUP/PARAMS/PARAM_META/PROTECTION/BARS_PER_YEAR） |
 | `list_optimizers` | 列出可用优化器脚本（optimizer/xxx，内置 + 自定义）： |
 | `run_backtest` | 跑一次回测，结果按结果实例登记并广播。 |
+| `list_paper_sessions` | 列出模拟盘会话（可按画板/状态过滤）。运行中读内存快照，不阻塞数据轮询。 |
+| `paper_runtime` | 读模拟盘运行观测：会话状态/游标/处理中标记 + MarketDataHub 请求合并、 |
+| `create_paper_session` | 创建一个模拟盘会话（不自动启动）。冻结策略源码/参数/费用/保护； |
+| `get_paper_session` | 读一个模拟盘会话：状态/持仓/浮盈/游标/最近决策；include_events=true 带最近 30 条事件。 |
+| `start_paper_session` | 启动模拟盘。创建后第一次启动会把起点对齐到最新已收盘 bar，不回溯历史。 |
+| `pause_paper_session` | 暂停模拟盘；暂停期间的 bar 不再处理。 |
+| `resume_paper_session` | 恢复模拟盘；默认跳过暂停/断线期间，从最新已收盘 bar 继续（PAPER_RESUME_SKIP）。 |
+| `stop_paper_session` | 停止模拟盘并物化成 kind=paper 结果（结果栏可直接打开）。 |
+| `delete_paper_session` | 删除非运行中的模拟盘会话与事件/净值账本；运行中的会话必须先 stop。 |
+| `paper_events` | 分页读模拟盘事件账本（decision/fill/equity/warning/...）。 |
+| `paper_equity` | 读模拟盘净值曲线；limit=0 返回全部（面板曲线用）。 |
+| `reconcile_paper_session` | 用同一段 bars/参数/窗口跑区间回测，和模拟盘的权益/成交/回合逐项对账。 |
 | `list_presets` | 列出参数方案（按画板标的过滤）。参数方案=命名后的参数集，绑定 源+标的+周期+策略， |
 | `save_preset` | 把一套参数存为该标的的参数方案。params 按策略声明校验并补全默认值； |
 | `update_preset` | 改参数方案：改名/改参数/备注/设为当前方案（is_default=true 会清掉同作用域旧默认）。 |

@@ -24,7 +24,8 @@ logger = logging.getLogger("agentkline.store")
 SCHEMA_VERSION = 5
 EQUITY_CHUNK = 500      # 净值分块：每块 500 点 [[ts,value],…]
 EVENTS_KEEP = 5000      # 事件账本上限（超出裁旧）
-PAPER_EVENTS_KEEP = 20000
+PAPER_EVENTS_KEEP = 100000
+PAPER_EQUITY_CHUNKS_KEEP = 400  # 400*500=20 万点，按 1m 约 4 个月，按 15m 约 11 年
 OPTIMIZE_REPORTS_KEEP = 200
 
 _SCHEMA = (
@@ -563,6 +564,11 @@ class Store:
         self._conn.execute(
             "INSERT OR REPLACE INTO paper_equity(session_id,chunk,points) VALUES(?,?,?)",
             (session_id, chunk, _dumps(current)))
+        # v0.7.2：净值分块保留上限；删最旧块，不重排 chunk（读取按 chunk 排序即可）。
+        if chunk >= PAPER_EQUITY_CHUNKS_KEEP:
+            self._conn.execute(
+                "DELETE FROM paper_equity WHERE session_id=? AND chunk<?",
+                (session_id, chunk - PAPER_EQUITY_CHUNKS_KEEP + 1))
 
     def load_paper_events(self, session_id: str, after_seq: int = 0,
                           limit: int = 200) -> dict:

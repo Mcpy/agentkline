@@ -1,8 +1,8 @@
 # AgentKline API 文档
 
-> 版本：v0.6.7 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server（API 自 v0.4.0 起保持兼容）
+> 版本：v0.7.2 ｜ 适用：FastAPI（REST + WebSocket）与 MCP server（API 自 v0.4.0 起保持兼容）
 > 破坏性硬切版本：无兼容层。旧路径（/api/ohlcv、/api/load-csv、/history、datasource 端点、indicator/update 杂交路径）一律 404/405。
-> 机器可读附录：`python scripts/gen_api_ref.py` 可从运行中服务生成 REST 路由表 + MCP 工具表（防漂移）。
+> 机器可读附录：`python tools/gen_api_ref.py` 可从运行中服务生成 REST 路由表 + MCP 工具表（防漂移）。
 
 ## 0. 通用约定
 
@@ -126,7 +126,7 @@ CAPS 声明⇒实现（backfill⇒until 参/symbols⇒list_symbols/ticker⇒tick
 数据源 until 回溯可重放跨窗连续；单槽 max_bars_per_slot=50000 截旧+dropped；重算尾窗 max_window=5000；
 数据家族单脚本分片范式；L1 沙箱自律。
 
-## 10. MCP 工具（Streamable HTTP `/mcp`，agent 端口，66 个）
+## 10. MCP 工具（Streamable HTTP `/mcp`，agent 端口，78 个）
 
 改名：set_datasource→**set_kline_source**；load_history→**backfill**；run_script 窄身；list_scripts payload 升级。
 新增：save_script、search_symbols。换参：add/update/delete_indicator 与 get_indicators 换 inst_id/instances。
@@ -137,7 +137,7 @@ v0.6.1 增引擎回测 4 个（list_engines/list_strategies/strategy_meta/run_ba
 v0.6.4 增运镜 1 个 + 参数方案 4 个；
 v0.6.5 增参数寻优 3 个；v0.6.6 增 list_optimizers（优化器插件清单）；v0.6.7 增 list_optimizations / delete_optimization（报告历史/删除）。
 **MCP-only 判决**：take_snapshot（无 REST 触发）。**REST-only**：get_kline_source、/api/view 上报。
-docstring 为单一真相；REST 为薄镜像；`test_e2e.py` 含两表面对齐断言。
+docstring 为单一真相；REST 为薄镜像；`tools/test_e2e.py` 含两表面对齐断言。
 
 ## 11. 错误码
 
