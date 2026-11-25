@@ -1,5 +1,5 @@
 {
-  "vela": "0.8.4",
+  "vela": "0.10.4",
   "generated_by": "tools/gen_indicator_spec.mjs",
   "groups": [
     {
@@ -488,24 +488,59 @@
       ]
     },
     {
-      "type": "linear-regression",
-      "script": "indicator/linear_regression",
-      "title": "Linear Regression Curve",
-      "short": "LinReg",
-      "title_zh": "线性回归曲线",
+      "type": "lsma",
+      "script": "indicator/lsma",
+      "title": "Least Squares Moving Average",
+      "short": "LSMA",
+      "title_zh": "最小二乘移动平均",
       "group": "average",
       "overlay": true,
       "inputs": [
         {
-          "key": "mode",
-          "title": "Mode",
+          "key": "source",
+          "title": "Source",
           "type": "string",
-          "defval": "Curve",
+          "defval": "Close",
           "options": [
-            "Curve",
-            "Slope"
+            "Close",
+            "Open",
+            "High",
+            "Low",
+            "HL2",
+            "HLC3",
+            "OHLC4",
+            "HLCC4"
           ]
         },
+        {
+          "key": "length",
+          "title": "LSMA Length",
+          "type": "int",
+          "defval": 25,
+          "min": 2,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "offset",
+          "title": "Regression Offset",
+          "type": "int",
+          "defval": 0,
+          "min": 0,
+          "max": 500,
+          "step": 1
+        }
+      ]
+    },
+    {
+      "type": "linear-regression-slope",
+      "script": "indicator/linear_regression_slope",
+      "title": "Linear Regression Slope",
+      "short": "LRS",
+      "title_zh": "线性回归斜率",
+      "group": "average",
+      "overlay": false,
+      "inputs": [
         {
           "key": "length",
           "title": "Length",
@@ -1915,7 +1950,7 @@
         },
         {
           "key": "longRoc",
-          "title": "Long RoC Length",
+          "title": "Long ROC Length",
           "type": "int",
           "defval": 14,
           "min": 1,
@@ -1924,7 +1959,7 @@
         },
         {
           "key": "shortRoc",
-          "title": "Short RoC Length",
+          "title": "Short ROC Length",
           "type": "int",
           "defval": 11,
           "min": 1,
@@ -2583,7 +2618,7 @@
         },
         {
           "key": "threshold",
-          "title": "Alert Threshold",
+          "title": "Stress Threshold",
           "type": "float",
           "defval": 5,
           "min": 0,
@@ -2863,7 +2898,7 @@
       "inputs": [
         {
           "key": "base",
-          "title": "Base Level",
+          "title": "Starting Value",
           "type": "float",
           "defval": 1000,
           "min": 0.01,
@@ -3336,7 +3371,7 @@
     {
       "type": "52-week-high-low",
       "script": "indicator/52_week_high_low",
-      "title": "52 Week High/Low",
+      "title": "52-Week High/Low",
       "short": "52W H/L",
       "title_zh": "52 周高低点",
       "group": "overlay",

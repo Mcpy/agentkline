@@ -24,7 +24,12 @@ limits:
   paper_window_bars: 0      # v0.7.1 模拟盘窗口：0=自动 max(500,WARMUP+100)，正数=手动上限 50000
   paper_max_catchup_bars: 500  # 一次补处理超过此数转 paused_gap，人工恢复时跳过
   paper_settle_ms: 15000    # bar 收盘后静默 15s 再处理，避开交易所最后一跳修订
+  paper_replay_min_age_ms: 60000  # 批量追平（replay/断线）时，收盘不足 60s 的最新 bar 留给下一轮，避开暂定价
   paper_ledger_keep: 10000  # 单会话 fills/trades 保留上限（裁最旧，防长跑无限增长）
+  paper_engine_retries: 3     # 引擎子进程瞬时崩溃重试次数
+  paper_engine_retry_delay_s: 0.5  # 重试退避基数（秒，按 attempt 线性放大）
+  paper_auto_recovery_attempts: 3  # 引擎错误后自动恢复尝试次数（0=关闭）
+  paper_auto_recovery_delay_s: 30  # 自动恢复前等待秒数
   # v0.7.2 行情请求合并（single-flight/TTL/预算/退避）
   market_ttl_active_s: 4     # 当前图表/模拟盘所在槽的缓存 TTL
   market_ttl_idle_s: 30      # 非活跃槽缓存 TTL（不超过该槽自身轮询间隔的语义）

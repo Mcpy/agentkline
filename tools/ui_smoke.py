@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""AgentKline UI smoke (v0.7.1) — 32 browser checks on a disposable instance.
+"""AgentKline UI smoke (v0.7.3) — 32 browser checks on a disposable instance.
 
 Why this exists: tools/test_e2e.py covers the API/MCP surface, not the browser UI.
 These checks protect the surfaces that 0.5.3–0.6.5 changed by hand:
 
-  1. indicator library opens (75 builtins, fixed nav entries) + search filters
+  1. indicator library opens (76 builtins, fixed nav entries) + search filters
   2. clicking a card adds one instance + "added" count updates
   3. favorite survives a page reload
   4. recently-used order follows the last successful add
@@ -16,7 +16,7 @@ These checks protect the surfaces that 0.5.3–0.6.5 changed by hand:
      value (store-2000) bars back (the "BB shifted left" regression)
 
 It boots a temporary server on free localhost ports with an EMPTY custom
-scripts root (the 75 builtin entries), creates a mock board, drives headless
+scripts root (the 76 builtin entries), creates a mock board, drives headless
 Chromium, then removes the temp dir and kills the server. No live board is
 touched.
 
@@ -120,6 +120,8 @@ class TempServer:
             "AGENTKLINE_SCRIPTS_DIR": str(self.tmp / "scripts"),
             "AGENTKLINE_DATA_DIR": str(self.tmp / "data"),
             "AGENTKLINE_TOKEN": self.token,
+            # ak-engine 子进程需要能从源码树 import agentkline（与 e2e 同策略）
+            "PYTHONPATH": str(ROOT) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""),
         })
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "agentkline.api.app"],
@@ -281,7 +283,7 @@ def run_checks(page, base: str, agent_base: str = None,
     search.fill("bollinger")
     page.wait_for_timeout(250)
     scripts = page.locator(".ind-lib-card").evaluate_all("els => els.map(e => e.dataset.script)")
-    check("指标库：打开 + 搜索过滤", total == 75
+    check("指标库：打开 + 搜索过滤", total == 76
           and all(x in nav for x in ("全部", "收藏", "最近使用", "已添加"))
           and set(scripts) == {"indicator/bollinger_bands", "indicator/percent_b", "indicator/bandwidth"},
           f"total={total} nav={nav[:80]} scripts={scripts}")

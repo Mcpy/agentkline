@@ -502,6 +502,7 @@ class Store:
                         equity_points: list[list] | None = None,
                         cursor_ts: int = None, last_seen_ts: int = None,
                         status: str = None, last_error: str = None,
+                        clear_last_error: bool = False,
                         result_id: str = None, stopped_at: int = None) -> int:
         """状态 + 事件 + 权益点同一事务；返回最后一条事件的 seq（无事件时返回 0）。"""
         events = events or []
@@ -513,11 +514,17 @@ class Store:
                 sets = ["state=?"]
                 args = [_dumps(state)]
                 for col, val in (("cursor_ts", cursor_ts), ("last_seen_ts", last_seen_ts),
-                                 ("status", status), ("last_error", last_error),
+                                 ("status", status),
                                  ("result_id", result_id), ("stopped_at", stopped_at)):
                     if val is not None:
                         sets.append(f"{col}=?")
                         args.append(val)
+                # last_error=None 表示“不动”；恢复成功时必须显式清空，否则旧的红色错误条会永久留在 UI。
+                if clear_last_error:
+                    sets.append("last_error=NULL")
+                elif last_error is not None:
+                    sets.append("last_error=?")
+                    args.append(last_error)
                 args.append(session_id)
                 self._conn.execute(
                     f"UPDATE paper_sessions SET {','.join(sets)} WHERE session_id=?", tuple(args))

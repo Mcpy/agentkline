@@ -1,7 +1,9 @@
 # Vela 内部耦合与升级门（v0.5.4）
 
 > **定位**：薄适配层公开 API 之外的「内部面」台账。升级 Vela 前先读这一页，十分钟知道哪里会断、怎么回归。
-> **当前基线**：Vela 0.8.4，`frontend/vendor/assets/vela.global.min.js`，sha256 `4071c32b8cb65e5b75eefb5a6973babc1a90b3f875e44b7d5dad32be181a606f`。
+> **当前基线**：Vela 0.10.4，`frontend/vendor/assets/vela.global.min.js`，sha256 `3525e72473a8e45d22d0347238267e17c2f309561ca03cbe063223af601c7160`。
+> 0.10.4 起图表原生界面可中文化（`locale:zh-Hans`），画线 flyout 改为点组箭头展开；pane 高度走公开 `chart.panes.setHeightWeight()`。
+> 注意：0.10.4 的 drawing toolbar 在构造期缓存英文 label，必须在 `new Vela()` 后显式 `chart.setLocale()`，否则只传 `locale` 时 flyout 仍英文。
 > **唯一接触点**：`frontend/src/vela_adapter.js`。应用层不直接摸 `window.Vela`，新增内部面也只能加在这里。
 
 ## 1. 为什么会有内部耦合
@@ -31,7 +33,8 @@ Vela 的公开 API 已覆盖图表、指标、画线、标记、事件和截图�
 | `pricePane.percentBaseline` | percent/indexed 的基线 | 百分比文本错误 | 基线无效时退回价格文本 | 人工 |
 | `pricePane.collapsed` | 折叠 pane 时不画 | 折叠后仍出现块 | 跟随原生跳过 | 人工 |
 | `coords.devicePixelRatio` | 轴宽 = canvas 宽 / dpr − dataW | 块过宽/过窄 | 轴宽兜底 64px | UI smoke #6 |
-| `pane.heightWeight` | 布局权重（PoC 验证的旋钮，非公开文档面） | pane 高度不适配 | 保持默认高度 | 人工布局检查 |
+| `chart.panes.setHeightWeight` / `panes.list().heightWeight` | 布局权重（0.8.5 起公开；0.8.4 只能写 `p.heightWeight`） | pane 高度不适配 | 保持默认高度 | 人工布局检查 / UI smoke |
+| `chart.setLocale` / `Vela.registerLocale` | 图表原生界面语言（0.9 起公开） | 图表菜单仍英文 | 保持英文 | 人工中文设置面板 |
 | `#main-chart` 内 legend 行（文字 `VRVP` 的 span→row div） | VPVR 图例行隐藏：保留 DOM（设置面板仍能定位）只把该行 `display:none`；MutationObserver 防 Vela 重建 | 图例重新出现（行可见） | 结构变了就不再隐藏，chip/设置仍可用 | UI smoke #5 |
 | `handle.nativeType` / `pane.indicators` | 识别 volume/subplot 组 | volume 不移位、显隐/组挂载异常 | 回退到 title 判断 | e2e + 视觉 |
 | `renderer.onCrosshairMove` | 十字线通道：OHLC 行读数 + 0.6.2 交易点点击命中 | 十字线不更新、OHLC 停在旧值、点交易点无反应 | 无；OHLC 回落到最新一根，点击不命中（不报错） | UI smoke #10 + 人工 |
@@ -61,7 +64,7 @@ Vela 的公开 API 已覆盖图表、指标、画线、标记、事件和截图�
    ```
    11 条全绿：指标库打开/搜索、加实例、收藏刷新、最近使用顺序、VPVR 图层开关（含参数保留）、越界贴边、
    指标对齐、+回测、定位历史、0.6.2 B1 的「点行/口径/图上点选」、0.6.2 B2 的「水下 + 持仓带」。
-4. **API e2e**：临时实例上 `python tools/test_e2e.py --port 18766`，196/196。
+4. **API e2e**：临时实例上 `python tools/test_e2e.py --port 18766`，238/238。
 5. **人工**：打开 live，拖动价格轴让最新价越界 → 顶部/底部出现 `▲/▼`；恢复区间 → 原生标签回来且无重复；指标库收藏/最近使用正常。
 6. **更新本页**：内部面有增删/改名时同步改表，并在 UI smoke 或 regression 里补对应用例。
 

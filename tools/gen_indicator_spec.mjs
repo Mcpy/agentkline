@@ -57,7 +57,7 @@ const GROUPS = [
 
 const GROUP_OF = {
     'sma': 'average', 'ema': 'average', 'moving-average': 'average', 'rma': 'average',
-    'zlema': 'average', 'vidya': 'average', 'ma-envelope': 'average', 'linear-regression': 'average',
+    'zlema': 'average', 'vidya': 'average', 'ma-envelope': 'average', 'lsma': 'average', 'linear-regression-slope': 'average',
     'bollinger-bands': 'band', 'percent-b': 'band', 'bandwidth': 'band', 'keltner-channels': 'band',
     'donchian-channels': 'band', 'chandelier-exit': 'band', 'chande-kroll-stop': 'band',
     'supertrend': 'band', 'williams-alligator': 'band', 'gator-oscillator': 'band',
@@ -84,7 +84,7 @@ const GROUP_OF = {
 
 const ZH = {
     'sma': '简单移动平均', 'ema': '指数移动平均', 'moving-average': '移动平均（多类型）', 'rma': '平滑移动平均',
-    'zlema': '零延迟 EMA', 'vidya': '可变指数动态平均', 'ma-envelope': '均线包络', 'linear-regression': '线性回归曲线',
+    'zlema': '零延迟 EMA', 'vidya': '可变指数动态平均', 'ma-envelope': '均线包络', 'lsma': '最小二乘移动平均', 'linear-regression-slope': '线性回归斜率',
     'bollinger-bands': '布林带', 'percent-b': '布林 %B', 'bandwidth': '布林带宽', 'keltner-channels': '肯特纳通道',
     'donchian-channels': '唐奇安通道', 'chandelier-exit': '吊灯止损', 'chande-kroll-stop': '钱德-克罗尔止损',
     'supertrend': '超级趋势', 'williams-alligator': '威廉鳄鱼线', 'gator-oscillator': '鳄鱼振荡器',
@@ -125,9 +125,7 @@ for (const type of V.nativeIndicatorTypes()) {
             if (Array.isArray(i.options)) o.options = i.options.slice();
             return o;
         });
-    // linear-regression 默认 Curve 实际叠在主图（Vela 的 plot.overlay），故按主图归类；
-    //   Slope 模式在主图上会退化（已知，见 v0.5.3 文档）。
-    const overlay = type === 'linear-regression' ? true : !!d.overlay;
+    const overlay = !!d.overlay;
     indicators.push({
         type,
         script: scriptOf(type),

@@ -139,7 +139,7 @@ function deleteIndicator(name) {
         .then(d => { if (d.error) log('error', t('ind.delete_fail', { e: d.error })); });
 }
 
-// 指标库面板（v0.5.3）：74 个 Vela 经典研究 + KDJ 扩展，搜索/分类/多列。
+// 指标库面板（v0.5.3）：75 个 Vela 经典研究 + KDJ 扩展，搜索/分类/多列。
 //   面板自己管增删；这里只提供「变更后刷新指标栏」回调（避免反向 import 环）。
 function openIndicatorMenu() {
     openIndicatorLibrary(() => { renderIndicatorBar(); });

@@ -38,6 +38,13 @@ def _hidden(plot: dict) -> bool:
     return False
 
 
+def _title(plot: dict):
+    t = plot.get("title")
+    if isinstance(t, dict):
+        return t.get("defaultMessage") or t.get("key")
+    return t
+
+
 def _cmp_values(expected: list, actual: list, max_detail: int = 4) -> list[str]:
     problems: list[str] = []
     if len(expected) != len(actual):
@@ -79,12 +86,12 @@ def compare_type(study_type: str, golden: dict, verbose: bool = False, dump: boo
     problems: list[str] = []
     expected_visible = [p for p in ref["plots"] if not _hidden(p)]
     for plot in expected_visible:
-        title = plot["title"]
+        title = _title(plot)
         if title not in lines:
             problems.append(f"missing line {title!r}")
             continue
         problems.extend(f"{title}{p}" for p in _cmp_values(plot["values"], lines[title]))
-    extra = [n for n in lines if n not in {p["title"] for p in expected_visible}]
+    extra = [n for n in lines if n not in {_title(p) for p in expected_visible}]
     if extra and verbose:
         print(f"  note: extra lines {extra}")
 
@@ -114,7 +121,7 @@ def compare_type(study_type: str, golden: dict, verbose: bool = False, dump: boo
                     break
 
     if dump:
-        print(json.dumps({"golden_visible": [p["title"] for p in expected_visible],
+        print(json.dumps({"golden_visible": [_title(p) for p in expected_visible],
                           "python_lines": list(lines),
                           "python_levels": out.get("levels")}, ensure_ascii=False, indent=1))
     return {"type": study_type, "ok": not problems, "problems": problems}

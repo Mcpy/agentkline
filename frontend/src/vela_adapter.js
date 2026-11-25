@@ -1,7 +1,7 @@
 // ============================================================================
 // vela_adapter.js —— Vela 唯一接触点（v0.5 R2 薄适配层纪律）
 // 应用层不得直接摸 window.Vela，全经本文件。
-// 兼容基线契约 = docs/v0.5-需求与改动点.md §2 映射表（PoC 0.8.1 验过的 API 面）。
+// 兼容基线契约 = docs/v0.5-需求与改动点.md §2 映射表（PoC 0.8.1 验过的 API 面；当前 vendor 0.10.4）。
 //
 // v0.5.0 图表架构（用户裁决 2026-10-03 三轮定案）：单图表同图 pane + 动态总高。
 //   产品承诺（2026-09-27）：主图固定高不随副图压缩、超出 wheel 翻。
@@ -11,10 +11,22 @@
 // 注意事项锚点：§10-①..⑭ + 附二（深拷贝/事件缺/双格式读/slice(8)/ctx.id 等）。
 // ============================================================================
 import { state } from './state.js';
-import { t } from './i18n.js';
+import { t, lang } from './i18n.js';
+import velaZhHans from './locales/vela_zh_hans.js';
 import { getLayerPref, setLayerPref, getLayerInputs, setLayerInputs } from './chart_layers_prefs.js';
 
 const V = window.Vela;
+
+// Vela 0.10 自带图表界面本地化；中文界面加载 zh-Hans 语言包（Vela 侧菜单/设置/画线工具）。
+let _velaLocaleReady = false;
+function _chartLocale() {
+    if (lang() !== 'zh' || !V || typeof V.registerLocale !== 'function') return 'en';
+    if (!_velaLocaleReady) {
+        try { V.registerLocale(velaZhHans); } catch (e) { console.warn('[ak] Vela locale register failed', e); }
+        _velaLocaleReady = true;
+    }
+    return 'zh-Hans';
+}
 
 // ---- 常量与工具 ----
 const MAIN_H = 450;          // 主图固定像素高（0.4 产品承诺）
@@ -700,7 +712,7 @@ let _vpvrLegendObs = null;  // Vela 原生 legend 行（VRVP）隐藏观察器
 // v0.5.4 最新价越界贴边
 // 原生 chrome 在最新价超出可见价格区间时直接跳过标签（drawPriceLineAndCountdown 早退）。
 // 这里包一层 chrome 绘制：仍走原生画布/字号/价格色，只在越界时把标签钉在 pane 顶/底并加箭头。
-// 版本锁定 0.8.4 的内部 chrome 接口；缺失/异常时退回原生行为，不影响图表。
+// 版本锁定 0.10.4 的内部 chrome 接口；缺失/异常时退回原生行为，不影响图表（UI smoke #6 覆盖）。
 // ============================================================================
 let _lastPricePinState = null;
 
@@ -954,7 +966,16 @@ function _layoutPanesNow() {
         }
     }
     pl = chart.panes.list() || [];
-    pl.forEach(p => { try { p.heightWeight = _paneWeight(p); } catch (e) {} });
+    pl.forEach(p => {
+        const w = _paneWeight(p);
+        try {
+            if (chart.panes && typeof chart.panes.setHeightWeight === 'function') {
+                chart.panes.setHeightWeight(p.id, w);
+            } else {
+                p.heightWeight = w;   // 0.8.x 兼容回退
+            }
+        } catch (e) {}
+    });
     const total = pl.reduce((a, p) => a + _paneWeight(p), 0);
     const el = document.getElementById('main-chart');
     const target = total + 'px';
@@ -988,13 +1009,20 @@ export function renderChartCore() {
     const container = document.getElementById('main-chart');
     if (!container) return;
     container.innerHTML = '';
+    const chartLocale = _chartLocale();
     chart = new V.Vela(container, {
         symbol: chartSymbol(),
         timeframe: state.currentTimeframe || '1d',
         theme: 'dark', live: true, volume: true,   // P2：原生 volume overlay 在价格 pane（与 Vela 演示一致）
+        locale: chartLocale,               // 0.10：图表原生界面跟随 AgentKline 语言
         currentPriceLine: true,            // 原生最新价轴标签（替代 0.4 自绘吸附标签）
         drawings: true,                    // 0.5.2：Vela 原生工具栏（7 组 79 工具，44px 停靠）
     }, { dataFeed: feed });
+    // 0.10.4 的 drawing toolbar 在构造期缓存英文 label；setLocale 会触发 drawings.relocalize()。
+    // 仅传 locale 选项时图表设置已中文，但画线 flyout 仍是英文，故这里再显式刷一次。
+    if (chartLocale !== 'en' && typeof chart.setLocale === 'function') {
+        try { chart.setLocale(chartLocale); } catch (e) { console.warn('[ak] Vela locale apply failed', e); }
+    }
     // 0.6.0：图表时间轴跟随界面时区（与 OHLC 读数/状态条一致；不依赖系统时区）
     try { chart.renderer.applyConfig({ timeScale: { timezone: _uiTz() } }); } catch (e) { console.warn('[ak] timezone apply failed', e); }
     // 探针/控制台把手（e2e 与人工排障；不参与业务逻辑）

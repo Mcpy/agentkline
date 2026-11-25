@@ -3,7 +3,7 @@
 
 校验三层是否同源：
   1. indicator_spec.json ↔ 内置脚本 wrapper（存在性 / NAME / PARAMS / SUBPLOT）
-  2. indicator_spec.json ↔ Python registry（74 个 Vela 类型，KDJ 除外）
+  2. indicator_spec.json ↔ Python registry（75 个 Vela 类型，KDJ 除外）
   3. generated visual spec ↔ Python 实际线名（fills 两端、levels/zones 的阈值键）
 
 用法: node tools/indicator_port/gen_golden.mjs && .venv/bin/python tools/indicator_port/check_catalog.py

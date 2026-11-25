@@ -6,7 +6,7 @@
 //
 // 结构：
 //   GENERATED_SPEC（indicator_visuals.js，tools/gen_indicator_visuals.mjs 生成）
-//     = 74 个 Vela 经典研究的原生默认：线色/线宽/kind/填充带/水平线/区带/
+//     = 75 个 Vela 经典研究的原生默认：线色/线宽/kind/填充带/水平线/区带/
 //       以及从原生逐点色反推出的 colorRule（sign/slope/close/mid/momentum/absSlope）。
 //   MANUAL（本文件）= 需要手写策略的特例（rsi 渐变、macd 动能四态、sar 圆点、kdj 扩展）。
 //   合并规则：MANUAL 覆盖 GENERATED 的同名字段；lines 按线名逐条覆盖。
@@ -136,7 +136,30 @@ const MANUAL = {
             },
         },
     },
-    // 线性回归：原生按拟合斜率给曲线红/绿（Curve 的逐 bar 差分∝斜率）；Slope 模式同色
+    // 最小二乘移动平均（Vela 0.10 / 0.8.5 拆分）：按拟合斜率红绿
+    'indicator/lsma': {
+        lines: {
+            LSMA: {
+                kind: 'line', color: N.NEUTRAL, width: 2,
+                inks: { up: N.BULLISH, down: N.BEARISH },
+                pointColor: (v, ctx) => (ctx.prev == null ? null
+                    : v > ctx.prev ? ctx.ink.up : v < ctx.prev ? ctx.ink.down : null),
+            },
+        },
+    },
+    // 线性回归斜率（Vela 0.10 / 0.8.5 拆分）：零轴 + 斜率红绿
+    'indicator/linear_regression_slope': {
+        lines: {
+            Slope: {
+                kind: 'line', color: N.NEUTRAL, width: 2,
+                inks: { up: N.BULLISH, down: N.BEARISH },
+                pointColor: (v, ctx) => (ctx.prev == null ? null
+                    : v > ctx.prev ? ctx.ink.up : v < ctx.prev ? ctx.ink.down : null),
+            },
+        },
+        levels: [{ key: 'zero', at: 0, color: N.NEUTRAL, lineStyle: 'dashed', title: 'Zero Line' }],
+    },
+    // 旧线性回归（0.8.4 兼容，未在新目录展示）：原生按拟合斜率给曲线红/绿（Curve 的逐 bar 差分∝斜率）；Slope 模式同色
     'indicator/linear_regression': {
         lines: {
             Curve: {

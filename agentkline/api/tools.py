@@ -172,7 +172,7 @@ def list_script_meta():
 
 @api_tool(group="read", path="/api/indicator-catalog", mcp=False)
 def indicator_catalog():
-    """指标目录（v0.5.3，只读）：Vela 0.8.4 的 74 个经典研究 + KDJ 扩展 + 自定义脚本。
+    """指标目录（v0.10.4，只读）：Vela 的 75 个经典研究 + KDJ 扩展 + 自定义脚本。
     每项含 type/script/title/short/title_zh/group/overlay/inputs（参数 schema，颜色已剔除）与
     source（builtin/custom）；自定义脚本归入 group=custom，与内置同 id 时标 shadowed=true。
     前端指标库面板与设置面板共用；脚本执行仍走 add_indicator(script=...)。"""
@@ -440,7 +440,7 @@ def add_indicator(board_id: Optional[str] = None, timeframe: Optional[str] = Non
                   lines: Optional[list] = None, script: Optional[str] = None,
                   params: Optional[dict] = None, scope: Optional[str] = None,
                   display_name: Optional[str] = None):
-    """加一个指标到图上。内置 75 项（74 个 Vela 经典研究 + KDJ，清单见 GET /api/indicator-catalog
+    """加一个指标到图上。内置 76 项（75 个 Vela 经典研究 + KDJ，清单见 GET /api/indicator-catalog
     或 list_scripts 的 indicator/*）；script 用 indicator/<stem>，如 indicator/macd、indicator/bollinger_bands、
     indicator/supertrend。overlay=false 的副图族不传 subplot 时自动建副图；overlay=true 叠在主图。
     params=参数覆盖（键见目录 inputs，如 {'length': 10}）；同一 script 可重复加多个实例（inst_id 自动 sma_2）。
@@ -704,9 +704,10 @@ def pause_paper_session(session_id: str):
 
 @api_tool(group="user_write", method="POST", path="/api/paper/sessions/{session_id}/resume",
           err_status=400)
-def resume_paper_session(session_id: str):
-    """恢复模拟盘；默认跳过暂停/断线期间，从最新已收盘 bar 继续（PAPER_RESUME_SKIP）。"""
-    return service.paper.resume(session_id)
+def resume_paper_session(session_id: str, mode: str = "skip"):
+    """恢复模拟盘。mode=skip（默认）跳过暂停/断线期间，从最新已收盘 bar 继续；
+    mode=replay 从 last_seen 顺序重放缺失 bar（要求数据完整且不超过 max_catchup）。"""
+    return service.paper.resume(session_id, mode=mode)
 
 
 @api_tool(group="user_write", method="POST", path="/api/paper/sessions/{session_id}/stop",

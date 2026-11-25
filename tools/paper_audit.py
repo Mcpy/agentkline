@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""模拟盘审计（0.7.1）：用原始 K 线复核事件账本里的决策/成交/权益，可附加对账。
+"""模拟盘审计（0.7.3）：用原始 K 线复核事件账本里的决策/成交/权益，可附加对账。
 
 用法：
     python tools/paper_audit.py --session-id pp_xxx
     python tools/paper_audit.py --session-id pp_xxx --base http://127.0.0.1:8765
     python tools/paper_audit.py --session-id pp_xxx --reconcile
+    python tools/paper_audit.py --session-id pp_xxx --no-backfill
 
-只读：不启动/停止/修改会话。--reconcile 会额外跑一次 paper vs 回测对账。
-退出码 0=全部可解释；1=发现不一致。
+默认按事件账本首条/末条时间自动回补审计所需 K 线；不会启动/停止/修改
+paper 会话或账本。--no-backfill 可禁用回补，只检查当前已有历史。
+--reconcile 会额外跑一次 paper vs 回测对账。
+退出码 0=全部可解释；1=发现不一致；2=审计/回补前置条件失败。
 """
 from __future__ import annotations
 
@@ -20,6 +23,16 @@ import urllib.request
 TOL_PRICE = 1e-8
 TOL_EQ = 1e-6
 PROTECTION_REASONS = {"stop_loss", "take_profit"}
+_TF_MS = {"m": 60_000, "h": 3_600_000, "d": 86_400_000,
+          "w": 7 * 86_400_000, "M": 30 * 86_400_000}
+
+
+def tf_span_ms(tf: str):
+    try:
+        n = int(str(tf)[:-1])
+        return n * _TF_MS[str(tf)[-1]]
+    except (ValueError, KeyError, IndexError):
+        return None
 
 
 def get_json(url: str):
@@ -61,12 +74,71 @@ def close_enough(a, b, tol) -> bool:
     return abs(float(a) - float(b)) <= max(tol, abs(float(b)) * tol)
 
 
+def current_bars(base: str, board_id: str, tf: str, limit: int = 5000):
+    q = urllib.parse.urlencode({"board_id": board_id, "timeframe": tf,
+                                "limit": max(1, int(limit))})
+    data = get_json(f"{base}/api/kline?{q}")
+    return data.get("ohlcv") or []
+
+
+def ensure_audit_history(base: str, sess: dict, events: list[dict],
+                         max_calls: int = 30, chunk: int = 1000) -> dict:
+    """Backfill only the history needed by the event ledger.
+
+    The old audit assumed the in-memory K-line window still covered every
+    event; after a restart it may only contain the latest 200 bars.  This
+    computes the first event timestamp and prepends just enough chunks.
+    """
+    board_id, tf = sess["board_id"], sess["timeframe"]
+    span = tf_span_ms(tf)
+    stamps = []
+    for ev in events:
+        if ev.get("kind") not in ("decision", "equity", "fill"):
+            continue
+        try:
+            stamps.append(int(ev["bar_ts"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not stamps or not span:
+        return {"needed": 0, "prepended": 0, "covered": True, "calls": 0}
+    first_ts, last_ts = min(stamps), max(stamps)
+    needed = int((last_ts - first_ts) / span) + 1
+    # Check the exact first event bar, not just the earliest of a 5000-bar page:
+    # a 1m two-week session can have far more than the page limit.
+    if bar_at(base, board_id, tf, first_ts):
+        return {"needed": needed, "first_event_ts": first_ts,
+                "prepended": 0, "calls": 0, "covered": True}
+    bq = urllib.parse.quote(board_id, safe="")
+    tq = urllib.parse.quote(tf, safe="")
+    prepended = calls = 0
+    covered = False
+    while calls < max_calls:
+        limit = int(chunk) if calls else max(1, min(int(chunk), needed + 100))
+        out = post_json(
+            f"{base}/api/board/{bq}/timeframe/{tq}/backfill",
+            {"limit": limit})
+        n = int(out.get("prepended") or 0)
+        calls += 1
+        if n <= 0:
+            break
+        prepended += n
+        if bar_at(base, board_id, tf, first_ts):
+            covered = True
+            break
+    return {"needed": needed, "first_event_ts": first_ts,
+            "prepended": prepended, "calls": calls, "covered": covered}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--session-id", required=True)
     ap.add_argument("--base", default="http://127.0.0.1:8765")
     ap.add_argument("--reconcile", action="store_true",
                     help="额外跑一次 paper vs 回测对账")
+    ap.add_argument("--no-backfill", action="store_true",
+                    help="不自动回补审计所需历史")
+    ap.add_argument("--backfill-max-calls", type=int, default=30,
+                    help="最多回补调用次数（默认 30）")
     args = ap.parse_args()
 
     base = args.base.rstrip("/")
@@ -79,6 +151,20 @@ def main() -> int:
         return 2
 
     board_id, tf = sess["board_id"], sess["timeframe"]
+    if not args.no_backfill:
+        try:
+            hist = ensure_audit_history(base, sess, events,
+                                        max_calls=max(1, args.backfill_max_calls))
+        except Exception as exc:  # noqa: BLE001
+            print(f"审计历史回补失败: {exc}", file=sys.stderr)
+            return 2
+        if hist.get("calls"):
+            print(f"回补: 需要约 {hist.get('needed')} 根 / 补入 {hist.get('prepended')} 根 / "
+                  f"调用 {hist.get('calls')} 次")
+        if not hist.get("covered"):
+            print("❌ PAPER_AUDIT_HISTORY_INSUFFICIENT: 数据源无法覆盖第一条事件所需历史",
+                  file=sys.stderr)
+            return 2
     fee_bps = float(sess.get("fee_bps") or 0)
     slip = float(sess.get("slippage_bps") or 0) / 10_000.0
     bars = {}

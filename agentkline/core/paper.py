@@ -32,7 +32,15 @@ MAX_WINDOW_BARS = 50000
 DEFAULT_MAX_CATCHUP_BARS = 500
 MAX_CATCHUP_BARS = 5000
 DEFAULT_SETTLE_MS = 15_000   # bar 收盘后再等 15s，避开交易所最后一跳修订
+# 0.7.3：批量补账（replay/断线追平）时，收盘不足该时长的 bar 先不记账，留给下一轮。
+# 交易所个别 kline 在收盘后 ~1min 内仍可能修订收盘价；正常逐根处理天然有下一根到达的
+# 缓冲，只有批量追平会立即给刚收盘的 bar 标记权益，故仅对 len(new)>1 的批次生效。
+DEFAULT_REPLAY_MIN_AGE_MS = 60_000
 DEFAULT_LEDGER_KEEP = 10_000  # fills/trades 内存/账本上限（防长跑无限增长）
+DEFAULT_ENGINE_RETRIES = 3
+DEFAULT_ENGINE_RETRY_DELAY_S = 0.5
+DEFAULT_AUTO_RECOVERY_ATTEMPTS = 3
+DEFAULT_AUTO_RECOVERY_DELAY_S = 30.0
 
 _ACTIVE_STATUSES = ("created", "running", "paused", "paused_gap", "error")
 _TERMINAL = ("stopped",)
@@ -53,6 +61,24 @@ def _tf_ms(tf: str):
         return None
     ms = _TF_MS.get(unit)
     return n * ms if ms else None
+
+
+class PaperEngineError(RuntimeError):
+    """Engine subprocess failure with the stderr/detail that caused it."""
+
+    def __init__(self, code: str, message: str, *, attempts: int = 1,
+                 detail: dict = None, stderr_tail: str = ""):
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
+        self.attempts = max(1, int(attempts or 1))
+        self.detail = detail or {}
+        self.stderr_tail = (stderr_tail or "")[-4000:]
+
+    def to_dict(self) -> dict:
+        return {"code": "PAPER_ENGINE_ERROR", "error_code": self.code,
+                "message": self.message, "attempts": self.attempts,
+                "detail": self.detail, "stderr": self.stderr_tail}
 
 
 def _is_closed(bar: dict, tf: str, now_ms: int, settle_ms: int = 0) -> bool:
@@ -125,8 +151,20 @@ class PaperManager:
             10, MAX_CATCHUP_BARS)
         self.settle_ms = self._clamp_int(
             limits.get("paper_settle_ms", DEFAULT_SETTLE_MS), 0, 300_000)
+        self.replay_min_age_ms = self._clamp_int(
+            limits.get("paper_replay_min_age_ms", DEFAULT_REPLAY_MIN_AGE_MS),
+            0, 600_000)
         self.ledger_keep = self._clamp_int(
             limits.get("paper_ledger_keep", DEFAULT_LEDGER_KEEP), 100, 1_000_000)
+        self.engine_retries = self._clamp_int(
+            limits.get("paper_engine_retries", DEFAULT_ENGINE_RETRIES), 1, 5)
+        self.engine_retry_delay_s = max(0.0, min(5.0, float(
+            limits.get("paper_engine_retry_delay_s", DEFAULT_ENGINE_RETRY_DELAY_S))))
+        self.auto_recovery_attempts = self._clamp_int(
+            limits.get("paper_auto_recovery_attempts", DEFAULT_AUTO_RECOVERY_ATTEMPTS),
+            0, 10)
+        self.auto_recovery_delay_s = max(0.1, min(300.0, float(
+            limits.get("paper_auto_recovery_delay_s", DEFAULT_AUTO_RECOVERY_DELAY_S))))
         self.sessions: dict[str, dict] = {}
         self._wake: dict[str, threading.Event] = {}
         self._threads: dict[str, threading.Thread] = {}
@@ -136,6 +174,10 @@ class PaperManager:
         self._stopping = False
         self._stop_evt = threading.Event()
         self._process_errors = 0
+        self._recovery_attempts: dict[str, int] = {}
+        # 0.7.3：replay 恢复后到「最新已收盘 bar 足够旧」之前，批量追平需推迟过新的 bar
+        self._replay_guard: set[str] = set()
+        self._recovery_timers: dict[str, threading.Timer] = {}
         # 仅测试用故障注入：callable(point, **meta)；生产默认为 None。
         self.fault_hook = None
         self._load()
@@ -167,7 +209,10 @@ class PaperManager:
             self.sessions[s["session_id"]] = s
             if s.get("status") == "running":
                 # v0.7.2：服务重启/崩溃后 running 会话自动继续；用户主动暂停仍是 paused。
-                # 先记一条恢复事件，再启动 worker；窗口/参数/游标全部保持冻结。
+                # 先清掉上一轮已恢复的 last_error，再记恢复事件；否则重启后旧红色错误条会复活。
+                s["last_error"] = None
+                if isinstance(s.get("state"), dict):
+                    s["state"].pop("last_error_detail", None)
                 ev = {"ts": _now_ms(), "bar_ts": s.get("last_seen_ts"),
                       "kind": "resumed",
                       "payload": {"code": "PAPER_RESUMED_AFTER_RESTART",
@@ -178,7 +223,8 @@ class PaperManager:
                 if self.store:
                     try:
                         self.store.save_paper_step(
-                            s["session_id"], state=s.get("state") or {}, events=[ev])
+                            s["session_id"], state=s.get("state") or {}, events=[ev],
+                            clear_last_error=True)
                     except Exception:
                         logger.exception("paper 恢复事件写入失败: %s", s["session_id"])
                 resumed.append(s["session_id"])
@@ -187,6 +233,9 @@ class PaperManager:
             logger.info("paper 恢复: %d 个会话（running=%d, auto_resume=%d）",
                         len(rows), sum(1 for s in rows if s.get("status") == "running"),
                         len(resumed))
+            for s in rows:
+                if s.get("status") == "error":
+                    self._schedule_auto_recovery(s)
 
     def _ensure_window_meta(self, s: dict) -> None:
         """兼容 0.7.0 会话：补齐窗口元数据，不改已冻结的 window_bars。"""
@@ -298,6 +347,7 @@ class PaperManager:
                     "wake_pending": bool(
                         self._wake.get(s.get("session_id"), threading.Event()).is_set()),
                     "last_error": s.get("last_error"),
+                    "last_error_detail": st.get("last_error_detail"),
                     "equity": st.get("equity"),
                     "window_actual": self._window_info(s).get("actual"),
                 })
@@ -317,6 +367,7 @@ class PaperManager:
                     "worker_errors": self._process_errors,
                     "max_catchup": self.max_catchup,
                     "settle_ms": self.settle_ms,
+                    "replay_min_age_ms": self.replay_min_age_ms,
                     "ledger_keep": self.ledger_keep,
                     "events_keep": PAPER_EVENTS_KEEP,
                 },
@@ -443,10 +494,65 @@ class PaperManager:
     def start(self, session_id: str) -> dict:
         return self._activate(session_id, first=True)
 
-    def resume(self, session_id: str) -> dict:
-        return self._activate(session_id, first=False)
+    def resume(self, session_id: str, mode: str = "skip") -> dict:
+        return self._activate(session_id, first=False, mode=mode)
 
-    def _activate(self, session_id: str, first: bool) -> dict:
+    def _replay_locked(self, s: dict, bars: list[dict], latest: dict) -> dict:
+        """Resume from last_seen and replay all missing closed bars.
+
+        Caller holds self._lock.  last_seen is deliberately *not* moved to the
+        latest bar: the normal worker then processes every missed bar in order.
+        """
+        now = _now_ms()
+        last_seen = s.get("last_seen_ts") or s.get("cursor_ts")
+        if last_seen is None:
+            return {"error": "PAPER_REPLAY_EMPTY: 没有可用的 last_seen 游标",
+                    "code": "PAPER_REPLAY_EMPTY"}
+        last_seen = int(last_seen)
+        new = [b for b in bars
+               if int(b["timestamp"]) > last_seen
+               and _is_closed(b, s["timeframe"], now, self.settle_ms)]
+        if len(new) > self.max_catchup:
+            return {"error": (f"PAPER_REPLAY_TOO_LARGE: 待重放 {len(new)} 根 > 上限 "
+                              f"{self.max_catchup}；请用 skip 或调大 max_catchup"),
+                    "code": "PAPER_REPLAY_TOO_LARGE", "bars": len(new)}
+        span = _tf_ms(s["timeframe"])
+        if span:
+            prev = last_seen
+            missing = []
+            for b in new:
+                ts = int(b["timestamp"])
+                if ts - prev > span * 1.5:
+                    missing.append({"from": prev, "to": ts,
+                                    "bars": max(1, round((ts - prev) / float(span)) - 1)})
+                prev = ts
+            if missing:
+                return {"error": "PAPER_REPLAY_GAP: 缺口内数据不完整，拒绝重放",
+                        "code": "PAPER_REPLAY_GAP", "missing": missing[:20]}
+        latest_ts = int(latest["timestamp"])
+        timer = self._recovery_timers.pop(s["session_id"], None)
+        if timer:
+            timer.cancel()
+        self._recovery_attempts.pop(s["session_id"], None)
+        s["status"] = "running"
+        s["last_error"] = None
+        s["state"].pop("last_error_detail", None)
+        ev = {"ts": now, "bar_ts": latest_ts, "kind": "resumed",
+              "payload": {"code": "PAPER_RESUME_REPLAY", "mode": "replay",
+                          "from_ts": last_seen, "to_ts": latest_ts,
+                          "bars": len(new)}}
+        self._replay_guard.add(s["session_id"])
+        if self.store:
+            self.store.save_paper_step(
+                s["session_id"], state=s["state"], events=[ev], status="running",
+                clear_last_error=True)
+        self._ensure_worker(s["session_id"])
+        self._wake.setdefault(s["session_id"], threading.Event()).set()
+        self._broadcast_events(s, [ev])
+        self._bc("paper_resumed", s)
+        return self._public(s)
+
+    def _activate(self, session_id: str, first: bool, mode: str = "skip") -> dict:
         with self._lock:
             s = self._get(session_id)
             if not s:
@@ -456,6 +562,9 @@ class PaperManager:
             if s["status"] == "stopped":
                 return {"error": "PAPER_STOPPED: 已停止的会话不能重新启动",
                         "code": "PAPER_STOPPED"}
+            if not first and mode not in ("skip", "replay"):
+                return {"error": "PAPER_RESUME_MODE: mode 需为 skip/replay",
+                        "code": "PAPER_RESUME_MODE"}
             bars = self.service.state.get_ohlcv(s["board_id"], s["timeframe"]) or []
             latest = _latest_closed(bars, s["timeframe"], _now_ms(), self.settle_ms)
             if not latest:
@@ -478,6 +587,8 @@ class PaperManager:
                 return {"error": (f"PAPER_WARMUP_INSUFFICIENT: 策略需要超过 {warmup} 根，"
                                   f"当前只有 {len(bars)} 根；已尝试自动补历史仍不足"),
                         "code": "PAPER_WARMUP_INSUFFICIENT"}
+            if not first and mode == "replay":
+                return self._replay_locked(s, bars, latest)
             latest_ts = int(latest["timestamp"])
             cursor = s.get("cursor_ts") or latest_ts
             skipped = sum(1 for b in bars
@@ -507,6 +618,8 @@ class PaperManager:
             s["last_seen_ts"] = latest_ts
             s["status"] = "running"
             s["last_error"] = None
+            s["state"].pop("last_error_detail", None)
+            self._recovery_attempts.pop(session_id, None)
             s["state"]["window_actual"] = winfo.get("actual")
             s["state"]["window_short"] = bool(winfo.get("short"))
             s["state"]["window_truncated"] = bool(winfo.get("truncated"))
@@ -532,7 +645,8 @@ class PaperManager:
                 self.store.save_paper_step(
                     session_id, state=s["state"], events=events,
                     equity_points=init_points or None,
-                    cursor_ts=latest_ts, last_seen_ts=latest_ts, status="running")
+                    cursor_ts=latest_ts, last_seen_ts=latest_ts, status="running",
+                    clear_last_error=True)
             self._ensure_worker(session_id)
             self._wake.setdefault(session_id, threading.Event()).set()
         self._broadcast_events(s, events)
@@ -1028,6 +1142,9 @@ class PaperManager:
         with self._lock:
             self._stopping = True
             self._stop_evt.set()
+            for timer in self._recovery_timers.values():
+                timer.cancel()
+            self._recovery_timers.clear()
             for sid in list(self.sessions):
                 ev = self._wake.get(sid)
                 if ev:
@@ -1101,6 +1218,60 @@ class PaperManager:
             with self._lock:
                 self._processing.discard(session_id)
 
+    _RETRYABLE_ENGINE_CODES = {"ENGINE_CRASH", "ENGINE_INTERNAL", "RUN_TIMEOUT"}
+
+    def _record_engine_retry(self, s: dict, P: dict, attempt: int,
+                             exc: engine_runner.EngineRunError) -> None:
+        payload = {
+            "code": "PAPER_ENGINE_RETRY",
+            "attempt": int(attempt),
+            "max_attempts": int(self.engine_retries),
+            "error_code": str(getattr(exc, "code", "") or "ENGINE_ERROR"),
+            "message": str(getattr(exc, "message", "") or exc)[:1000],
+            "stderr": (getattr(exc, "stderr_tail", "") or "")[-2000:],
+        }
+        logger.warning("paper engine retry session=%s attempt=%s/%s code=%s",
+                       s.get("session_id"), attempt, self.engine_retries,
+                       payload["error_code"])
+        ev = {"ts": _now_ms(), "bar_ts": int(P.get("timestamp") or 0),
+              "kind": "warning", "payload": payload}
+        if self.store:
+            try:
+                self.store.save_paper_step(s["session_id"], state=s["state"], events=[ev])
+            except Exception:
+                logger.debug("paper engine retry 事件落盘失败", exc_info=True)
+        self._broadcast_events(s, [ev])
+
+    def _signal_with_retry(self, s: dict, spec: dict, P: dict) -> dict:
+        """Run signal; retry only transient engine subprocess failures.
+
+        The previous 0.7.2 path wrapped EngineRunError into a plain RuntimeError,
+        losing stderr/exit/detail.  This keeps the structured error for the API
+        and retries a transient ``ENGINE_CRASH`` / ``RUN_TIMEOUT`` before failing
+        the whole session.
+        """
+        last = None
+        for attempt in range(1, self.engine_retries + 1):
+            try:
+                return engine_runner.signal_spec(spec, timeout=60.0)
+            except engine_runner.EngineRunError as exc:
+                last = exc
+                retryable = str(getattr(exc, "code", "")) in self._RETRYABLE_ENGINE_CODES
+                if not retryable or attempt >= self.engine_retries:
+                    break
+                self._record_engine_retry(s, P, attempt, exc)
+                if self.engine_retry_delay_s:
+                    time.sleep(self.engine_retry_delay_s * attempt)
+        if last is None:  # defensive; signal_spec normally raises or returns
+            raise PaperEngineError("ENGINE_CRASH", "引擎未返回结果")
+        raise PaperEngineError(
+            str(getattr(last, "code", "") or "ENGINE_CRASH"),
+            str(getattr(last, "message", "") or last),
+            attempts=self.engine_retries,
+            detail=last.to_dict() if hasattr(last, "to_dict") else {},
+            stderr_tail=getattr(last, "stderr_tail", "") or "",
+        )
+
     def _process_steps(self, session_id: str, now_ms: int = None) -> None:
         s = self._get(session_id)
         if not s:
@@ -1132,9 +1303,10 @@ class PaperManager:
 
         # 已处理 bar 被修订：只告警，不改游标/历史账本（重启后仍以旧决策为准）。
         self._check_revision(s, bars)
-        self._check_stale(s, now)
 
         if not new:
+            # 没有新 bar 时检查是否断流；补算/重放期间不应误报 stale。
+            self._check_stale(s, now)
             # 没有新 bar 时也要检测“短历史替换”：数据源窗口变短会让策略实际窗口骤降。
             self._sync_window_actual(s, bars, latest)
             if int(latest["timestamp"]) > int(s.get("last_seen_ts") or 0):
@@ -1147,6 +1319,29 @@ class PaperManager:
         if len(new) > self.max_catchup:
             self._pause_gap(s, len(new), new[0], new[-1])
             return
+
+        # 0.7.3：replay 恢复后的批量追平，最新一根可能刚收盘、交易所尚未定稿。
+        # 立即按暂定价标记权益会让账本与最终 K 线不一致（D14 门禁发现）。
+        # 只在 replay 保护期内推迟；正常逐根处理不受影响（天然有下一根到来的缓冲）。
+        if session_id in self._replay_guard and self.replay_min_age_ms > 0:
+            span = _tf_ms(s["timeframe"]) or 0
+            min_age = int(self.replay_min_age_ms)
+            newest = closed[-1]
+            if now - (int(newest["timestamp"]) + span) >= min_age:
+                # 最新已收盘 bar 已过定稿窗：保护结束，恢复正常处理
+                self._replay_guard.discard(session_id)
+            else:
+                kept = [b for b in new
+                        if now - (int(b["timestamp"]) + span) >= min_age]
+                if len(kept) < len(new):
+                    logger.info(
+                        "paper replay 边界保护: 推迟 %d 根收盘不足 %dms 的 bar（%s）",
+                        len(new) - len(kept), min_age, session_id)
+                    new = kept
+                if not new:
+                    # 全部太新：本轮不推进 last_seen，等它们变旧后正常处理。
+                    self._check_stale(s, now)
+                    return
 
         gap_events = self._gap_events(s, last_seen, new)
         self._fault("after_receive", session_id=session_id,
@@ -1189,10 +1384,7 @@ class PaperManager:
                         "direction": s.get("direction") or "long_only"},
                 "timeframe": s["timeframe"],
             }
-            try:
-                out = engine_runner.signal_spec(spec, timeout=60.0)
-            except engine_runner.EngineRunError as exc:
-                raise RuntimeError(f"{exc.code}: {exc.message}") from exc
+            out = self._signal_with_retry(s, spec, P)
             target = float(out.get("target") or 0.0)
             # 成交 reason 与回测驱动保持同一口径：空 reason 非零仓由撮合器补 signal，
             # 平仓由撮合器补 target_flat；这里不要把空串提前变成 signal。
@@ -1252,7 +1444,12 @@ class PaperManager:
                 self.store.save_paper_step(
                     session_id, state=state, events=evs,
                     equity_points=[[int(B["timestamp"]), equity]],
-                    cursor_ts=s["cursor_ts"], last_seen_ts=s["last_seen_ts"])
+                    cursor_ts=s["cursor_ts"], last_seen_ts=s["last_seen_ts"],
+                    clear_last_error=True)
+            with self._lock:
+                self._recovery_attempts.pop(session_id, None)
+                if isinstance(state, dict):
+                    state.pop("last_error_detail", None)
             self._fault("after_persist", session_id=session_id,
                         bar_ts=int(B["timestamp"]), events=len(evs))
             self._broadcast_events(s, evs)
@@ -1446,16 +1643,99 @@ class PaperManager:
         self._broadcast_events(s, [ev])
         self._bc("paper_paused", s)
 
+    @staticmethod
+    def _is_retryable_error(st: dict) -> bool:
+        detail = st.get("last_error_detail") or {}
+        code = str(detail.get("error_code") or detail.get("code") or "")
+        if code in PaperManager._RETRYABLE_ENGINE_CODES:
+            return True
+        text = str(st.get("last_error") or "")
+        return any(c in text for c in ("ENGINE_CRASH", "ENGINE_INTERNAL", "RUN_TIMEOUT"))
+
+    def _schedule_auto_recovery(self, s: dict) -> None:
+        """Retry a transient engine failure from last_seen, never from latest.
+
+        Keeping last_seen means the worker replays missed bars (up to
+        max_catchup), matching the explicit replay recovery path.
+        """
+        if self.auto_recovery_attempts <= 0 or self._stopping:
+            return
+        sid = s.get("session_id")
+        if not sid:
+            return
+        with self._lock:
+            current = self._get(sid)
+            if not current or current.get("status") != "error":
+                return
+            if not self._is_retryable_error(current):
+                return
+            used = int(self._recovery_attempts.get(sid, 0))
+            if used >= self.auto_recovery_attempts:
+                return
+            if sid in self._recovery_timers:
+                return
+            attempt = used + 1
+            self._recovery_attempts[sid] = attempt
+            timer = threading.Timer(
+                self.auto_recovery_delay_s, self._auto_recover, args=(sid, attempt))
+            timer.daemon = True
+            self._recovery_timers[sid] = timer
+            timer.start()
+
+    def _auto_recover(self, session_id: str, attempt: int) -> None:
+        with self._lock:
+            self._recovery_timers.pop(session_id, None)
+            s = self._get(session_id)
+            if self._stopping or not s or s.get("status") != "error":
+                return
+            if not self._is_retryable_error(s):
+                return
+            s["status"] = "running"
+            s["last_error"] = None
+            if isinstance(s.get("state"), dict):
+                s["state"].pop("last_error_detail", None)
+            ev = {"ts": _now_ms(), "bar_ts": s.get("last_seen_ts"), "kind": "resumed",
+                  "payload": {"code": "PAPER_AUTO_RECOVERY",
+                              "attempt": int(attempt),
+                              "max_attempts": int(self.auto_recovery_attempts),
+                              "from_last_seen_ts": s.get("last_seen_ts")}}
+            if self.store:
+                try:
+                    self.store.save_paper_step(
+                        session_id, state=s["state"], events=[ev], status="running",
+                        clear_last_error=True)
+                except Exception:
+                    logger.debug("paper auto recovery 落盘失败", exc_info=True)
+            self._ensure_worker(session_id)
+            self._wake.setdefault(session_id, threading.Event()).set()
+        self._broadcast_events(s, [ev])
+        self._bc("paper_resumed", s)
+
     def _fail(self, session_id: str, exc: Exception) -> None:
+        detail = {}
+        if isinstance(exc, PaperEngineError):
+            detail = exc.to_dict()
+            msg = f"{exc.code}: {exc.message} (attempts={exc.attempts})"
+        else:
+            msg = f"{type(exc).__name__}: {exc}"
+            if "ENGINE_CRASH" in msg or "ENGINE_INTERNAL" in msg:
+                detail = {"code": "PAPER_ENGINE_ERROR",
+                          "error_code": "ENGINE_CRASH", "message": msg[:1000],
+                          "attempts": 1, "stderr": ""}
         with self._lock:
             s = self._get(session_id)
             if not s:
                 return
-            msg = f"{type(exc).__name__}: {exc}"
             s["status"] = "error"
             s["last_error"] = msg[:2000]
+            if isinstance(s.get("state"), dict) and detail:
+                s["state"]["last_error_detail"] = detail
+            payload = {"code": "PAPER_ERROR", "message": msg[:2000]}
+            if detail:
+                payload.update({k: v for k, v in detail.items() if k != "code"})
+                payload["error_detail"] = detail
             ev = {"ts": _now_ms(), "bar_ts": s.get("last_seen_ts"), "kind": "error",
-                  "payload": {"code": "PAPER_ERROR", "message": msg[:2000]}}
+                  "payload": payload}
             if self.store:
                 try:
                     self.store.save_paper_step(session_id, state=s["state"], events=[ev],
@@ -1465,6 +1745,7 @@ class PaperManager:
                     logger.debug("paper error 落盘失败（停机中）", exc_info=True)
         self._broadcast_events(s, [ev])
         self._bc("paper_error", s)
+        self._schedule_auto_recovery(s)
 
     # ---------------------------- 结果物化 ----------------------------
     def _save_reconcile_result(self, s: dict, bars: list[dict], bt: dict,
@@ -1723,6 +2004,7 @@ class PaperManager:
             "last_decision": st.get("last_decision"),
             "last_fill": st.get("last_fill"),
             "window": winfo,
+            "last_error_detail": st.get("last_error_detail"),
             "window_mode": winfo["mode"],
             "window_requested": winfo["requested"],
             "window_resolved": winfo["resolved"],

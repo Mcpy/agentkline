@@ -1,4 +1,4 @@
-"""指标目录：内置 75 项（indicator_spec.json）+ 运行时自定义脚本。
+"""指标目录：内置 76 项（indicator_spec.json）+ 运行时自定义脚本。
 
 内置目录由 tools/gen_indicator_spec.mjs 从 vendored Vela bundle 生成；
 自定义脚本（scripts_dir/indicator/*.py，source=custom）在请求时合并进来，

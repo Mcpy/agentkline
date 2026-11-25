@@ -38,7 +38,7 @@ def _to_ms(v):
 class AgentKlineService:
     """AgentKline 业务核心"""
 
-    VERSION = "0.7.2"
+    VERSION = "0.7.3"
 
     def __init__(self, scripts_dir: str, limits: dict = None, data_dir: str = None):
         limits = limits or {}

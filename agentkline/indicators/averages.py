@@ -101,6 +101,7 @@ def ma_envelope(params, bars):
 
 
 def linear_regression(params, bars):
+    """0.8.4 兼容：旧 type=linear-regression（Curve/Slope）。新目录改用 lsma + slope。"""
     src = M.source_values(bars, M.ps(params, "source", "Close"))
     n = M.pi(params, "length", 100)
     curve = M.linreg(src, n, 0)
@@ -108,6 +109,21 @@ def linear_regression(params, bars):
         slope = M.zipv(curve, M.linreg(src, n, 1), lambda a, b: a - b)
         return {"lines": [M.line("Slope", slope)]}
     return {"lines": [M.line("Curve", curve)]}
+
+
+def lsma(params, bars):
+    src = M.source_values(bars, M.ps(params, "source", "Close"))
+    n = M.pi(params, "length", 25)
+    off = M.pi(params, "offset", 0)
+    return {"lines": [M.line("LSMA", M.linreg(src, n, off))]}
+
+
+def linear_regression_slope(params, bars):
+    src = M.source_values(bars, M.ps(params, "source", "Close"))
+    n = M.pi(params, "length", 100)
+    slope = M.zipv(M.linreg(src, n, 0), M.linreg(src, n, 1), lambda a, b: a - b)
+    return {"lines": [M.line("Slope", slope)],
+            "levels": [{"key": "zero", "price": 0, "lineStyle": "dashed", "title": "Zero Line"}]}
 
 
 STUDIES = {
@@ -119,4 +135,6 @@ STUDIES = {
     "vidya": vidya,
     "ma-envelope": ma_envelope,
     "linear-regression": linear_regression,
+    "lsma": lsma,
+    "linear-regression-slope": linear_regression_slope,
 }

@@ -569,20 +569,20 @@ def test(port: int, token: str = None):
     subnames = [x.get("name") if isinstance(x, dict) else x for x in (r.json().get("subplots") or [])]
     check("副图列表含 macd", "macd" in subnames, str(subnames))
 
-    # 指标目录（v0.5.3：74 Vela 经典 + KDJ 扩展）
+    # 指标目录（Vela 0.10.4：75 经典 + KDJ 扩展）
     r = s.get(f"{base}/api/indicator-catalog")
     cat = r.json() if r.status_code == 200 else {}
     cinds = cat.get("indicators") or []
     _builtin = [x for x in cinds if x.get("source") == "builtin"]
     _groups = {g.get("id") for g in (cat.get("groups") or [])}
-    check("指标目录 200/内置 75 项", r.status_code == 200 and len(_builtin) == 75,
+    check("指标目录 200/内置 76 项", r.status_code == 200 and len(_builtin) == 76,
           f"{r.status_code} builtin={len(_builtin)} total={len(cinds)}")
     check("指标目录 7 内置分类", {"average", "band", "oscillator", "trend",
           "volatility", "volume", "overlay"} <= _groups, str(_groups))
     check("目录脚本 id 唯一", len({x["script"] for x in cinds}) == len(cinds), "")
     check("目录参数 schema 无 color", all(i.get("type") != "color"
           for x in cinds for i in x.get("inputs") or []), "")
-    check("目录含 Vela 74 + KDJ", sum(1 for x in _builtin if x["type"] != "kdj") == 74
+    check("目录含 Vela 75 + KDJ", sum(1 for x in _builtin if x["type"] != "kdj") == 75
           and any(x["type"] == "kdj" for x in _builtin), "")
     check("目录 overlay/pane 归属齐全", all(isinstance(x.get("overlay"), bool) for x in cinds), "")
     check("目录含 custom 分类", any(g.get("id") == "custom" for g in cat.get("groups") or []), "")
