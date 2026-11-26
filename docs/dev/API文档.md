@@ -80,7 +80,7 @@ CSV 入图 = 内置 `datasource/csv` 脚本（path 归操作参数，IDENTITY=[]
 |---|---|---|---|
 | GET | `/api/scripts` | exec | 双根脚本表 `[{id,kind,source,display,desc,params,param_meta,caps,identity}]`（kind 含 optimizer） |
 | GET | `/api/scripts/meta` | read | 脚本元数据精简面 `[{id,kind,source,display,desc,params}]`：web 端口可读（设置面板补 PARAMS 默认值），无 MCP 面 |
-| GET | `/api/indicator-catalog` | read | 指标目录（内置 76 项 = 75 Vela 经典 + KDJ，并合并自定义脚本）：`{vela, groups[], indicators[], custom_count}`；每项含 type/script/title/short/title_zh/group/overlay/inputs（参数 schema，颜色已剔除）与 source（builtin/custom）。自定义脚本归 group=custom，与内置同 id 时标 shadowed=true，不重复出卡。指标库面板与设置面板共用，无 MCP 面 |
+| GET | `/api/indicator-catalog` | read | 指标目录（内置 103 项 = 102 Vela 经典 + KDJ，并合并自定义脚本）：`{vela, groups[], indicators[], custom_count}`；每项含 type/script/title/short/title_zh/group/overlay/inputs（参数 schema，颜色已剔除）与 source（builtin/custom）。自定义脚本归 group=custom，与内置同 id 时标 shadowed=true，不重复出卡。指标库面板与设置面板共用，无 MCP 面 |
 | POST | `/api/scripts` | exec | `save_script`：`{id,code}` 只写 custom，保存即校验（CAPS_MISMATCH/SAVE_SYNTAX/SAVE_NO_MAIN/SAVE_EMPTY）；`strategy/*` 按 signal 契约 AST 校验；`optimizer/*` 要求 `OPTIMIZER_API=1`+`ask`（SAVE_OPTIMIZER_*） |
 | POST | `/api/run-script` | exec | 窄身 `{script,params}`：只执行返回，图上不留痕 |
 | GET | `/api/search` | read | 标的搜索 `?q=&refresh=`：rows=`[{symbol,source,display,has_board}]`；索引=CAPS.symbols 源首用全量+TTL 日级；搜索不穿透交易所 |
@@ -226,7 +226,7 @@ WS 事件：`quotes_update{rows[]}`（面板批量）/ `quote{board_id,price,cha
 
 ## 16. 内置指标库（v0.5.3 全量移植）
 
-- **76 项** = Vela 0.10.4 的 75 个经典研究 + KDJ 产品扩展；`GET /api/indicator-catalog` 是唯一目录真源
+- **103 项** = Vela 0.10.19 的 102 个经典研究 + KDJ 产品扩展；`GET /api/indicator-catalog` 是唯一目录真源
   （`agentkline/resources/indicator_spec.json`，由 `tools/gen_indicator_spec.mjs` 从 vendored bundle 生成）。
 - **单源纪律不变**：值全部由 Python 计算（`agentkline/indicators/`），脚本只做字面元数据 + `registry.run`；
   颜色/线型/填充带/水平线/区带/逐点色由 `visual_spec.js`（+ 生成的 `indicator_visuals.js`）决定。

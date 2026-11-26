@@ -41,7 +41,11 @@ def _hidden(plot: dict) -> bool:
 def _title(plot: dict):
     t = plot.get("title")
     if isinstance(t, dict):
-        return t.get("defaultMessage") or t.get("key")
+        msg = t.get("defaultMessage") or t.get("key") or ""
+        # 0.7.4：展开动态线名模板（如 VWAP 'Upper Band #{n}'），golden 的 title.values 提供实参。
+        for k, v in (t.get("values") or {}).items():
+            msg = msg.replace("#{%s}" % k, str(v))
+        return msg
     return t
 
 

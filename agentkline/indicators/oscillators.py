@@ -1,11 +1,16 @@
-"""振荡器族（Vela 0.8.4 `src/core/native-indicators/classics/oscillators.ts`）。
+"""振荡器族（Vela `src/core/native-indicators/classics/oscillators.ts`，
+0.8.4 基础批 + 0.10.19 新增批）。
 
 逐条移植 Vela 的 JS 实现：保留其递归种子（SMA seed）、NaN 重置窗口、
 `Math.trunc` 取整、零除守卫等语义，不做四舍五入。
 
 缺失值一律为 None（对应 JS NaN）；只输出 golden 中「可见」的 plot
-（anchor、全透明辅助线不输出）。阈值级别由前端视觉规格负责，本模块
-不产出 `levels`（不伪造）。
+（anchor、全透明辅助线不输出）。0.8.4 基础批不产出 `levels`；
+0.10.19 新增批按 descriptor 原样产出 `levels`（与 trend/volume 模块
+同一约定，compare.py 在提供时比对）。颜色承载不可由数值推导的语义时
+（ASI swing 突破、chop-zone 分级）随 line 输出 `colors`（与 averages
+0.10.19 批 Crosses 同一约定）；其余逐 bar 着色与渐变填充带（bands）
+属前端视觉规格，不产出。
 """
 from __future__ import annotations
 
@@ -374,6 +379,308 @@ def ttm_squeeze(params, bars):
     return {"lines": lines}
 
 
+# ---------- 0.10.19 新增：局部原语 ----------
+
+# Vela 经典配色常量（vela.global.js：BULLISH/BEARISH/NEUTRAL/WARNING）
+_BULLISH = "#089981"
+_BEARISH = "#f23645"
+_NEUTRAL = "#787b86"
+_WARNING = "#ff9800"
+
+
+def _channels(hex_color):
+    """JS channels：取 #rrggbb 前三字节；不合法返回 None。"""
+    s = str(hex_color).strip()
+    if len(s) >= 7 and s[0] == "#":
+        body = s[1:7]
+        if all(c in "0123456789abcdefABCDEF" for c in body):
+            return tuple(int(body[i:i + 2], 16) for i in (0, 2, 4))
+    return None
+
+
+def _gradient(value, low, high, from_hex, to_hex):
+    """Vela gradient：RGB 线性插值；Math.round 用 floor(x+0.5) 对齐。"""
+    a, b = _channels(from_hex), _channels(to_hex)
+    if a is None or b is None or not (M.finite(value) and M.finite(low) and M.finite(high)):
+        return from_hex
+    span = high - low
+    t = 0 if span == 0 else max(0.0, min(1.0, (value - low) / span))
+    return "#" + "".join(f"{math.floor(a[k] + (b[k] - a[k]) * t + 0.5):02x}" for k in range(3))
+
+
+def _swing_breakout_colors(values, length, bull, bear, neutral):
+    """Vela swingBreakoutColors：ASI 相对最近确认 swing 高/低的突破着色。
+
+    第 i 根确认 candidate = i-length 处的枢轴：左侧 [candidate-length, candidate)
+    全部 <= 枢轴（swing high）或 >= 枢轴（swing low），右侧 (candidate, i]
+    严格 <（high）或 >（low）；窗口内任何缺失值使两种确认都失败。
+    确认后 swingHigh/swingLow 沿用至下次确认；x 高于 swingHigh 着牛色、
+    低于 swingLow 着熊色，其余中性（未确认时 NaN 比较恒 false → 中性）。
+    """
+    swing_high = None
+    swing_low = None
+    out = []
+    for i, x in enumerate(values):
+        candidate = i - length
+        if candidate - length >= 0:
+            pivot = values[candidate]
+            is_high = M.finite(pivot)
+            is_low = is_high
+            k = candidate - length
+            while k <= i and (is_high or is_low):
+                if k != candidate:
+                    v = values[k]
+                    if not M.finite(v) or (v > pivot if k < candidate else v >= pivot):
+                        is_high = False
+                    if not M.finite(v) or (v < pivot if k < candidate else v <= pivot):
+                        is_low = False
+                k += 1
+            if is_high:
+                swing_high = pivot
+            if is_low:
+                swing_low = pivot
+        if not M.finite(x):
+            out.append(None)
+        elif swing_high is not None and x > swing_high:
+            out.append(bull)
+        elif swing_low is not None and x < swing_low:
+            out.append(bear)
+        else:
+            out.append(neutral)
+    return out
+
+
+def _cumsum(values):
+    """JS cumSum：只累加有效值；首个有效值之前为 None，之后遇缺口沿用累计值。"""
+    out = [None] * len(values)
+    acc = 0.0
+    seen = False
+    for i, x in enumerate(values):
+        if M.finite(x):
+            acc += x
+            seen = True
+        if seen:
+            out[i] = acc
+    return out
+
+
+def _rank_correlation(v, n):
+    """Vela rankCorrelation：窗口内价格秩与时间秩的 Spearman 秩相关。
+
+    价格降序排名（最高 = 1），并列值取平均秩；时间秩最新 = 1（len - k）。
+    RCI = 1 - 6 * Σd² / (n * (n² - 1))，d 为两秩之差。
+    """
+    out = [None] * len(v)
+    if n < 2:
+        return out
+    scale = 6 / (n * (n * n - 1))
+
+    def fold(f, t):
+        w = v[f:t + 1]
+        order = sorted(range(n), key=lambda k: -w[k])
+        rank = [0.0] * n
+        k = 0
+        while k < n:
+            end = k
+            while end + 1 < n and w[order[end + 1]] == w[order[k]]:
+                end += 1
+            shared = (k + end) / 2 + 1
+            for j in range(k, end + 1):
+                rank[order[j]] = shared
+            k = end + 1
+        squares = 0.0
+        for k in range(n):
+            d = n - k - rank[k]
+            squares += d * d
+        return 1 - scale * squares
+
+    return M.windowed(v, n, fold)
+
+
+def _correlation(a, b, n):
+    """Vela correlation：n 窗口 Pearson 相关；窗口缺值则缺失，分母为 0 记 0。"""
+    out = [None] * len(a)
+    if n <= 0:
+        return out
+    for i in range(n - 1, len(a)):
+        f = i - n + 1
+        sa = sb = 0.0
+        ok = True
+        for k in range(f, i + 1):
+            x, y = a[k], b[k]
+            if not (M.finite(x) and M.finite(y)):
+                ok = False
+                break
+            sa += x
+            sb += y
+        if not ok:
+            continue
+        ma, mb = sa / n, sb / n
+        cov = va = vb = 0.0
+        for k in range(f, i + 1):
+            da, db = a[k] - ma, b[k] - mb
+            cov += da * db
+            va += da * da
+            vb += db * db
+        denom = math.sqrt(va * vb)
+        out[i] = 0 if denom == 0 else cov / denom
+    return out
+
+
+# ---------- 0.10.19 新增：研究 ----------
+
+
+def accelerator_oscillator(params, bars):
+    """Vela accelerator：AC = AO - SMA(AO, 5)，AO = SMA(HL2,5) - SMA(HL2,34)。"""
+    hl2 = M.source_values(bars, "HL2")
+    ao = M.sub(M.sma(hl2, 5), M.sma(hl2, 34))
+    ac = M.sub(ao, M.sma(ao, 5))
+    return {"lines": [M.line("AC", ac)],
+            "levels": [{"key": "zero", "price": 0, "lineStyle": "dashed", "title": "Zero Line"}]}
+
+
+def momentum(params, bars):
+    """Vela momentum：source 与其 length 根前值之差（绝对差，非百分比）。"""
+    src = M.source_values(bars, M.ps(params, "source", "Close"))
+    values = M.change(src, M.pi(params, "length", 10))
+    return {"lines": [M.line("Momentum", values)],
+            "levels": [{"key": "zero", "price": 0, "lineStyle": "dashed", "title": "Zero Line"}]}
+
+
+def accumulative_swing_index(params, bars):
+    """Vela accumulativeSwingIndex：Wilder SI 的逐 bar 累计（cumSum）。
+
+    limitMove 是缩放除数（下限 0.1），不是截断；swingLength 只参与
+    swing 突破着色（_swing_breakout_colors）的确认逻辑，不影响 ASI 数值。
+    """
+    limit = max(M.pf(params, "limitMove", 10), 0.1)
+    swing = [None] * len(bars)
+    for i in range(1, len(bars)):
+        b, p = bars[i], bars[i - 1]
+        to_high = abs(b["high"] - p["close"])
+        to_low = abs(b["low"] - p["close"])
+        rng = b["high"] - b["low"]
+        prev_body = abs(p["close"] - p["open"])
+        if to_high >= to_low and to_high >= rng:
+            r = to_high - 0.5 * to_low + 0.25 * prev_body
+        elif to_low >= to_high and to_low >= rng:
+            r = to_low - 0.5 * to_high + 0.25 * prev_body
+        else:
+            r = rng + 0.25 * prev_body
+        weighted = (b["close"] - p["close"] + 0.5 * (b["close"] - b["open"])
+                    + 0.25 * (p["close"] - p["open"]))
+        swing[i] = 0 if r == 0 else 50 * weighted * (max(to_high, to_low) / limit) / r
+    values = _cumsum(swing)
+    colors = _swing_breakout_colors(values, math.trunc(M.pf(params, "swingLength", 10)),
+                                    M.ps(params, "bullColor", _BULLISH),
+                                    M.ps(params, "bearColor", _BEARISH),
+                                    M.ps(params, "color", _NEUTRAL))
+    return {"lines": [M.line("ASI", values, color=M.ps(params, "color", _NEUTRAL), colors=colors)]}
+
+
+def rank_correlation_index(params, bars):
+    """Vela rankCorrelationIndex：价格与时间的秩相关，值域 [-1, 1]。"""
+    src = M.source_values(bars, M.ps(params, "source", "Close"))
+    values = _rank_correlation(src, M.pi(params, "length", 12))
+    ob = M.pf(params, "overbought", 0.8)
+    os_ = M.pf(params, "oversold", -0.8)
+    return {"lines": [M.line("RCI", values)],
+            "levels": [
+                {"key": "overbought", "price": ob, "lineStyle": "dashed", "title": "Overbought"},
+                {"key": "midline", "price": 0, "lineStyle": "dotted", "title": "Midline"},
+                {"key": "oversold", "price": os_, "lineStyle": "dashed", "title": "Oversold"},
+            ]}
+
+
+def majority_rule(params, bars):
+    """Vela majorityRule：窗口内收盘高于前一根收盘的 bar 占比（%）。
+
+    首根 change 为 NaN 且 map 传播 NaN，故窗口从第 length+1 根才齐全。
+    """
+    n = M.pi(params, "length", 14)
+    closed_higher = M.mapv(M.change(M.closes(bars)), lambda d: 1 if d > 0 else 0)
+    values = M.mapv(M.sumv(closed_higher, n), lambda count: 100 * count / n)
+    return {"lines": [M.line("Majority Rule", values)],
+            "levels": [{"key": "zero", "price": 50, "lineStyle": "dashed", "title": "Midline"}]}
+
+
+def advance_decline(params, bars):
+    """Vela advanceDecline：窗口内 close>open 数 / close<open 数。
+
+    平盘 bar（close == open）两边都不计；窗口无下跌 bar 时直接读
+    上涨 bar 数（JS 注释：never a division by zero）。
+    """
+    n = M.pi(params, "length", 10)
+    up = M.sumv([1 if b["close"] > b["open"] else 0 for b in bars], n)
+    down = M.sumv([1 if b["close"] < b["open"] else 0 for b in bars], n)
+    values = M.zipv(up, down, lambda u, d: u if d == 0 else u / d)
+    return {"lines": [M.line("Advance/Decline", values)],
+            "levels": [{"key": "zero", "price": 1, "lineStyle": "dashed", "title": "Even"}]}
+
+
+def trend_strength_index(params, bars):
+    """Vela trendStrength：source 与 bar 序号的 Pearson 相关（非回归斜率）。
+
+    +1 直线上涨、-1 直线下跌、0 无趋势；窗口内价格恒定时分母为 0 记 0。
+    """
+    src = M.source_values(bars, M.ps(params, "source", "Close"))
+    values = _correlation(src, [float(i) for i in range(len(bars))],
+                          M.pi(params, "length", 14))
+    return {"lines": [M.line("Trend Strength", values)],
+            "levels": [{"key": "zero", "price": 0, "lineStyle": "dashed", "title": "Zero Line"}]}
+
+
+# chop-zone 固定参数（Vela 0.10.19 无输入项）
+_CHOP_TREND_LENGTH = 34
+_CHOP_RANGE_LENGTH = 30
+_CHOP_SPAN = 25
+# 分级阈值：|角度| 每越过一档 zone +1（0..4），符号随 rise
+_CHOP_ZONE_EDGES = (0.71, 2.14, 3.57, 5)
+
+
+def _chop_zone(angle):
+    """Vela chopZone：按 |angle| 越过阈值档数分级，符号随 angle。"""
+    zone = sum(1 for edge in _CHOP_ZONE_EDGES if abs(angle) >= edge)
+    return -zone if angle < 0 else zone
+
+
+def chop_zone(params, bars):
+    """Vela chopZone：EMA34 趋势 + 30 根 highest(highs)/lowest(highs) 区间。
+
+    注意 bottom 是「最高价的最低值」而非 lowest(lows)。有效 bar 的值恒为 1，
+    信息在逐 bar 颜色：rise → round(atan(|rise|)·180/π) → 分级（0..±4），
+    zone 0 着 flat 色，其余按 |zone|/4 从 flat 向 bull/bear 渐变。
+    0.10.19 本源不输出 bands/levels（golden 亦无）。
+    """
+    bull = M.ps(params, "bullColor", _BULLISH)
+    bear = M.ps(params, "bearColor", _BEARISH)
+    flat = M.ps(params, "flatColor", _WARNING)
+    trend = M.ema(M.closes(bars), _CHOP_TREND_LENGTH)
+    top = M.highest(M.highs(bars), _CHOP_RANGE_LENGTH)
+    bottom = M.lowest(M.highs(bars), _CHOP_RANGE_LENGTH)
+    values = [None] * len(bars)
+    colors = [None] * len(bars)
+    for i in range(1, len(bars)):
+        now, before = trend[i], trend[i - 1]
+        high, low = top[i], bottom[i]
+        if not (M.finite(now) and M.finite(before) and M.finite(high) and M.finite(low)):
+            continue
+        b = bars[i]
+        typical = (b["high"] + b["low"] + b["close"]) / 3
+        rng = high - low
+        rise = ((now - before) / typical * (_CHOP_SPAN / rng * low)
+                if rng > 0 and typical != 0 else 0)
+        # JS Math.round 半值向上；此处参数恒非负，floor(x+0.5) 等价
+        degrees = math.floor(math.atan(abs(rise)) * 180 / math.pi + 0.5)
+        zone = _chop_zone(-degrees if rise < 0 else degrees)
+        values[i] = 1
+        colors[i] = (flat if zone == 0 else
+                     _gradient(abs(zone), 0, len(_CHOP_ZONE_EDGES), flat,
+                               bull if zone > 0 else bear))
+    return {"lines": [M.line("Chop Zone", values, kind="columns", color=flat,
+                             colors=colors, base=0)]}
+
+
 STUDIES = {
     "rsi": rsi,
     "stochastic": stochastic,
@@ -400,4 +707,12 @@ STUDIES = {
     "balance-of-power": balance_of_power,
     "elder-ray": elder_ray,
     "ttm-squeeze": ttm_squeeze,
+    "accelerator-oscillator": accelerator_oscillator,
+    "momentum": momentum,
+    "accumulative-swing-index": accumulative_swing_index,
+    "rank-correlation-index": rank_correlation_index,
+    "majority-rule": majority_rule,
+    "advance-decline": advance_decline,
+    "trend-strength-index": trend_strength_index,
+    "chop-zone": chop_zone,
 }

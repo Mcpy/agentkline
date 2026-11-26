@@ -1,5 +1,5 @@
 {
-  "vela": "0.10.4",
+  "vela": "0.10.19",
   "generated_by": "tools/gen_indicator_spec.mjs",
   "groups": [
     {
@@ -569,6 +569,489 @@
       ]
     },
     {
+      "type": "ma-cross",
+      "script": "indicator/ma_cross",
+      "title": "MA Cross",
+      "short": "MA Cross",
+      "title_zh": "MA 交叉",
+      "group": "average",
+      "overlay": true,
+      "inputs": [
+        {
+          "key": "shortLength",
+          "title": "Short Length",
+          "type": "int",
+          "defval": 9,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "longLength",
+          "title": "Long Length",
+          "type": "int",
+          "defval": 26,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "source",
+          "title": "Source",
+          "type": "string",
+          "defval": "Close",
+          "options": [
+            "Close",
+            "Open",
+            "High",
+            "Low",
+            "HL2",
+            "HLC3",
+            "OHLC4",
+            "HLCC4"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "ema-cross",
+      "script": "indicator/ema_cross",
+      "title": "EMA Cross",
+      "short": "EMA Cross",
+      "title_zh": "EMA 交叉",
+      "group": "average",
+      "overlay": true,
+      "inputs": [
+        {
+          "key": "shortLength",
+          "title": "Short Length",
+          "type": "int",
+          "defval": 9,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "longLength",
+          "title": "Long Length",
+          "type": "int",
+          "defval": 26,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "source",
+          "title": "Source",
+          "type": "string",
+          "defval": "Close",
+          "options": [
+            "Close",
+            "Open",
+            "High",
+            "Low",
+            "HL2",
+            "HLC3",
+            "OHLC4",
+            "HLCC4"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "ma-with-ema-cross",
+      "script": "indicator/ma_with_ema_cross",
+      "title": "MA with EMA Cross",
+      "short": "MA/EMA Cross",
+      "title_zh": "MA 与 EMA 交叉",
+      "group": "average",
+      "overlay": true,
+      "inputs": [
+        {
+          "key": "maLength",
+          "title": "MA Length",
+          "type": "int",
+          "defval": 10,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "emaLength",
+          "title": "EMA Length",
+          "type": "int",
+          "defval": 10,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "source",
+          "title": "Source",
+          "type": "string",
+          "defval": "Close",
+          "options": [
+            "Close",
+            "Open",
+            "High",
+            "Low",
+            "HL2",
+            "HLC3",
+            "OHLC4",
+            "HLCC4"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "moving-average-double",
+      "script": "indicator/moving_average_double",
+      "title": "Moving Average Double",
+      "short": "MA Double",
+      "title_zh": "双移动平均线",
+      "group": "average",
+      "overlay": true,
+      "inputs": [
+        {
+          "key": "maType",
+          "title": "MA Type",
+          "type": "string",
+          "defval": "SMA",
+          "options": [
+            "SMA",
+            "EMA",
+            "WMA"
+          ]
+        },
+        {
+          "key": "source",
+          "title": "Source",
+          "type": "string",
+          "defval": "Close",
+          "options": [
+            "Close",
+            "Open",
+            "High",
+            "Low",
+            "HL2",
+            "HLC3",
+            "OHLC4",
+            "HLCC4"
+          ]
+        },
+        {
+          "key": "length1",
+          "title": "MA 1 Length",
+          "type": "int",
+          "defval": 14,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "length2",
+          "title": "MA 2 Length",
+          "type": "int",
+          "defval": 21,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        }
+      ]
+    },
+    {
+      "type": "moving-average-triple",
+      "script": "indicator/moving_average_triple",
+      "title": "Moving Average Triple",
+      "short": "MA Triple",
+      "title_zh": "三移动平均线",
+      "group": "average",
+      "overlay": true,
+      "inputs": [
+        {
+          "key": "maType",
+          "title": "MA Type",
+          "type": "string",
+          "defval": "SMA",
+          "options": [
+            "SMA",
+            "EMA",
+            "WMA"
+          ]
+        },
+        {
+          "key": "source",
+          "title": "Source",
+          "type": "string",
+          "defval": "Close",
+          "options": [
+            "Close",
+            "Open",
+            "High",
+            "Low",
+            "HL2",
+            "HLC3",
+            "OHLC4",
+            "HLCC4"
+          ]
+        },
+        {
+          "key": "length1",
+          "title": "MA 1 Length",
+          "type": "int",
+          "defval": 14,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "length2",
+          "title": "MA 2 Length",
+          "type": "int",
+          "defval": 21,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "length3",
+          "title": "MA 3 Length",
+          "type": "int",
+          "defval": 35,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        }
+      ]
+    },
+    {
+      "type": "moving-average-multiple",
+      "script": "indicator/moving_average_multiple",
+      "title": "Moving Average Multiple",
+      "short": "MA Multiple",
+      "title_zh": "多重移动平均线",
+      "group": "average",
+      "overlay": true,
+      "inputs": [
+        {
+          "key": "maType",
+          "title": "MA Type",
+          "type": "string",
+          "defval": "SMA",
+          "options": [
+            "SMA",
+            "EMA",
+            "WMA"
+          ]
+        },
+        {
+          "key": "source",
+          "title": "Source",
+          "type": "string",
+          "defval": "Close",
+          "options": [
+            "Close",
+            "Open",
+            "High",
+            "Low",
+            "HL2",
+            "HLC3",
+            "OHLC4",
+            "HLCC4"
+          ]
+        },
+        {
+          "key": "length1",
+          "title": "MA 1 Length",
+          "type": "int",
+          "defval": 14,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "length2",
+          "title": "MA 2 Length",
+          "type": "int",
+          "defval": 21,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "length3",
+          "title": "MA 3 Length",
+          "type": "int",
+          "defval": 35,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "length4",
+          "title": "MA 4 Length",
+          "type": "int",
+          "defval": 50,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "length5",
+          "title": "MA 5 Length",
+          "type": "int",
+          "defval": 100,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "length6",
+          "title": "MA 6 Length",
+          "type": "int",
+          "defval": 200,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        }
+      ]
+    },
+    {
+      "type": "guppy-multiple-moving-average",
+      "script": "indicator/guppy_multiple_moving_average",
+      "title": "Guppy Multiple Moving Average",
+      "short": "GMMA",
+      "title_zh": "顾比复合移动平均线",
+      "group": "average",
+      "overlay": true,
+      "inputs": [
+        {
+          "key": "source",
+          "title": "Source",
+          "type": "string",
+          "defval": "Close",
+          "options": [
+            "Close",
+            "Open",
+            "High",
+            "Low",
+            "HL2",
+            "HLC3",
+            "OHLC4",
+            "HLCC4"
+          ]
+        },
+        {
+          "key": "trader1",
+          "title": "Trader EMA 1 Length",
+          "type": "int",
+          "defval": 3,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "trader2",
+          "title": "Trader EMA 2 Length",
+          "type": "int",
+          "defval": 5,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "trader3",
+          "title": "Trader EMA 3 Length",
+          "type": "int",
+          "defval": 8,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "trader4",
+          "title": "Trader EMA 4 Length",
+          "type": "int",
+          "defval": 10,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "trader5",
+          "title": "Trader EMA 5 Length",
+          "type": "int",
+          "defval": 12,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "trader6",
+          "title": "Trader EMA 6 Length",
+          "type": "int",
+          "defval": 15,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "investor1",
+          "title": "Investor EMA 1 Length",
+          "type": "int",
+          "defval": 30,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "investor2",
+          "title": "Investor EMA 2 Length",
+          "type": "int",
+          "defval": 35,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "investor3",
+          "title": "Investor EMA 3 Length",
+          "type": "int",
+          "defval": 40,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "investor4",
+          "title": "Investor EMA 4 Length",
+          "type": "int",
+          "defval": 45,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "investor5",
+          "title": "Investor EMA 5 Length",
+          "type": "int",
+          "defval": 50,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "investor6",
+          "title": "Investor EMA 6 Length",
+          "type": "int",
+          "defval": 60,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        }
+      ]
+    },
+    {
       "type": "bollinger-bands",
       "script": "indicator/bollinger_bands",
       "title": "Bollinger Bands",
@@ -813,6 +1296,118 @@
           "min": 1,
           "max": 5000,
           "step": 1
+        }
+      ]
+    },
+    {
+      "type": "moving-average-channel",
+      "script": "indicator/moving_average_channel",
+      "title": "Moving Average Channel",
+      "short": "MAC",
+      "title_zh": "移动平均通道",
+      "group": "band",
+      "overlay": true,
+      "inputs": [
+        {
+          "key": "upperLength",
+          "title": "Upper Length",
+          "type": "int",
+          "defval": 20,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "lowerLength",
+          "title": "Lower Length",
+          "type": "int",
+          "defval": 20,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "upperOffset",
+          "title": "Upper Offset",
+          "type": "int",
+          "defval": 0,
+          "min": -500,
+          "max": 500,
+          "step": 1
+        },
+        {
+          "key": "lowerOffset",
+          "title": "Lower Offset",
+          "type": "int",
+          "defval": 0,
+          "min": -500,
+          "max": 500,
+          "step": 1
+        }
+      ]
+    },
+    {
+      "type": "standard-error-bands",
+      "script": "indicator/standard_error_bands",
+      "title": "Standard Error Bands",
+      "short": "SEB",
+      "title_zh": "标准误差带",
+      "group": "band",
+      "overlay": true,
+      "inputs": [
+        {
+          "key": "length",
+          "title": "Length",
+          "type": "int",
+          "defval": 21,
+          "min": 3,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "mult",
+          "title": "SE Multiplier",
+          "type": "float",
+          "defval": 2,
+          "min": 0,
+          "max": 50,
+          "step": 0.1
+        },
+        {
+          "key": "smoothing",
+          "title": "Smoothing",
+          "type": "int",
+          "defval": 3,
+          "min": 1,
+          "max": 500,
+          "step": 1
+        },
+        {
+          "key": "smoothingType",
+          "title": "Smoothing Type",
+          "type": "string",
+          "defval": "SMA",
+          "options": [
+            "SMA",
+            "EMA",
+            "WMA"
+          ]
+        },
+        {
+          "key": "source",
+          "title": "Source",
+          "type": "string",
+          "defval": "Close",
+          "options": [
+            "Close",
+            "Open",
+            "High",
+            "Low",
+            "HL2",
+            "HLC3",
+            "OHLC4",
+            "HLCC4"
+          ]
         }
       ]
     },
@@ -1400,6 +1995,16 @@
       "title": "Awesome Oscillator",
       "short": "AO",
       "title_zh": "动量震荡器",
+      "group": "oscillator",
+      "overlay": false,
+      "inputs": []
+    },
+    {
+      "type": "accelerator-oscillator",
+      "script": "indicator/accelerator_oscillator",
+      "title": "Accelerator Oscillator",
+      "short": "AC",
+      "title_zh": "加速震荡指标",
       "group": "oscillator",
       "overlay": false,
       "inputs": []
@@ -2073,6 +2678,42 @@
       ]
     },
     {
+      "type": "momentum",
+      "script": "indicator/momentum",
+      "title": "Momentum",
+      "short": "Mom",
+      "title_zh": "动量",
+      "group": "oscillator",
+      "overlay": false,
+      "inputs": [
+        {
+          "key": "length",
+          "title": "Length",
+          "type": "int",
+          "defval": 10,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "source",
+          "title": "Source",
+          "type": "string",
+          "defval": "Close",
+          "options": [
+            "Close",
+            "Open",
+            "High",
+            "Low",
+            "HL2",
+            "HLC3",
+            "OHLC4",
+            "HLCC4"
+          ]
+        }
+      ]
+    },
+    {
       "type": "ultimate-oscillator",
       "script": "indicator/ultimate_oscillator",
       "title": "Ultimate Oscillator",
@@ -2306,6 +2947,175 @@
       ]
     },
     {
+      "type": "accumulative-swing-index",
+      "script": "indicator/accumulative_swing_index",
+      "title": "Accumulative Swing Index",
+      "short": "Accumulative Swing Index",
+      "title_zh": "振动升降指标",
+      "group": "oscillator",
+      "overlay": false,
+      "inputs": [
+        {
+          "key": "limitMove",
+          "title": "Limit Move",
+          "type": "float",
+          "defval": 10,
+          "min": 0.1,
+          "max": 100000,
+          "step": 0.1
+        },
+        {
+          "key": "swingLength",
+          "title": "Swing Length",
+          "type": "int",
+          "defval": 10,
+          "min": 1,
+          "max": 200,
+          "step": 1
+        }
+      ]
+    },
+    {
+      "type": "rank-correlation-index",
+      "script": "indicator/rank_correlation_index",
+      "title": "Rank Correlation Index",
+      "short": "RCI",
+      "title_zh": "等级相关指数",
+      "group": "oscillator",
+      "overlay": false,
+      "inputs": [
+        {
+          "key": "length",
+          "title": "Length",
+          "type": "int",
+          "defval": 12,
+          "min": 2,
+          "max": 1000,
+          "step": 1
+        },
+        {
+          "key": "source",
+          "title": "Source",
+          "type": "string",
+          "defval": "Close",
+          "options": [
+            "Close",
+            "Open",
+            "High",
+            "Low",
+            "HL2",
+            "HLC3",
+            "OHLC4",
+            "HLCC4"
+          ]
+        },
+        {
+          "key": "overbought",
+          "title": "Overbought Level",
+          "type": "float",
+          "defval": 0.8,
+          "min": -1,
+          "max": 1,
+          "step": 0.05
+        },
+        {
+          "key": "oversold",
+          "title": "Oversold Level",
+          "type": "float",
+          "defval": -0.8,
+          "min": -1,
+          "max": 1,
+          "step": 0.05
+        }
+      ]
+    },
+    {
+      "type": "majority-rule",
+      "script": "indicator/majority_rule",
+      "title": "Majority Rule",
+      "short": "Majority Rule",
+      "title_zh": "多数规则",
+      "group": "oscillator",
+      "overlay": false,
+      "inputs": [
+        {
+          "key": "length",
+          "title": "Rolling Period",
+          "type": "int",
+          "defval": 14,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        }
+      ]
+    },
+    {
+      "type": "advance-decline",
+      "script": "indicator/advance_decline",
+      "title": "Advance/Decline",
+      "short": "Advance/Decline",
+      "title_zh": "涨跌比",
+      "group": "oscillator",
+      "overlay": false,
+      "inputs": [
+        {
+          "key": "length",
+          "title": "Length",
+          "type": "int",
+          "defval": 10,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        }
+      ]
+    },
+    {
+      "type": "trend-strength-index",
+      "script": "indicator/trend_strength_index",
+      "title": "Trend Strength Index",
+      "short": "Trend Strength Index",
+      "title_zh": "趋势强度指数",
+      "group": "oscillator",
+      "overlay": false,
+      "inputs": [
+        {
+          "key": "length",
+          "title": "Length",
+          "type": "int",
+          "defval": 14,
+          "min": 2,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "source",
+          "title": "Source",
+          "type": "string",
+          "defval": "Close",
+          "options": [
+            "Close",
+            "Open",
+            "High",
+            "Low",
+            "HL2",
+            "HLC3",
+            "OHLC4",
+            "HLCC4"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "chop-zone",
+      "script": "indicator/chop_zone",
+      "title": "Chop Zone",
+      "short": "Chop Zone",
+      "title_zh": "震荡区域",
+      "group": "oscillator",
+      "overlay": false,
+      "inputs": []
+    },
+    {
       "type": "kdj",
       "script": "indicator/kdj",
       "title": "Stochastic KDJ",
@@ -2471,6 +3281,102 @@
       ]
     },
     {
+      "type": "volatility-close-to-close",
+      "script": "indicator/volatility_close_to_close",
+      "title": "Volatility Close-to-Close",
+      "short": "Vol Close-to-Close",
+      "title_zh": "收盘价波动率",
+      "group": "volatility",
+      "overlay": false,
+      "inputs": [
+        {
+          "key": "length",
+          "title": "Length",
+          "type": "int",
+          "defval": 10,
+          "min": 2,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "daysPerYear",
+          "title": "Days Per Year",
+          "type": "int",
+          "defval": 252,
+          "min": 1,
+          "max": 366,
+          "step": 1
+        }
+      ]
+    },
+    {
+      "type": "volatility-ohlc",
+      "script": "indicator/volatility_ohlc",
+      "title": "Volatility O-H-L-C",
+      "short": "Vol OHLC",
+      "title_zh": "O-H-L-C 波动率",
+      "group": "volatility",
+      "overlay": false,
+      "inputs": [
+        {
+          "key": "length",
+          "title": "Length",
+          "type": "int",
+          "defval": 10,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "marketClosed",
+          "title": "Market Closed Fraction",
+          "type": "float",
+          "defval": 0,
+          "min": 0,
+          "max": 0.999,
+          "step": 0.01
+        },
+        {
+          "key": "daysPerYear",
+          "title": "Days Per Year",
+          "type": "int",
+          "defval": 252,
+          "min": 1,
+          "max": 366,
+          "step": 1
+        }
+      ]
+    },
+    {
+      "type": "volatility-zero-trend",
+      "script": "indicator/volatility_zero_trend",
+      "title": "Volatility Zero Trend Close-to-Close",
+      "short": "Vol Zero Trend",
+      "title_zh": "零趋势收盘价波动率",
+      "group": "volatility",
+      "overlay": false,
+      "inputs": [
+        {
+          "key": "length",
+          "title": "Length",
+          "type": "int",
+          "defval": 10,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "daysPerYear",
+          "title": "Days Per Year",
+          "type": "int",
+          "defval": 252,
+          "min": 1,
+          "max": 366,
+          "step": 1
+        }
+      ]
+    },
+    {
       "type": "chaikin-volatility",
       "script": "indicator/chaikin_volatility",
       "title": "Chaikin Volatility",
@@ -2561,6 +3467,42 @@
           "type": "int",
           "defval": 20,
           "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "source",
+          "title": "Source",
+          "type": "string",
+          "defval": "Close",
+          "options": [
+            "Close",
+            "Open",
+            "High",
+            "Low",
+            "HL2",
+            "HLC3",
+            "OHLC4",
+            "HLCC4"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "standard-error",
+      "script": "indicator/standard_error",
+      "title": "Standard Error",
+      "short": "StdErr",
+      "title_zh": "标准误差",
+      "group": "volatility",
+      "overlay": false,
+      "inputs": [
+        {
+          "key": "length",
+          "title": "Length",
+          "type": "int",
+          "defval": 14,
+          "min": 3,
           "max": 5000,
           "step": 1
         },
@@ -2702,6 +3644,16 @@
           "step": 1
         }
       ]
+    },
+    {
+      "type": "net-volume",
+      "script": "indicator/net_volume",
+      "title": "Net Volume",
+      "short": "Net Volume",
+      "title_zh": "净成交量",
+      "group": "volume",
+      "overlay": false,
+      "inputs": []
     },
     {
       "type": "accumulation-distribution",
@@ -3194,6 +4146,101 @@
       ]
     },
     {
+      "type": "volatility-index",
+      "script": "indicator/volatility_index",
+      "title": "Volatility Index",
+      "short": "Vol Index",
+      "title_zh": "波动率指数",
+      "group": "overlay",
+      "overlay": true,
+      "inputs": [
+        {
+          "key": "length",
+          "title": "Length",
+          "type": "int",
+          "defval": 10,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "mult",
+          "title": "ATR Multiplier",
+          "type": "float",
+          "defval": 3,
+          "min": 0,
+          "max": 50,
+          "step": 0.1
+        },
+        {
+          "key": "smoothing",
+          "title": "Smoothing",
+          "type": "string",
+          "defval": "RMA",
+          "options": [
+            "RMA",
+            "EMA"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "ichimoku-cloud",
+      "script": "indicator/ichimoku_cloud",
+      "title": "Ichimoku Cloud",
+      "short": "Ichimoku",
+      "title_zh": "一目均衡表",
+      "group": "overlay",
+      "overlay": true,
+      "inputs": [
+        {
+          "key": "conversionLength",
+          "title": "Conversion Line Length",
+          "type": "int",
+          "defval": 9,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "baseLength",
+          "title": "Base Line Length",
+          "type": "int",
+          "defval": 26,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "spanBLength",
+          "title": "Leading Span B Length",
+          "type": "int",
+          "defval": 52,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "laggingLength",
+          "title": "Lagging Span",
+          "type": "int",
+          "defval": 26,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        },
+        {
+          "key": "displacement",
+          "title": "Displacement",
+          "type": "int",
+          "defval": 26,
+          "min": 1,
+          "max": 5000,
+          "step": 1
+        }
+      ]
+    },
+    {
       "type": "parabolic-sar",
       "script": "indicator/parabolic_sar",
       "title": "Parabolic SAR",
@@ -3442,6 +4489,36 @@
           "step": 1
         }
       ]
+    },
+    {
+      "type": "median-price",
+      "script": "indicator/median_price",
+      "title": "Median Price",
+      "short": "Median Price",
+      "title_zh": "中间价",
+      "group": "overlay",
+      "overlay": true,
+      "inputs": []
+    },
+    {
+      "type": "typical-price",
+      "script": "indicator/typical_price",
+      "title": "Typical Price",
+      "short": "Typical Price",
+      "title_zh": "典型价格",
+      "group": "overlay",
+      "overlay": true,
+      "inputs": []
+    },
+    {
+      "type": "average-price",
+      "script": "indicator/average_price",
+      "title": "Average Price",
+      "short": "Average Price",
+      "title_zh": "平均价",
+      "group": "overlay",
+      "overlay": true,
+      "inputs": []
     }
   ]
 }

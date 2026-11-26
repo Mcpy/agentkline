@@ -79,12 +79,223 @@ export const GENERATED_SPEC = {
             }
         }
     },
-    "indicator/linear_regression": {
+    "indicator/lsma": {
         "lines": {
-            "Curve": {
+            "LSMA": {
                 "kind": "line",
                 "color": "#787b86",
                 "width": 2
+            }
+        }
+    },
+    "indicator/linear_regression_slope": {
+        "lines": {
+            "Slope": {
+                "kind": "line",
+                "color": "#787b86",
+                "width": 2,
+                "colorRule": "sign",
+                "inks": {
+                    "pos": "#089981",
+                    "neg": "#f23645"
+                }
+            }
+        },
+        "levels": [
+            {
+                "key": "zero",
+                "at": 0,
+                "title": "zero",
+                "color": "#787b8680",
+                "lineStyle": 2
+            }
+        ]
+    },
+    "indicator/ma_cross": {
+        "lines": {
+            "Short": {
+                "kind": "line",
+                "color": "#5b9cf6",
+                "width": 2
+            },
+            "Long": {
+                "kind": "line",
+                "color": "#ff9800",
+                "width": 2
+            },
+            "Crosses": {
+                "kind": "circles",
+                "color": "#089981",
+                "width": 4
+            }
+        }
+    },
+    "indicator/ema_cross": {
+        "lines": {
+            "Short": {
+                "kind": "line",
+                "color": "#5b9cf6",
+                "width": 2
+            },
+            "Long": {
+                "kind": "line",
+                "color": "#ff9800",
+                "width": 2
+            },
+            "Crosses": {
+                "kind": "circles",
+                "color": "#089981",
+                "width": 4
+            }
+        }
+    },
+    "indicator/ma_with_ema_cross": {
+        "lines": {
+            "MA": {
+                "kind": "line",
+                "color": "#5b9cf6",
+                "width": 2
+            },
+            "EMA": {
+                "kind": "line",
+                "color": "#ff9800",
+                "width": 2
+            },
+            "Crosses": {
+                "kind": "circles",
+                "color": "#089981",
+                "width": 4
+            }
+        }
+    },
+    "indicator/moving_average_double": {
+        "lines": {
+            "SMA 14": {
+                "kind": "line",
+                "color": "#5b9cf6",
+                "width": 2
+            },
+            "SMA 21": {
+                "kind": "line",
+                "color": "#ff9800",
+                "width": 2
+            }
+        }
+    },
+    "indicator/moving_average_triple": {
+        "lines": {
+            "SMA 14": {
+                "kind": "line",
+                "color": "#5b9cf6",
+                "width": 2
+            },
+            "SMA 21": {
+                "kind": "line",
+                "color": "#ad9a7b",
+                "width": 2
+            },
+            "SMA 35": {
+                "kind": "line",
+                "color": "#ff9800",
+                "width": 2
+            }
+        }
+    },
+    "indicator/moving_average_multiple": {
+        "lines": {
+            "SMA 14": {
+                "kind": "line",
+                "color": "#5b9cf6",
+                "width": 2
+            },
+            "SMA 21": {
+                "kind": "line",
+                "color": "#7c9bc5",
+                "width": 2
+            },
+            "SMA 35": {
+                "kind": "line",
+                "color": "#9d9a94",
+                "width": 2
+            },
+            "SMA 50": {
+                "kind": "line",
+                "color": "#bd9a62",
+                "width": 2
+            },
+            "SMA 100": {
+                "kind": "line",
+                "color": "#de9931",
+                "width": 2
+            },
+            "SMA 200": {
+                "kind": "line",
+                "color": "#ff9800",
+                "width": 2
+            }
+        }
+    },
+    "indicator/guppy_multiple_moving_average": {
+        "lines": {
+            "EMA 3": {
+                "kind": "line",
+                "color": "#5b9cf6",
+                "width": 1
+            },
+            "EMA 5": {
+                "kind": "line",
+                "color": "#5b9cf6",
+                "width": 1
+            },
+            "EMA 8": {
+                "kind": "line",
+                "color": "#5b9cf6",
+                "width": 1
+            },
+            "EMA 10": {
+                "kind": "line",
+                "color": "#5b9cf6",
+                "width": 1
+            },
+            "EMA 12": {
+                "kind": "line",
+                "color": "#5b9cf6",
+                "width": 1
+            },
+            "EMA 15": {
+                "kind": "line",
+                "color": "#5b9cf6",
+                "width": 1
+            },
+            "EMA 30": {
+                "kind": "line",
+                "color": "#ff9800",
+                "width": 1
+            },
+            "EMA 35": {
+                "kind": "line",
+                "color": "#ff9800",
+                "width": 1
+            },
+            "EMA 40": {
+                "kind": "line",
+                "color": "#ff9800",
+                "width": 1
+            },
+            "EMA 45": {
+                "kind": "line",
+                "color": "#ff9800",
+                "width": 1
+            },
+            "EMA 50": {
+                "kind": "line",
+                "color": "#ff9800",
+                "width": 1
+            },
+            "EMA 60": {
+                "kind": "line",
+                "color": "#ff9800",
+                "width": 1
             }
         }
     },
@@ -228,6 +439,61 @@ export const GENERATED_SPEC = {
                 "from": "Upper",
                 "to": "Lower",
                 "color": "#787b8614"
+            }
+        ]
+    },
+    "indicator/moving_average_channel": {
+        "lines": {
+            "Upper": {
+                "kind": "line",
+                "color": "#f23645",
+                "width": 1
+            },
+            "Lower": {
+                "kind": "line",
+                "color": "#089981",
+                "width": 1
+            }
+        },
+        "fills": [
+            {
+                "key": "mac",
+                "from": "Upper",
+                "to": "Lower",
+                "color": "#787b8614"
+            }
+        ]
+    },
+    "indicator/standard_error_bands": {
+        "lines": {
+            "Basis": {
+                "kind": "line",
+                "color": "#787b86",
+                "width": 1
+            },
+            "Upper Band": {
+                "kind": "line",
+                "color": "#f23645",
+                "width": 1
+            },
+            "Lower Band": {
+                "kind": "line",
+                "color": "#089981",
+                "width": 1
+            }
+        },
+        "fills": [
+            {
+                "key": "sebUpper",
+                "from": "Upper Band",
+                "to": "Basis",
+                "color": "#f236451a"
+            },
+            {
+                "key": "sebLower",
+                "from": "Basis",
+                "to": "Lower Band",
+                "color": "#0899811a"
             }
         ]
     },
@@ -519,6 +785,24 @@ export const GENERATED_SPEC = {
     "indicator/awesome_oscillator": {
         "lines": {
             "AO": {
+                "kind": "columns",
+                "color": "#089981",
+                "width": 1
+            }
+        },
+        "levels": [
+            {
+                "key": "zero",
+                "at": 0,
+                "title": "Zero Line",
+                "color": "#787b86",
+                "lineStyle": 2
+            }
+        ]
+    },
+    "indicator/accelerator_oscillator": {
+        "lines": {
+            "AC": {
                 "kind": "columns",
                 "color": "#089981",
                 "width": 1
@@ -842,7 +1126,7 @@ export const GENERATED_SPEC = {
             {
                 "key": "zero",
                 "at": 0,
-                "title": "Zero",
+                "title": "Zero Line",
                 "color": "#787b8680",
                 "lineStyle": 2
             }
@@ -981,6 +1265,29 @@ export const GENERATED_SPEC = {
             }
         ]
     },
+    "indicator/momentum": {
+        "lines": {
+            "Momentum": {
+                "kind": "line",
+                "color": "#787b86",
+                "width": 1,
+                "colorRule": "sign",
+                "inks": {
+                    "pos": "#089981",
+                    "neg": "#f23645"
+                }
+            }
+        },
+        "levels": [
+            {
+                "key": "zero",
+                "at": 0,
+                "title": "Zero Line",
+                "color": "#787b86",
+                "lineStyle": 2
+            }
+        ]
+    },
     "indicator/ultimate_oscillator": {
         "lines": {
             "UO": {
@@ -1041,7 +1348,7 @@ export const GENERATED_SPEC = {
             {
                 "key": "zero",
                 "at": 0,
-                "title": "Zero",
+                "title": "Zero Line",
                 "color": "#787b8680",
                 "lineStyle": 2
             }
@@ -1155,6 +1462,133 @@ export const GENERATED_SPEC = {
             }
         }
     },
+    "indicator/accumulative_swing_index": {
+        "lines": {
+            "ASI": {
+                "kind": "line",
+                "color": "#787b86",
+                "width": 1
+            }
+        }
+    },
+    "indicator/rank_correlation_index": {
+        "lines": {
+            "RCI": {
+                "kind": "line",
+                "color": "#787b86",
+                "width": 1
+            }
+        },
+        "levels": [
+            {
+                "key": "overbought",
+                "at": "overbought",
+                "title": "Overbought",
+                "color": "#787b86",
+                "lineStyle": 2
+            },
+            {
+                "key": "midline",
+                "at": 0,
+                "title": "Midline",
+                "color": "#787b86",
+                "lineStyle": 1
+            },
+            {
+                "key": "oversold",
+                "at": "oversold",
+                "title": "Oversold",
+                "color": "#787b86",
+                "lineStyle": 2
+            }
+        ],
+        "thresholds": {
+            "overbought": 0.8,
+            "oversold": -0.8
+        },
+        "zones": [
+            {
+                "key": "obZone",
+                "from": 0.8,
+                "to": 1,
+                "color": "#f2364514"
+            },
+            {
+                "key": "osZone",
+                "from": -0.8,
+                "to": -1,
+                "color": "#08998114"
+            }
+        ]
+    },
+    "indicator/majority_rule": {
+        "lines": {
+            "Majority Rule": {
+                "kind": "line",
+                "color": "#787b86",
+                "width": 1
+            }
+        },
+        "levels": [
+            {
+                "key": "zero",
+                "at": 50,
+                "title": "Midline",
+                "color": "#787b86",
+                "lineStyle": 2
+            }
+        ]
+    },
+    "indicator/advance_decline": {
+        "lines": {
+            "Advance/Decline": {
+                "kind": "line",
+                "color": "#787b86",
+                "width": 1
+            }
+        },
+        "levels": [
+            {
+                "key": "zero",
+                "at": 1,
+                "title": "Even",
+                "color": "#787b86",
+                "lineStyle": 2
+            }
+        ]
+    },
+    "indicator/trend_strength_index": {
+        "lines": {
+            "Trend Strength": {
+                "kind": "line",
+                "color": "#787b86",
+                "width": 1,
+                "colorRule": "sign",
+                "inks": {
+                    "pos": "#089981",
+                    "neg": "#f23645"
+                }
+            }
+        },
+        "levels": [
+            {
+                "key": "zero",
+                "at": 0,
+                "title": "Zero Line",
+                "color": "#787b86",
+                "lineStyle": 2
+            }
+        ]
+    },
+    "indicator/chop_zone": {
+        "lines": {
+            "Chop Zone": {
+                "kind": "columns",
+                "color": "#ff9800",
+                "width": 1
+            }
+        }
+    },
     "indicator/aroon": {
         "lines": {
             "Aroon Up": {
@@ -1241,6 +1675,33 @@ export const GENERATED_SPEC = {
             }
         }
     },
+    "indicator/volatility_close_to_close": {
+        "lines": {
+            "Volatility": {
+                "kind": "line",
+                "color": "#ff9800",
+                "width": 2
+            }
+        }
+    },
+    "indicator/volatility_ohlc": {
+        "lines": {
+            "Volatility": {
+                "kind": "line",
+                "color": "#ff9800",
+                "width": 2
+            }
+        }
+    },
+    "indicator/volatility_zero_trend": {
+        "lines": {
+            "Volatility": {
+                "kind": "line",
+                "color": "#ff9800",
+                "width": 2
+            }
+        }
+    },
     "indicator/chaikin_volatility": {
         "lines": {
             "Chaikin Volatility": {
@@ -1310,6 +1771,15 @@ export const GENERATED_SPEC = {
             }
         }
     },
+    "indicator/standard_error": {
+        "lines": {
+            "Standard Error": {
+                "kind": "line",
+                "color": "#787b86",
+                "width": 1
+            }
+        }
+    },
     "indicator/ulcer_index": {
         "lines": {
             "Ulcer Index": {
@@ -1322,14 +1792,14 @@ export const GENERATED_SPEC = {
             {
                 "key": "zero",
                 "at": 0,
-                "title": "Zero Level",
+                "title": "Zero Line",
                 "color": "#787b8680",
                 "lineStyle": 1
             },
             {
                 "key": "threshold",
                 "at": "threshold",
-                "title": "Alert Threshold",
+                "title": "Stress Threshold",
                 "color": "#787b86",
                 "lineStyle": 2
             }
@@ -1395,6 +1865,29 @@ export const GENERATED_SPEC = {
                 "width": 1
             }
         }
+    },
+    "indicator/net_volume": {
+        "lines": {
+            "Net Volume": {
+                "kind": "columns",
+                "color": "#089981",
+                "width": 1,
+                "colorRule": "close",
+                "inks": {
+                    "above": "#f23645",
+                    "below": "#089981"
+                }
+            }
+        },
+        "levels": [
+            {
+                "key": "zero",
+                "at": 0,
+                "title": "Zero Line",
+                "color": "#787b86",
+                "lineStyle": 2
+            }
+        ]
     },
     "indicator/accumulation_distribution": {
         "lines": {
@@ -1723,6 +2216,57 @@ export const GENERATED_SPEC = {
             }
         ]
     },
+    "indicator/volatility_index": {
+        "lines": {
+            "Long Stop": {
+                "kind": "line",
+                "color": "#089981",
+                "width": 1
+            },
+            "Short Stop": {
+                "kind": "line",
+                "color": "#f23645",
+                "width": 1
+            }
+        }
+    },
+    "indicator/ichimoku_cloud": {
+        "lines": {
+            "Conversion Line": {
+                "kind": "line",
+                "color": "#5b9cf6",
+                "width": 1
+            },
+            "Base Line": {
+                "kind": "line",
+                "color": "#f23645",
+                "width": 1
+            },
+            "Lagging Span": {
+                "kind": "line",
+                "color": "#089981",
+                "width": 1
+            },
+            "Leading Span A": {
+                "kind": "line",
+                "color": "#089981",
+                "width": 1
+            },
+            "Leading Span B": {
+                "kind": "line",
+                "color": "#f23645",
+                "width": 1
+            }
+        },
+        "fills": [
+            {
+                "key": "cloud",
+                "from": "Leading Span A",
+                "to": "Leading Span B",
+                "color": "#0899811a"
+            }
+        ]
+    },
     "indicator/parabolic_sar": {
         "lines": {
             "SAR": {
@@ -1749,12 +2293,12 @@ export const GENERATED_SPEC = {
                     "below": "#f23645"
                 }
             },
-            "Upper Band #1": {
+            "Upper Band 1": {
                 "kind": "line",
                 "color": "#f2364599",
                 "width": 1
             },
-            "Lower Band #1": {
+            "Lower Band 1": {
                 "kind": "line",
                 "color": "#08998199",
                 "width": 1
@@ -1763,8 +2307,8 @@ export const GENERATED_SPEC = {
         "fills": [
             {
                 "key": "band0",
-                "from": "Upper Band #1",
-                "to": "Lower Band #1",
+                "from": "Upper Band 1",
+                "to": "Lower Band 1",
                 "color": "#787b860d"
             }
         ]
@@ -1827,5 +2371,32 @@ export const GENERATED_SPEC = {
     },
     "indicator/williams_fractal": {
         "lines": {}
+    },
+    "indicator/median_price": {
+        "lines": {
+            "Median Price": {
+                "kind": "line",
+                "color": "#5b9cf6",
+                "width": 1
+            }
+        }
+    },
+    "indicator/typical_price": {
+        "lines": {
+            "Typical Price": {
+                "kind": "line",
+                "color": "#5b9cf6",
+                "width": 1
+            }
+        }
+    },
+    "indicator/average_price": {
+        "lines": {
+            "Average Price": {
+                "kind": "line",
+                "color": "#5b9cf6",
+                "width": 1
+            }
+        }
     }
 };

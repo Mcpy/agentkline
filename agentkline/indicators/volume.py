@@ -64,7 +64,7 @@ def _zero_level() -> list[dict]:
     return [{"key": "zero", "price": 0, "lineStyle": "dashed", "title": "Zero Line"}]
 
 
-# ---------- 15 个研究 ----------
+# ---------- 16 个研究 ----------
 def on_balance_volume(params, bars):
     vol = M.volumes(bars)
     diff = M.change(M.closes(bars))
@@ -266,6 +266,19 @@ def intraday_intensity(params, bars):
     return {"lines": [M.line("Intraday Intensity", values)], "levels": _zero_level()}
 
 
+def net_volume(params, bars):
+    """Vela netVolume：上涨 bar 量取正、下跌取负、平盘记 0；首根缺前收盘为缺失。"""
+    values = M.zipv(M.volumes(bars), M.change(M.closes(bars)),
+                    lambda v, d: v if d > 0 else -v if d < 0 else 0)
+    up = M.ps(params, "upColor", "#089981")
+    down = M.ps(params, "downColor", "#f23645")
+    colors = [None if x is None else (down if x < 0 else up) for x in values]
+    return {
+        "lines": [M.line("Net Volume", values, type="columns", base=0, colors=colors)],
+        "levels": _zero_level(),
+    }
+
+
 STUDIES = {
     "on-balance-volume": on_balance_volume,
     "accumulation-distribution": accumulation_distribution,
@@ -282,4 +295,5 @@ STUDIES = {
     "pvo": pvo,
     "volume-flow-indicator": volume_flow_indicator,
     "intraday-intensity": intraday_intensity,
+    "net-volume": net_volume,
 }

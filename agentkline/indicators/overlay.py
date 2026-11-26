@@ -2,6 +2,7 @@
 
 逐字对齐原生实现：初始状态、NaN 传播、时间锚点与结构输出
 （markers / polylines）都按 JS 原样移植。
+0.10.19 新增：Volatility Index（Wilder 波动率止损）与一目均衡表。
 """
 from __future__ import annotations
 
@@ -137,8 +138,9 @@ def vwap(params, bars):
 
     lines = [M.line("VWAP", values)]
     for i, band in enumerate(bands):
-        lines.append(M.line(f"Upper Band #{i + 1}", band["up"]))
-        lines.append(M.line(f"Lower Band #{i + 1}", band["down"]))
+        # Vela 模板 'Upper Band #{n}' 渲染为 'Upper Band 1'（#{n} 整体被实参替换，0.7.4 对齐）。
+        lines.append(M.line(f"Upper Band {i + 1}", band["up"]))
+        lines.append(M.line(f"Lower Band {i + 1}", band["down"]))
     return {"lines": lines}
 
 
@@ -327,6 +329,99 @@ def williams_fractal(params, bars):
     return {"lines": [], "markers": markers}
 
 
+# ---------- Volatility Index（Vela 0.10.19 volatilityIndex） ----------
+def volatility_index(params, bars):
+    """Wilder 波动率止损：跟踪最有利收盘，止损 = extreme ∓ mult*ATR。
+
+    逐字对齐 JS：stop 用上一根遗留的 extreme/average 计算并先画线，
+    之后才更新 ATR（前 len 个 TR 的 SMA 种子 + RMA/EMA 递推）与 extreme；
+    收盘严格穿越 stop 时当根翻边（当根仍画旧方向），extreme 重置为收盘；
+    平盘 bar（收盘 == 前收盘）直接复制前一根两线值并跳过全部更新。
+    """
+    length = M.pi(params, "length", 10)
+    mult = M.pf(params, "mult", 3)
+    n = len(bars)
+    long_stop: Series = [None] * n
+    short_stop: Series = [None] * n
+    if length < 1:
+        return {"lines": [M.line("Long Stop", long_stop), M.line("Short Stop", short_stop)]}
+    alpha = 2 / (length + 1) if M.ps(params, "smoothing", "RMA") == "EMA" else 1 / length
+    tr = M.true_range(bars)
+    long = True
+    extreme = math.nan
+    average = math.nan
+    seed = 0.0
+    seeded = 0
+    for i, b in enumerate(bars):
+        close = b["close"]
+        if i > 0 and close == bars[i - 1]["close"]:
+            long_stop[i] = long_stop[i - 1]
+            short_stop[i] = short_stop[i - 1]
+            continue
+        stop = extreme - mult * average if long else extreme + mult * average
+        if M.finite(stop):
+            (long_stop if long else short_stop)[i] = stop
+        r = tr[i] if tr[i] is not None else math.nan
+        if M.finite(average):
+            average += alpha * (r - average)
+        else:
+            seed += r
+            seeded += 1
+            if seeded >= length:
+                average = seed / length
+        if M.finite(stop) and (close < stop if long else close > stop):
+            long = not long
+            extreme = close
+        elif not M.finite(extreme):
+            extreme = close
+        else:
+            extreme = max(extreme, close) if long else min(extreme, close)
+    return {"lines": [M.line("Long Stop", long_stop), M.line("Short Stop", short_stop)]}
+
+
+# ---------- Ichimoku Cloud（Vela 0.10.19 ichimokuCloud） ----------
+def ichimoku_cloud(params, bars):
+    """一目均衡表：转换线/基准线/先行带 A/B 均为 Donchian 中点。
+
+    逐字对齐 JS：values 本身不移位，位移放在 plot 的 offset 元数据——
+    迟行带 = 收盘原样后移 laggingLength-1 根（offset 负），
+    先行带 A/B 前移 displacement-1 根（offset 正，投影到右侧空白）。
+    云带填充按 spanA >= spanB 逐 bar 取多头/空头色。
+    symbol 第二标的分支未移植（目录已剔除该输入，默认空串走单标的主体）。
+    """
+    conv_len = M.pi(params, "conversionLength", 9)
+    base_len = M.pi(params, "baseLength", 26)
+    spanb_len = M.pi(params, "spanBLength", 52)
+    lag_len = M.pi(params, "laggingLength", 26)
+    disp_len = M.pi(params, "displacement", 26)
+    hi, lo = M.highs(bars), M.lows(bars)
+
+    def donchian(length: int) -> Series:
+        return M.zipv(M.highest(hi, length), M.lowest(lo, length), lambda a, b: (a + b) / 2)
+
+    conversion = donchian(conv_len)
+    base = donchian(base_len)
+    span_a = M.zipv(conversion, base, lambda a, b: (a + b) / 2)
+    span_b = donchian(spanb_len)
+    lag_shift = -(max(1, lag_len) - 1)
+    lead_shift = max(1, disp_len) - 1
+    bull = M.ps(params, "bullCloudColor", "#0899811a")
+    bear = M.ps(params, "bearCloudColor", "#f236451a")
+    cloud_colors = [None if a is None or b is None else (bull if a >= b else bear)
+                    for a, b in zip(span_a, span_b)]
+    lines = [
+        M.line("Conversion Line", conversion, key="conversion"),
+        M.line("Base Line", base, key="base"),
+        M.line("Lagging Span", M.closes(bars), key="lagging", offset=lag_shift),
+        M.line("Leading Span A", span_a, key="spanA", offset=lead_shift),
+        M.line("Leading Span B", span_b, key="spanB", offset=lead_shift),
+    ]
+    return {
+        "lines": lines,
+        "bands": [{"key": "cloud", "from": "spanA", "to": "spanB", "color": bull, "colors": cloud_colors}],
+    }
+
+
 STUDIES = {
     "parabolic-sar": parabolic_sar,
     "vwap": vwap,
@@ -334,4 +429,6 @@ STUDIES = {
     "52-week-high-low": high_low_52_week,
     "zigzag": zigzag,
     "williams-fractal": williams_fractal,
+    "volatility-index": volatility_index,
+    "ichimoku-cloud": ichimoku_cloud,
 }

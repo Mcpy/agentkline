@@ -157,7 +157,7 @@
 | `get_paper_session` | 读一个模拟盘会话：状态/持仓/浮盈/游标/最近决策；include_events=true 带最近 30 条事件。 |
 | `start_paper_session` | 启动模拟盘。创建后第一次启动会把起点对齐到最新已收盘 bar，不回溯历史。 |
 | `pause_paper_session` | 暂停模拟盘；暂停期间的 bar 不再处理。 |
-| `resume_paper_session` | 恢复模拟盘；默认跳过暂停/断线期间，从最新已收盘 bar 继续（PAPER_RESUME_SKIP）。 |
+| `resume_paper_session` | 恢复模拟盘。mode=skip（默认）跳过暂停/断线期间，从最新已收盘 bar 继续； |
 | `stop_paper_session` | 停止模拟盘并物化成 kind=paper 结果（结果栏可直接打开）。 |
 | `delete_paper_session` | 删除非运行中的模拟盘会话与事件/净值账本；运行中的会话必须先 stop。 |
 | `paper_events` | 分页读模拟盘事件账本（decision/fill/equity/warning/...）。 |

@@ -1025,6 +1025,9 @@ export function renderChartCore() {
     }
     // 0.6.0：图表时间轴跟随界面时区（与 OHLC 读数/状态条一致；不依赖系统时区）
     try { chart.renderer.applyConfig({ timeScale: { timezone: _uiTz() } }); } catch (e) { console.warn('[ak] timezone apply failed', e); }
+    // 0.7.4：Vela 0.10.18 起指标值/名标签上游默认开；为保持 0.7.3 价格轴观感这里显式关闭，
+    // 用户仍可在图表设置 → Scales and lines 里打开（仅本次会话生效，重建后回到默认关）。
+    try { chart.renderer.applyConfig({ priceScale: { indicatorValueLabels: false, indicatorNameLabels: false } }); } catch (e) { console.warn('[ak] indicator labels apply failed', e); }
     // 探针/控制台把手（e2e 与人工排障；不参与业务逻辑）
     try {
         window.__ak = {

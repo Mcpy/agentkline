@@ -58,9 +58,14 @@ const GROUPS = [
 const GROUP_OF = {
     'sma': 'average', 'ema': 'average', 'moving-average': 'average', 'rma': 'average',
     'zlema': 'average', 'vidya': 'average', 'ma-envelope': 'average', 'lsma': 'average', 'linear-regression-slope': 'average',
+    // 0.10.9/0.10.15 新增（0.7.4）：7 个均线研究
+    'ma-cross': 'average', 'ema-cross': 'average', 'ma-with-ema-cross': 'average',
+    'moving-average-double': 'average', 'moving-average-triple': 'average', 'moving-average-multiple': 'average',
+    'guppy-multiple-moving-average': 'average',
     'bollinger-bands': 'band', 'percent-b': 'band', 'bandwidth': 'band', 'keltner-channels': 'band',
     'donchian-channels': 'band', 'chandelier-exit': 'band', 'chande-kroll-stop': 'band',
     'supertrend': 'band', 'williams-alligator': 'band', 'gator-oscillator': 'band',
+    'moving-average-channel': 'band', 'standard-error-bands': 'band',
     'rsi': 'oscillator', 'stochastic': 'oscillator', 'stochastic-rsi': 'oscillator', 'macd': 'oscillator',
     'ppo': 'oscillator', 'awesome-oscillator': 'oscillator', 'commodity-channel-index': 'oscillator',
     'williams-percent-r': 'oscillator', 'chande-momentum-oscillator': 'oscillator', 'connors-rsi': 'oscillator',
@@ -69,17 +74,27 @@ const GROUP_OF = {
     'coppock-curve': 'oscillator', 'detrended-price-oscillator': 'oscillator', 'rate-of-change': 'oscillator',
     'ultimate-oscillator': 'oscillator', 'relative-vigor-index': 'oscillator', 'relative-volatility-index': 'oscillator',
     'balance-of-power': 'oscillator', 'elder-ray': 'oscillator', 'ttm-squeeze': 'oscillator',
+    'accelerator-oscillator': 'oscillator', 'momentum': 'oscillator', 'accumulative-swing-index': 'oscillator',
+    'rank-correlation-index': 'oscillator', 'majority-rule': 'oscillator', 'advance-decline': 'oscillator',
+    'trend-strength-index': 'oscillator', 'chop-zone': 'oscillator',
     'aroon': 'trend', 'average-directional-index': 'trend', 'vortex-indicator': 'trend',
     'average-true-range': 'volatility', 'historical-volatility': 'volatility', 'chaikin-volatility': 'volatility',
     'mass-index': 'volatility', 'standard-deviation': 'volatility', 'ulcer-index': 'volatility',
     'choppiness-index': 'volatility',
+    'volatility-close-to-close': 'volatility', 'volatility-ohlc': 'volatility', 'volatility-zero-trend': 'volatility',
+    'standard-error': 'volatility',
     'on-balance-volume': 'volume', 'accumulation-distribution': 'volume', 'chaikin-money-flow': 'volume',
     'chaikin-oscillator': 'volume', 'ease-of-movement': 'volume', 'force-index': 'volume',
     'klinger-oscillator': 'volume', 'money-flow-index': 'volume', 'negative-volume-index': 'volume',
     'positive-volume-index': 'volume', 'price-volume-trend': 'volume', 'volume-oscillator': 'volume',
     'pvo': 'volume', 'volume-flow-indicator': 'volume', 'intraday-intensity': 'volume',
+    'net-volume': 'volume',
     'parabolic-sar': 'overlay', 'vwap': 'overlay', 'pivot-points': 'overlay', '52-week-high-low': 'overlay',
     'zigzag': 'overlay', 'williams-fractal': 'overlay',
+    'volatility-index': 'overlay', 'ichimoku-cloud': 'overlay', 'median-price': 'overlay',
+    'typical-price': 'overlay', 'average-price': 'overlay',
+    // 0.10.19 目录排除（0.7.4 决策）：correlation-coefficient / correlation-log 需第二标的序列，
+    // 留待 0.7.8 多标的；compare 是品种对比 layer（同 volume/vpvr），不是可计算研究。
 };
 
 const ZH = {
@@ -106,6 +121,18 @@ const ZH = {
     'pvo': '百分比成交量振荡器', 'volume-flow-indicator': '成交量流量指标', 'intraday-intensity': '日内强度',
     'parabolic-sar': '抛物线转向 SAR', 'vwap': '成交量加权均价', 'pivot-points': '枢轴点',
     '52-week-high-low': '52 周高低点', 'zigzag': '之字转向', 'williams-fractal': '威廉分形',
+    // 0.7.4 新增：中文名优先取 Vela zh-Hans 语言包官方译名；包内缺失的两项为产品译名。
+    'ma-cross': 'MA 交叉', 'ema-cross': 'EMA 交叉', 'ma-with-ema-cross': 'MA 与 EMA 交叉',
+    'moving-average-double': '双移动平均线', 'moving-average-triple': '三移动平均线',
+    'moving-average-multiple': '多重移动平均线', 'guppy-multiple-moving-average': '顾比复合移动平均线',
+    'moving-average-channel': '移动平均通道', 'standard-error-bands': '标准误差带',
+    'volatility-index': '波动率指数', 'ichimoku-cloud': '一目均衡表',
+    'median-price': '中间价', 'typical-price': '典型价格', 'average-price': '平均价',
+    'accelerator-oscillator': '加速震荡指标', 'momentum': '动量', 'accumulative-swing-index': '振动升降指标',
+    'rank-correlation-index': '等级相关指数', 'majority-rule': '多数规则', 'advance-decline': '涨跌比',
+    'trend-strength-index': '趋势强度指数', 'chop-zone': '震荡区域',
+    'volatility-close-to-close': '收盘价波动率', 'volatility-ohlc': 'O-H-L-C 波动率',
+    'volatility-zero-trend': '零趋势收盘价波动率', 'standard-error': '标准误差', 'net-volume': '净成交量',
 };
 
 const scriptOf = (type) => 'indicator/' + type.replace(/-/g, '_');
@@ -116,7 +143,7 @@ for (const type of V.nativeIndicatorTypes()) {
     const d = V.getNativeIndicator(type);
     const schema = d.inputsSchema ? d.inputsSchema() : [];
     const inputs = schema
-        .filter(i => i.type !== 'color' && i.group !== 'Style')
+        .filter(i => i.type !== 'color' && i.group !== 'Style' && i.type !== 'symbol')
         .map(i => {
             const o = { key: i.key, title: i.title, type: i.type, defval: i.defval };
             if (i.min != null) o.min = i.min;

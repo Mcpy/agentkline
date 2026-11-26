@@ -70,6 +70,17 @@ const hidden = (p) => {
     const c = String(p.color || '');
     return c.length === 9 && c.endsWith('00');
 };
+// 0.7.4：golden 的 plot.title 可能是 {defaultMessage, values} 模板对象（如 VWAP 'Upper Band #{n}'），
+// 按 Vela 渲染口径展开为字面线名（'Upper Band 1'），与 Python 单源输出对齐。
+const titleOf = (p) => {
+    const t = p && p.title;
+    if (t && typeof t === 'object') {
+        let msg = t.defaultMessage || t.key || '';
+        for (const [k, v] of Object.entries(t.values || {})) msg = msg.split(`#{${k}}`).join(String(v));
+        return msg;
+    }
+    return t || (p && p.key) || '';
+};
 const num = (x, d = 1) => (x == null ? d : x);
 
 const out = {};
@@ -91,7 +102,7 @@ for (const [type, ref] of Object.entries(golden.results)) {
             const rule = detectRule(p.values, p.colors);
             if (rule) Object.assign(line, rule);
         }
-        entry.lines[p.title] = line;
+        entry.lines[titleOf(p)] = line;
     }
 
     // 填充带：两端都是可见线的才保留（anchor 型区带另走 zones）
@@ -100,7 +111,7 @@ for (const [type, ref] of Object.entries(golden.results)) {
         const from = byKey[b.from], to = byKey[b.to];
         if (!from || !to || hidden(from) || hidden(to)) continue;
         if (b.gradient) continue;                 // 逐点渐变不在 emit 契约内
-        fills.push({ key: b.key, from: from.title, to: to.title, color: b.color });
+        fills.push({ key: b.key, from: titleOf(from), to: titleOf(to), color: b.color });
     }
     if (fills.length) entry.fills = fills;
 
@@ -109,12 +120,12 @@ for (const [type, ref] of Object.entries(golden.results)) {
     const thresholds = {};
     const levels = [];
     for (const l of ref.levels || []) {
-        const name = String(l.title || l.key || '');
+        const name = String(titleOf(l) || '');
         const hit = inputs.find(i => (i.key || '').toLowerCase() === String(l.key).toLowerCase())
             || inputs.find(i => name.toLowerCase().includes(String(i.title || '').toLowerCase()) && i.defval === l.price);
         const at = hit ? hit.key : l.price;
         if (hit) thresholds[hit.key] = l.price;
-        const lv = { key: l.key, at, title: l.title || l.key, color: l.color || '#787b86' };
+        const lv = { key: l.key, at, title: titleOf(l), color: l.color || '#787b86' };
         if (l.lineStyle && LS[l.lineStyle] != null) lv.lineStyle = LS[l.lineStyle];
         levels.push(lv);
     }
@@ -138,7 +149,7 @@ for (const [type, ref] of Object.entries(golden.results)) {
         const a = val(from), z = val(to);
         if (a == null || z == null) continue;
         zones.push({ key: b.key, from: a, to: z, color: b.color });
-        const title = `${from.title} ${to.title}`.toLowerCase();
+        const title = `${titleOf(from)} ${titleOf(to)}`.toLowerCase();
         if (title.includes('top') || title.includes('bottom')) {
             const top = [a, z].find(v => v >= 50);
             const bottom = [a, z].find(v => v < 50);

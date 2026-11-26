@@ -1,6 +1,8 @@
 """通道/带状族（Vela bands.ts）。"""
 from __future__ import annotations
 
+import math
+
 from . import mathlib as M
 
 
@@ -156,6 +158,88 @@ def gator_oscillator(params, bars):
     ], "levels": [{"key": "zero", "price": 0, "lineStyle": "solid", "title": "Zero Line"}]}
 
 
+# ---------- Vela 0.10.19 新增：移动平均通道 / 标准误差带 ----------
+
+def _with_alpha(hex_color: str, alpha: float) -> str:
+    """Vela withAlpha2：#rrggbb → #rrggbbaa（alpha 四舍五入到 0..255）。"""
+    h = (hex_color or "").strip()
+    if len(h) == 7 and h[0] == "#" and all(c in "0123456789abcdefABCDEF" for c in h[1:]):
+        a = math.floor(max(0.0, min(1.0, alpha)) * 255 + 0.5)
+        return f"{h}{a:02x}"
+    return hex_color
+
+
+def moving_average_channel(params, bars):
+    """Vela movingAverageChannel：上轨 = SMA(highs, upperLength) 平移 upperOffset，
+    下轨 = SMA(lows, lowerLength) 平移 lowerOffset（正偏移右移，M.shift 同式）。
+    bands 填充色默认 transp(NEUTRAL, 92) = #787b8614。
+    """
+    upper = M.shift(M.sma(M.highs(bars), M.pi(params, "upperLength", 20)),
+                    M.pi(params, "upperOffset", 0))
+    lower = M.shift(M.sma(M.lows(bars), M.pi(params, "lowerLength", 20)),
+                    M.pi(params, "lowerOffset", 0))
+    return {"lines": [
+        M.line("Upper", upper, color=M.ps(params, "upperColor", "#f23645")),
+        M.line("Lower", lower, color=M.ps(params, "lowerColor", "#089981")),
+    ], "bands": [{"key": "mac", "from": "upper", "to": "lower",
+                  "color": M.ps(params, "fillColor", _with_alpha("#787b86", 0.08))}]}
+
+
+def _std_error(v: M.Series, n: int) -> M.Series:
+    """Vela stdError：窗口内线性回归残差的标准误 sqrt(SSE/(n-2))。
+
+    mathlib 无此助手，按边界约定在本模块私有实现。n<3 全 None（JS 返回全 NaN）；
+    回归系数与 M.linreg 同式（x 取窗口内 0..n-1）。
+    """
+    if n < 3:
+        return [None] * len(v)
+    sx = (n - 1) * n / 2
+    sxx = (n - 1) * n * (2 * n - 1) / 6
+    denom = n * sxx - sx * sx
+
+    def fold(f: int, t: int) -> float:
+        sy = sxy = 0.0
+        for k in range(f, t + 1):
+            x = k - f
+            sy += v[k]
+            sxy += x * v[k]
+        slope = (n * sxy - sx * sy) / denom
+        intercept = (sy - slope * sx) / n
+        sse = sum((v[k] - (intercept + slope * (k - f))) ** 2 for k in range(f, t + 1))
+        return math.sqrt(sse / (n - 2))
+
+    return M.windowed(v, n, fold)
+
+
+def standard_error_bands(params, bars):
+    """Vela standardErrorBands：回归线 ± mult×标准误，两者各自再平滑。
+
+    middle = smooth(linreg(src, length))；reach = smooth(stdError(src, length))×mult；
+    平滑类型 SMA/EMA/WMA（smoothing=1 时等价不平滑）。默认 21/2/3 → 首个有效值
+    在 length+smoothing-2 = 22。填充带透明度 90（transp → alpha 0.10）。
+    """
+    n = M.pi(params, "length", 21)
+    src = M.source_values(bars, M.ps(params, "source", "Close"))
+    kind = M.ps(params, "smoothingType", "SMA")
+    smooth_len = M.pi(params, "smoothing", 3)
+    smooth = M.ema if kind == "EMA" else M.wma if kind == "WMA" else M.sma
+    middle = smooth(M.linreg(src, n, 0), smooth_len)
+    mult = M.pf(params, "mult", 2)
+    reach = M.mapv(smooth(_std_error(src, n), smooth_len), lambda x: x * mult)
+    upper = M.zipv(middle, reach, lambda m, r: m + r)
+    lower = M.zipv(middle, reach, lambda m, r: m - r)
+    upper_ink = M.ps(params, "upperColor", "#f23645")
+    lower_ink = M.ps(params, "lowerColor", "#089981")
+    return {"lines": [
+        M.line("Basis", middle, color=M.ps(params, "basisColor", "#787b86")),
+        M.line("Upper Band", upper, color=upper_ink),
+        M.line("Lower Band", lower, color=lower_ink),
+    ], "bands": [
+        {"key": "sebUpper", "from": "upper", "to": "basis", "color": _with_alpha(upper_ink, 0.10)},
+        {"key": "sebLower", "from": "basis", "to": "lower", "color": _with_alpha(lower_ink, 0.10)},
+    ]}
+
+
 STUDIES = {
     "bollinger-bands": bollinger_bands,
     "percent-b": percent_b,
@@ -167,4 +251,6 @@ STUDIES = {
     "supertrend": supertrend,
     "williams-alligator": williams_alligator,
     "gator-oscillator": gator_oscillator,
+    "moving-average-channel": moving_average_channel,
+    "standard-error-bands": standard_error_bands,
 }

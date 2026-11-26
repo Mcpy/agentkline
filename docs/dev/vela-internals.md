@@ -1,8 +1,8 @@
 # Vela 内部耦合与升级门（v0.5.4）
 
 > **定位**：薄适配层公开 API 之外的「内部面」台账。升级 Vela 前先读这一页，十分钟知道哪里会断、怎么回归。
-> **当前基线**：Vela 0.10.4，`frontend/vendor/assets/vela.global.min.js`，sha256 `3525e72473a8e45d22d0347238267e17c2f309561ca03cbe063223af601c7160`。
-> 0.10.4 起图表原生界面可中文化（`locale:zh-Hans`），画线 flyout 改为点组箭头展开；pane 高度走公开 `chart.panes.setHeightWeight()`。
+> **当前基线**：Vela 0.10.19，`frontend/vendor/assets/vela.global.min.js`，sha256 `3f653da7a958e8ebfb62302610ded61a5854f2f67616c4a66ad524d4c574d36c`。
+> 0.10.19 起图表原生界面可中文化（`locale:zh-Hans`），画线 flyout 点组箭头展开；pane 高度走公开 `chart.panes.setHeightWeight()`；指标值/名标签由适配层显式关（见 §2 末行）。
 > 注意：0.10.4 的 drawing toolbar 在构造期缓存英文 label，必须在 `new Vela()` 后显式 `chart.setLocale()`，否则只传 `locale` 时 flyout 仍英文。
 > **唯一接触点**：`frontend/src/vela_adapter.js`。应用层不直接摸 `window.Vela`，新增内部面也只能加在这里。
 
@@ -35,6 +35,7 @@ Vela 的公开 API 已覆盖图表、指标、画线、标记、事件和截图�
 | `coords.devicePixelRatio` | 轴宽 = canvas 宽 / dpr − dataW | 块过宽/过窄 | 轴宽兜底 64px | UI smoke #6 |
 | `chart.panes.setHeightWeight` / `panes.list().heightWeight` | 布局权重（0.8.5 起公开；0.8.4 只能写 `p.heightWeight`） | pane 高度不适配 | 保持默认高度 | 人工布局检查 / UI smoke |
 | `chart.setLocale` / `Vela.registerLocale` | 图表原生界面语言（0.9 起公开） | 图表菜单仍英文 | 保持英文 | 人工中文设置面板 |
+| `chart.renderer.applyConfig({priceScale:{indicatorValueLabels,indicatorNameLabels}})` | 关掉 0.10.18 上游默认开的值/名标签，保持价格轴观感 | 价格轴出现指标值 chip | 无（仅视觉） | UI smoke 视觉 + 人工 |
 | `#main-chart` 内 legend 行（文字 `VRVP` 的 span→row div） | VPVR 图例行隐藏：保留 DOM（设置面板仍能定位）只把该行 `display:none`；MutationObserver 防 Vela 重建 | 图例重新出现（行可见） | 结构变了就不再隐藏，chip/设置仍可用 | UI smoke #5 |
 | `handle.nativeType` / `pane.indicators` | 识别 volume/subplot 组 | volume 不移位、显隐/组挂载异常 | 回退到 title 判断 | e2e + 视觉 |
 | `renderer.onCrosshairMove` | 十字线通道：OHLC 行读数 + 0.6.2 交易点点击命中 | 十字线不更新、OHLC 停在旧值、点交易点无反应 | 无；OHLC 回落到最新一根，点击不命中（不报错） | UI smoke #10 + 人工 |
