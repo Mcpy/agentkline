@@ -6,7 +6,7 @@ from .contract import Engine, RunResult, SCHEMA, engine_meta
 
 def build_result(*, engine: Engine, status: str, bars: dict, fills: list, trades: list,
                  times: list, values: list, stats: dict, warnings: list,
-                 assumptions: dict) -> RunResult:
+                 assumptions: dict, mode: str = "signal") -> RunResult:
     meta = engine_meta(engine)
     # 引擎级 assumptions 作为兜底，驱动算出的口径优先
     merged = dict(meta.get("assumptions") or {})
@@ -23,6 +23,7 @@ def build_result(*, engine: Engine, status: str, bars: dict, fills: list, trades
         stats=stats,
         warnings=list(warnings),
         assumptions=merged,
+        mode=mode,
     )
     res.validate()
     return res

@@ -290,6 +290,19 @@ def test(port: int, token: str = None):
     r = s.post(f"{base}/api/scripts", json={"id": "datasource/bad", "code":
                'CAPS={"backfill": True}\ndef main(params):\n    return []\n'})
     check("CAPS_MISMATCH 保存即校验", "CAPS_MISMATCH" in r.text, r.text)
+
+    # 0.7.5：event 策略没有 main（on_bar），保存校验与 mode 暴露
+    ev_code = ('STRATEGY_MODE = "event"\nNAME = "E2E EV"\nWARMUP = 2\nPARAMS = {}\n\n'
+               'def on_bar(state, bar, ctx):\n    return {"target": 0}\n')
+    r = s.post(f"{base}/api/scripts", json={"id": "strategy/e2e_ev", "code": ev_code})
+    check("0.7.5 event 策略保存（无 main）", r.status_code == 200, r.text[:160])
+    r = s.get(f"{base}/api/strategy/meta?script=strategy/e2e_ev")
+    _evmeta = r.json() if r.status_code == 200 else {}
+    check("0.7.5 event meta 暴露 mode", _evmeta.get("mode") == "event" and _evmeta.get("ok"),
+          r.text[:160])
+    r = s.get(f"{base}/api/strategies")
+    _evrow = next((x for x in (r.json().get("strategies") or []) if x.get("id") == "strategy/e2e_ev"), {})
+    check("0.7.5 strategies 列表带 mode", _evrow.get("mode") == "event", r.text[:160])
     params10 = ", ".join(f'"p{i}": {i}' for i in range(1, 11))
     code10 = (f'NAME="TenP"\nDESC="10 参数压测"\nPARAMS={{{params10}}}\n'
               'def main(params, ohlcv):\n    n=int(params.get("p1",1))\n'
@@ -881,7 +894,9 @@ def test(port: int, token: str = None):
     bad_src = ('STRATEGY_MODE = "event"\nNAME = "e2e_bad"\nWARMUP = 0\nPARAMS = {}\n'
                'def main(p, o):\n    return {}\n')
     r = s.post(f"{base}/api/scripts", json={"id": "strategy/e2e_bad", "code": bad_src})
-    check("策略保存即验 MODE_MISMATCH", r.status_code == 400 and "MODE_MISMATCH" in r.text, r.text[:200])
+    # 0.7.5：event 策略定义 main 时给出更精确的 MAIN_FORBIDDEN_IN_EVENT（原 MODE_MISMATCH 的细分）
+    check("策略保存即验 MAIN_FORBIDDEN_IN_EVENT",
+          r.status_code == 400 and "MAIN_FORBIDDEN_IN_EVENT" in r.text, r.text[:200])
 
     r = s.post(f"{base}/api/board", json={"id": "btb", "symbol": "BT/USDT",
                                           "source": "datasource/mock_btc",

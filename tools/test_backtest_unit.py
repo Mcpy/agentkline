@@ -140,7 +140,7 @@ class SaveStrategyTest(unittest.TestCase):
         self.assertTrue((Path(self.tmp.name) / "strategy" / "ok.py").exists())
 
     def test_mode_mismatch(self):
-        r = self.se.save_script("strategy/bad", GOOD.replace('"signal"', '"event"'))
+        r = self.se.save_script("strategy/bad", GOOD.replace('"signal"', '"tick"'))
         self.assertIn("MODE_MISMATCH", r.get("error", ""))
         self.assertFalse((Path(self.tmp.name) / "strategy" / "bad.py").exists())
 
@@ -155,8 +155,10 @@ class SaveStrategyTest(unittest.TestCase):
         self.assertTrue(r.get("ok"), r)
 
     def test_strategy_requires_main(self):
+        # 0.7.5 起 strategy/* 交给引擎 loader 校验（signal 需 main、event 需 on_bar），
+        # 错误码统一为 loader 的 MAIN_MISSING；SAVE_NO_MAIN 仅用于 datasource/indicator。
         r = self.se.save_script("strategy/nomain", 'STRATEGY_MODE = "signal"\n')
-        self.assertIn("SAVE_NO_MAIN", r.get("error", ""))
+        self.assertIn("MAIN_MISSING", r.get("error", ""))
 
 
 if __name__ == "__main__":

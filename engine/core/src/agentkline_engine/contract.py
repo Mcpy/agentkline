@@ -15,6 +15,9 @@ SCHEMA = 1
 
 DIRECTIONS = ("long_only", "short_only", "both")
 
+# 策略范式：signal = 一次性返回 target 数组；event = 逐 bar 调 on_bar
+MODES = ("signal", "event")
+
 STATUSES = ("no_signals", "open_position_only", "completed_trades")
 
 # 结果 assumptions 固定键（跨引擎逐字段对比）
@@ -42,6 +45,8 @@ class RunRequest:
     """一次回测请求。bars 按时间升序，元素为 timestamp/open/high/low/close/volume。"""
 
     engine: str = "builtin"
+    # None = 未指定，由策略的 STRATEGY_MODE 决定；显式指定时必须与策略声明一致
+    mode: str | None = None
     bars: list[dict] = field(default_factory=list)
     strategy_source: str = ""
     params: dict = field(default_factory=dict)
@@ -61,6 +66,8 @@ class RunRequest:
     start_flat: bool = False   # True=eval_start 当根不执行上一根留下的 pending
 
     def validate(self) -> None:
+        if self.mode is not None and self.mode not in MODES:
+            raise AKError("INPUT_INVALID", f"mode 必须是 {MODES} 之一或 None，收到 {self.mode!r}")
         if self.direction not in DIRECTIONS:
             raise AKError("INPUT_INVALID", f"direction 必须是 {DIRECTIONS} 之一，收到 {self.direction!r}")
         if not self.bars:
@@ -89,6 +96,7 @@ class RunRequest:
         return {
             "api": ENGINE_API,
             "engine": self.engine,
+            "mode": self.mode,
             "bars": self.bars,
             "strategy_source": self.strategy_source,
             "params": self.params,
@@ -120,11 +128,14 @@ class RunResult:
     stats: dict
     warnings: list
     assumptions: dict
+    mode: str = "signal"
     schema: int = SCHEMA
 
     def validate(self) -> None:
         if self.schema != SCHEMA:
             raise AKError("API_MISMATCH", f"结果 schema={self.schema}，期望 {SCHEMA}")
+        if self.mode not in MODES:
+            raise AKError("ENGINE_INTERNAL", f"非法 mode: {self.mode!r}")
         if self.status not in STATUSES:
             raise AKError("ENGINE_INTERNAL", f"非法 status: {self.status!r}")
         eq = self.equity or {}
@@ -135,6 +146,7 @@ class RunResult:
         return {
             "schema": self.schema,
             "engine": self.engine,
+            "mode": self.mode,
             "status": self.status,
             "bars": self.bars,
             "fills": self.fills,

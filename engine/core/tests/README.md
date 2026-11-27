@@ -10,4 +10,6 @@ python -m unittest discover -s engine/core/tests -t engine/core/tests -p "test_*
 - `cases/*.json` 是 run spec，相对路径按 spec 所在目录解析；
 - `cases/expected/*.result.json` 由 `make_golden.py` 生成，改口径后重跑并 review diff；
 - `test_metrics_parity.py` 需要主包可 import（对照 `agentkline.core.results`）；
+- `test_event.py` 覆盖 event 范式契约，并用 `strategy_ma.py` / `strategy_ma_event.py`
+  跑 signal/event 跨范式 CLI 逐笔对账；
 - `test_perf.py` 是 5 万根基线，单跑约 0.3s。

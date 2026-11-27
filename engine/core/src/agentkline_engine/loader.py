@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 import math
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -16,6 +17,7 @@ from .errors import AKError
 DECLS = ("STRATEGY_MODE", "NAME", "DESC", "WARMUP", "PARAMS",
          "PARAM_META", "PROTECTION", "BARS_PER_YEAR")
 REQUIRED_DECLS = ("STRATEGY_MODE", "NAME", "WARMUP", "PARAMS")
+MODES = ("signal", "event")
 _PROTECTION_KEYS = ("stop_loss_pct", "take_profit_pct")
 _PARAM_META_KEYS = ("type", "min", "max", "step", "label", "options", "description")
 _PARAM_TYPES = ("int", "float", "bool", "str")
@@ -32,9 +34,11 @@ class Strategy:
     param_meta: dict
     protection: dict
     bars_per_year: float | None
-    main: Callable
+    main: Callable | None
     source: str
     source_sha256: str
+    init: Callable | None = None
+    on_bar: Callable | None = None
 
     def defaults(self) -> dict:
         return dict(self.params)
@@ -47,6 +51,8 @@ class Strategy:
 class _Inspect:
     decls: dict = field(default_factory=dict)
     main_node: ast.FunctionDef | None = None
+    on_bar_node: ast.FunctionDef | None = None
+    init_node: ast.FunctionDef | None = None
     errors: list = field(default_factory=list)
 
     def err(self, code: str, message: str) -> None:
@@ -88,8 +94,12 @@ def _inspect(source: str) -> _Inspect:
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == "main":
             ins.main_node = node
-        elif isinstance(node, ast.AsyncFunctionDef) and node.name == "main":
-            ins.err("STRATEGY_INVALID", "main 不能是 async 函数")
+        elif isinstance(node, ast.FunctionDef) and node.name == "on_bar":
+            ins.on_bar_node = node
+        elif isinstance(node, ast.FunctionDef) and node.name == "init":
+            ins.init_node = node
+        elif isinstance(node, ast.AsyncFunctionDef) and node.name in ("main", "on_bar", "init"):
+            ins.err("STRATEGY_INVALID", f"{node.name} 不能是 async 函数")
         elif isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Name) and target.id in DECLS:
@@ -101,8 +111,17 @@ def _inspect(source: str) -> _Inspect:
             else:
                 ins.decls[node.target.id] = _literal(node.value, node.target.id, ins)
 
-    _check_main(ins)
-    _check_decls(ins)
+    # 按 STRATEGY_MODE 选生命周期；缺失按 signal 处理以保持旧错误优先级，
+    # 未知 mode 只报 MODE_MISMATCH、不猜生命周期（避免掩盖真正的错误）
+    mode = ins.decls.get("STRATEGY_MODE")
+    if mode == "event":
+        _check_decls(ins)
+        _check_event(ins)
+    elif mode is None or mode is _MISSING or mode == "signal":
+        _check_main(ins)
+        _check_decls(ins)
+    else:
+        _check_decls(ins)
     return ins
 
 
@@ -114,12 +133,31 @@ def _check_main(ins: _Inspect) -> None:
     if isinstance(node, ast.AsyncFunctionDef):  # pragma: no cover - 兜底
         ins.err("STRATEGY_INVALID", "main 不能是 async 函数")
         return
+    _check_fn_args(ins, node, "main", 2, "main(params, ohlcv)")
+
+
+def _check_event(ins: _Inspect) -> None:
+    """event 生命周期：on_bar 必填、main 禁止、init 可选。"""
+    if ins.main_node is not None:
+        ins.err("MAIN_FORBIDDEN_IN_EVENT",
+                "event 策略不能定义 main(params, ohlcv)，请改用 on_bar(state, bar, ctx)")
+    node = ins.on_bar_node
+    if node is None:
+        ins.err("ON_BAR_MISSING", "event 策略必须定义 on_bar(state, bar, ctx) 函数")
+    else:
+        _check_fn_args(ins, node, "on_bar", 3, "on_bar(state, bar, ctx)")
+    if ins.init_node is not None:
+        _check_fn_args(ins, ins.init_node, "init", 2, "init(params, ctx)")
+
+
+def _check_fn_args(ins: _Inspect, node: ast.FunctionDef, name: str,
+                   count: int, signature: str) -> None:
     args = node.args
     positional = list(args.posonlyargs) + list(args.args)
-    if len(positional) < 2:
-        ins.err("STRATEGY_INVALID", "main 必须接受 (params, ohlcv) 两个参数")
+    if len(positional) < count:
+        ins.err("STRATEGY_INVALID", f"{name} 必须接受 {signature} 参数")
     if args.vararg is not None:
-        ins.err("STRATEGY_INVALID", "main 不支持 *args，请显式写 (params, ohlcv)")
+        ins.err("STRATEGY_INVALID", f"{name} 不支持 *args，请显式写 {signature}")
 
 
 def _check_decls(ins: _Inspect) -> None:
@@ -127,13 +165,14 @@ def _check_decls(ins: _Inspect) -> None:
     for name in REQUIRED_DECLS:
         if name not in d:
             if name == "STRATEGY_MODE":
-                ins.err("STRATEGY_INVALID", "缺少 STRATEGY_MODE 声明（当前只支持 \"signal\"）")
+                ins.err("STRATEGY_INVALID",
+                        "缺少 STRATEGY_MODE 声明（当前支持 \"signal\" / \"event\"）")
             else:
                 ins.err("STRATEGY_INVALID", f"缺少 {name} 声明")
 
     mode = d.get("STRATEGY_MODE")
-    if mode is not _MISSING and mode is not None and mode != "signal":
-        ins.err("MODE_MISMATCH", f"STRATEGY_MODE 必须是 \"signal\"，收到 {mode!r}")
+    if mode is not _MISSING and mode is not None and mode not in MODES:
+        ins.err("MODE_MISMATCH", f"STRATEGY_MODE 必须是 \"signal\" 或 \"event\"，收到 {mode!r}")
 
     name = d.get("NAME")
     if name is not _MISSING and name is not None:
@@ -244,19 +283,38 @@ def load_strategy(source: str) -> Strategy:
 
     decls = {k: ns.get(k) for k in DECLS if k in ns}
     _validate_decl_values({k: v for k, v in decls.items() if k in ins.decls})
+    mode = str(decls.get("STRATEGY_MODE") or "signal")
     main_fn = ns.get("main")
-    if not callable(main_fn):
-        raise AKError("MAIN_MISSING", "策略必须定义 main(params, ohlcv) 函数")
+    on_bar_fn = ns.get("on_bar")
+    init_fn = ns.get("init")
+    if mode == "event":
+        # event 生命周期：on_bar 必填、main 禁止、init 可选且必须是函数
+        if callable(main_fn):
+            raise AKError("MAIN_FORBIDDEN_IN_EVENT",
+                          "event 策略不能定义 main(params, ohlcv)，请改用 on_bar(state, bar, ctx)")
+        if not callable(on_bar_fn):
+            raise AKError("ON_BAR_MISSING", "event 策略必须定义 on_bar(state, bar, ctx) 函数")
+        if init_fn is not None and not callable(init_fn):
+            raise AKError("STRATEGY_INVALID", "event 策略的 init 必须是函数")
+    else:
+        if not callable(main_fn):
+            raise AKError("MAIN_MISSING", "策略必须定义 main(params, ohlcv) 函数")
+        if init_fn is not None and not callable(init_fn):
+            raise AKError("STRATEGY_INVALID", "init 必须是函数")
+        if on_bar_fn is not None and not callable(on_bar_fn):
+            raise AKError("STRATEGY_INVALID", "on_bar 必须是函数")
     return Strategy(
         name=str(decls.get("NAME") or "").strip(),
         desc=str(decls.get("DESC") or ""),
-        mode="signal",
+        mode=mode,
         warmup=int(decls.get("WARMUP") or 0),
         params=dict(decls.get("PARAMS") or {}),
         param_meta=dict(decls.get("PARAM_META") or {}),
         protection=dict(decls.get("PROTECTION") or {}),
         bars_per_year=float(decls["BARS_PER_YEAR"]) if decls.get("BARS_PER_YEAR") else None,
-        main=main_fn,
+        main=main_fn if callable(main_fn) else None,
+        init=init_fn if callable(init_fn) else None,
+        on_bar=on_bar_fn if callable(on_bar_fn) else None,
         source=source,
         source_sha256=hashlib.sha256(source.encode("utf-8")).hexdigest(),
     )
@@ -269,6 +327,54 @@ def load_strategy_file(path: str) -> Strategy:
     except OSError as exc:
         raise AKError("STRATEGY_INVALID", f"读取策略失败: {exc}")
     return load_strategy(source)
+
+
+# ============================ event state ============================
+
+_STATE_MAX_DETAIL = 10
+
+
+def _check_json_value(value, path: str, errors: list[str]) -> None:
+    """严格 JSON 值检查：str 键、有限浮点、只认 None/bool/int/float/str/list/dict。"""
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            errors.append(f"{path} 不是有限数")
+        return
+    if isinstance(value, list):
+        for i, item in enumerate(value):
+            _check_json_value(item, f"{path}[{i}]", errors)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                errors.append(f"{path} 的键 {key!r} 不是 str")
+                continue
+            _check_json_value(item, f"{path}.{key}", errors)
+        return
+    errors.append(f"{path} 的类型 {type(value).__name__} 不是 JSON 类型")
+
+
+def ensure_state_json(state) -> None:
+    """回测结束时校验 event state；失败报 STATE_NOT_JSON。
+
+    不用 json.dumps 一把梭：它会把 int 键转成 str、把 tuple 转成 list，
+    从而静默放过不符合契约的 state。这里先递归严格检查，再 dumps 兜底。
+    """
+    if not isinstance(state, dict):
+        raise AKError("STATE_NOT_JSON", f"state 必须是 dict，收到 {type(state).__name__}")
+    errors: list[str] = []
+    _check_json_value(state, "state", errors)
+    if not errors:
+        try:
+            json.dumps(state, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            errors.append(str(exc))
+    if errors:
+        raise AKError("STATE_NOT_JSON",
+                      "state 必须 JSON 可序列化：" + errors[0],
+                      detail=errors[:_STATE_MAX_DETAIL])
 
 
 # ============================ 参数 ============================
@@ -345,6 +451,7 @@ def describe_source(source: str) -> dict:
     return {
         "name": d.get("NAME"),
         "desc": d.get("DESC"),
+        "mode": d.get("STRATEGY_MODE"),
         "warmup": d.get("WARMUP"),
         "params": d.get("PARAMS") if isinstance(d.get("PARAMS"), dict) else {},
         "param_meta": d.get("PARAM_META") if isinstance(d.get("PARAM_META"), dict) else {},

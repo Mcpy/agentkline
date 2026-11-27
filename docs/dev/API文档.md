@@ -81,7 +81,7 @@ CSV 入图 = 内置 `datasource/csv` 脚本（path 归操作参数，IDENTITY=[]
 | GET | `/api/scripts` | exec | 双根脚本表 `[{id,kind,source,display,desc,params,param_meta,caps,identity}]`（kind 含 optimizer） |
 | GET | `/api/scripts/meta` | read | 脚本元数据精简面 `[{id,kind,source,display,desc,params}]`：web 端口可读（设置面板补 PARAMS 默认值），无 MCP 面 |
 | GET | `/api/indicator-catalog` | read | 指标目录（内置 103 项 = 102 Vela 经典 + KDJ，并合并自定义脚本）：`{vela, groups[], indicators[], custom_count}`；每项含 type/script/title/short/title_zh/group/overlay/inputs（参数 schema，颜色已剔除）与 source（builtin/custom）。自定义脚本归 group=custom，与内置同 id 时标 shadowed=true，不重复出卡。指标库面板与设置面板共用，无 MCP 面 |
-| POST | `/api/scripts` | exec | `save_script`：`{id,code}` 只写 custom，保存即校验（CAPS_MISMATCH/SAVE_SYNTAX/SAVE_NO_MAIN/SAVE_EMPTY）；`strategy/*` 按 signal 契约 AST 校验；`optimizer/*` 要求 `OPTIMIZER_API=1`+`ask`（SAVE_OPTIMIZER_*） |
+| POST | `/api/scripts` | exec | `save_script`：`{id,code}` 只写 custom，保存即校验（CAPS_MISMATCH/SAVE_SYNTAX/SAVE_NO_MAIN/SAVE_EMPTY）；`strategy/*` 交引擎 loader 按 `STRATEGY_MODE` 校验（signal→`MAIN_MISSING`；event→`ON_BAR_MISSING`/`MAIN_FORBIDDEN_IN_EVENT`）；`optimizer/*` 要求 `OPTIMIZER_API=1`+`ask`（SAVE_OPTIMIZER_*） |
 | POST | `/api/run-script` | exec | 窄身 `{script,params}`：只执行返回，图上不留痕 |
 | GET | `/api/search` | read | 标的搜索 `?q=&refresh=`：rows=`[{symbol,source,display,has_board}]`；索引=CAPS.symbols 源首用全量+TTL 日级；搜索不穿透交易所 |
 | GET | `/api/skills` / `/api/skills/{name}` | read | skills 列表/全文（MCP 薄镜像） |

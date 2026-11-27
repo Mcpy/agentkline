@@ -38,7 +38,7 @@ def _to_ms(v):
 class AgentKlineService:
     """AgentKline 业务核心"""
 
-    VERSION = "0.7.4"
+    VERSION = "0.7.5"
 
     def __init__(self, scripts_dir: str, limits: dict = None, data_dir: str = None):
         limits = limits or {}
@@ -1317,7 +1317,8 @@ class AgentKlineService:
             },
             "strategy": {
                 "id": ctx["script"] or "strategy/inline",
-                "mode": "signal",
+                # 0.7.5：模式由引擎结果透传（signal|event），不再硬编码。
+                "mode": str(payload.get("mode") or "signal"),
                 "params": merged_params,
                 "warmup": int(info.get("warmup") or 0),
                 "protection": ctx["merged_prot"],

@@ -84,17 +84,23 @@ def _spec_strategy(spec: dict, base_dir: Path | None = None) -> str:
 
 
 def build_request(spec: dict, engine_override: str | None = None,
-                  timeout: float | None = None, base_dir: Path | None = None) -> RunRequest:
+                  timeout: float | None = None, base_dir: Path | None = None,
+                  mode: str | None = None) -> RunRequest:
     api = spec.get("api", ENGINE_API)
     if int(api) != ENGINE_API:
         raise AKError("API_MISMATCH", f"spec.api={api}，本框架支持 {ENGINE_API}")
     run = spec.get("run") if isinstance(spec.get("run"), dict) else {}
+    # mode 优先级：--mode > spec.mode > spec.run.mode > None（由策略声明决定）
+    run_mode = mode if mode is not None else (spec.get("mode") or run.get("mode"))
+    if run_mode is not None:
+        run_mode = str(run_mode)
     bars_src = spec.get("bars")
     if isinstance(bars_src, dict) and bars_src.get("path"):
         bars_src = dict(bars_src)
         bars_src["path"] = _resolve_path(bars_src["path"], base_dir)
     req = RunRequest(
         engine=str(engine_override or spec.get("engine") or "builtin"),
+        mode=run_mode,
         bars=load_bars(bars_src),
         strategy_source=_spec_strategy(spec, base_dir),
         params=run.get("params") or {},
@@ -118,7 +124,7 @@ def build_request(spec: dict, engine_override: str | None = None,
 
 def cmd_run(args) -> int:
     spec, base_dir = _read_spec(args)
-    req = build_request(spec, args.engine, args.timeout, base_dir)
+    req = build_request(spec, args.engine, args.timeout, base_dir, mode=args.mode)
     eng = get_engine(req.engine)
     real_stdout = sys.stdout
     sys.stdout = sys.stderr  # 策略/引擎的 print 不得污染协议
@@ -186,7 +192,8 @@ def cmd_validate(args) -> int:
         raise AKError("STRATEGY_INVALID", f"读取策略失败: {exc}")
     errors = check_source(source)
     info = describe_source(source)
-    payload = {"ok": not errors, "name": info.get("name"), "warmup": info.get("warmup"),
+    payload = {"ok": not errors, "name": info.get("name"), "mode": info.get("mode"),
+               "warmup": info.get("warmup"),
                "params": info.get("params"), "errors": errors, "path": args.path}
     if args.json:
         _emit(payload)
@@ -195,7 +202,8 @@ def cmd_validate(args) -> int:
             for e in errors:
                 print(f"{e['code']}: {e['message']}")
         else:
-            print(f"OK {info.get('name')} warmup={info.get('warmup')} params={info.get('params')}")
+            print(f"OK {info.get('name')} mode={info.get('mode')} "
+                  f"warmup={info.get('warmup')} params={info.get('params')}")
     return EXIT_OK if not errors else 2
 
 
@@ -212,6 +220,8 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--spec", help="run.json 路径")
     pr.add_argument("--stdin", action="store_true", help="从 stdin 读 spec+bars")
     pr.add_argument("--engine", help="覆盖 spec.engine")
+    pr.add_argument("--mode", choices=("signal", "event"),
+                    help="覆盖 spec.mode（默认由策略 STRATEGY_MODE 决定）")
     pr.add_argument("--out", help="结果另存为 JSON")
     pr.add_argument("--timeout", type=float, default=None, help="协作式超时（秒）")
     pr.set_defaults(func=cmd_run)

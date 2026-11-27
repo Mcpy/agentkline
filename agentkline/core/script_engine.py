@@ -27,7 +27,7 @@ OPTIMIZER_CAPS = ("continuous", "multi_objective", "requires_full_space", "custo
 OPTIMIZER_API_VERSION = 1
 STEM_RE = re.compile(r"^[a-z0-9_]+$")
 META_NAMES = ("NAME", "DESC", "PARAMS", "PARAM_META", "CAPS", "IDENTITY",
-              "INTERVALS", "SUBPLOT", "OPTIMIZER_API")
+              "INTERVALS", "SUBPLOT", "OPTIMIZER_API", "STRATEGY_MODE")
 SAVE_WARN_BYTES = 100_000  # save_script 大小告警阈值（R8 护栏族）
 
 
@@ -86,7 +86,8 @@ class ScriptEngine:
                 "param_meta": {}, "caps": {k: False for k in CAPS_KEYS},
                 "caps_raw": {}, "caps_declared": False, "optimizer_api": None,
                 "literal_errors": [], "identity": [], "defs": set(),
-                "main_until": False, "has_main": False, "subplot": False}
+                "main_until": False, "has_main": False, "subplot": False,
+                "mode": None}
         literals = {}
         for node in tree.body:
             if isinstance(node, ast.Assign):
@@ -101,6 +102,8 @@ class ScriptEngine:
             if _name in literals and literals[_name] is not None \
                     and not isinstance(literals[_name], _typ):
                 meta["literal_errors"].append(_name)
+        if isinstance(literals.get("STRATEGY_MODE"), str):
+            meta["mode"] = literals["STRATEGY_MODE"]
         if isinstance(literals.get("NAME"), str):
             meta["name"] = literals["NAME"]
         if isinstance(literals.get("DESC"), str):
@@ -262,6 +265,7 @@ class ScriptEngine:
                         "params": meta["params"], "param_meta": meta.get("param_meta") or {},
                         "caps": caps,
                         "identity": meta["identity"], "intervals": meta["intervals"],
+                        "mode": meta.get("mode") if kind == "strategy" else None,
                     })
         return out
 
@@ -477,6 +481,9 @@ class ScriptEngine:
             opt_err = self.check_optimizer_meta(meta)
             if opt_err:
                 return {"error": opt_err}
+        elif kind == "strategy":
+            # 0.7.5：event 策略没有 main（契约要求 on_bar）；按 STRATEGY_MODE 由 loader 统一校验。
+            pass
         else:
             if not meta["has_main"]:
                 return {"error": f"SAVE_NO_MAIN: {kind} 脚本必须定义 main 函数"

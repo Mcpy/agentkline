@@ -33,7 +33,7 @@ class LoaderTest(unittest.TestCase):
         self.assertEqual(cm.exception.code, "MAIN_MISSING")
 
     def test_mode_mismatch(self):
-        src = BASE.replace('STRATEGY_MODE = "signal"', 'STRATEGY_MODE = "event"')
+        src = BASE.replace('STRATEGY_MODE = "signal"', 'STRATEGY_MODE = "tick"')
         with self.assertRaises(AKError) as cm:
             load_strategy(src)
         self.assertEqual(cm.exception.code, "MODE_MISMATCH")

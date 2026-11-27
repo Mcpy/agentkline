@@ -8,7 +8,8 @@ from __future__ import annotations
 from .bars import load_bars, normalize_bars
 from .contract import ENGINE_API, SCHEMA, Engine, RunRequest, RunResult
 from .errors import AKError
-from .loader import check_source, describe_source, load_strategy, load_strategy_file
+from .loader import (check_source, describe_source, ensure_state_json, load_strategy,
+                     load_strategy_file)
 from .matching import MatchingEngine
 from .metrics import compute_stats_full
 from .registry import discover, get_engine, list_engines
@@ -19,6 +20,6 @@ __version__ = "0.1.0"
 __all__ = [
     "AKError", "ENGINE_API", "SCHEMA", "Engine", "RunRequest", "RunResult",
     "MatchingEngine", "build_result", "check_source", "compute_stats_full",
-    "describe_source", "discover", "get_engine", "list_engines", "load_bars",
-    "load_strategy", "load_strategy_file", "normalize_bars", "__version__",
+    "describe_source", "discover", "ensure_state_json", "get_engine", "list_engines",
+    "load_bars", "load_strategy", "load_strategy_file", "normalize_bars", "__version__",
 ]

@@ -6,7 +6,7 @@
   "api": 1,
   "caps": {
    "signal": true,
-   "event": false,
+   "event": true,
    "short": true,
    "leverage": false,
    "multi_symbol": false,
@@ -30,6 +30,7 @@
    "intrabar_mode": "conservative"
   }
  },
+ "mode": "signal",
  "status": "completed_trades",
  "bars": {
   "count": 200,

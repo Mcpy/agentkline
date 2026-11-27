@@ -139,7 +139,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(p.returncode, 2)
             payload = parse(p)
             self.assertFalse(payload["ok"])
-            self.assertEqual(payload["errors"][0]["code"], "MODE_MISMATCH")
+            self.assertEqual(payload["errors"][0]["code"], "MAIN_FORBIDDEN_IN_EVENT")
 
 
 if __name__ == "__main__":

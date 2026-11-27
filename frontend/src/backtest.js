@@ -773,16 +773,27 @@ export async function openBacktestDialog(opts = {}) {
     engineGroup.appendChild(groupHead(1, t('bt.group.engine'), t('bt.group.engine_sub')));
     engineGroup.appendChild(row(t('bt.engine'), engineSel));
 
-    // 策略
+    // 策略（0.7.5：按引擎 caps 过滤；event 策略只出现在支持 caps.event 的引擎下）
     const stratSel = document.createElement('select');
     stratSel.id = 'bt-strategy';
-    strategies.forEach(s => {
-        const o = document.createElement('option');
-        o.value = s.id;
-        o.textContent = `${s.display || s.id}`;
-        o.title = s.desc || s.id;
-        stratSel.appendChild(o);
-    });
+    const strategyEligible = (s) => {
+        const caps = (engines.find(e => e.id === engineSel.value) || {}).caps || {};
+        if ((s.mode || 'signal') === 'event') return caps.event === true;
+        return caps.signal === undefined || caps.signal !== false;
+    };
+    const fillStrategies = (keep) => {
+        stratSel.textContent = '';
+        strategies.filter(strategyEligible).forEach(s => {
+            const o = document.createElement('option');
+            o.value = s.id;
+            o.textContent = `${s.display || s.id}`;
+            o.title = s.desc || s.id;
+            stratSel.appendChild(o);
+        });
+        if (keep && [...stratSel.options].some(o => o.value === keep)) stratSel.value = keep;
+        stratSel.disabled = !stratSel.options.length;
+    };
+    fillStrategies(opts.script || null);
     const stratRow = row(t('bt.strategy'), stratSel,
         strategies.length ? '' : t('bt.no_strategy'));
     stratGroup.appendChild(groupHead(2, t('bt.group.strategy'), t('bt.group.strategy_sub')));
@@ -1299,6 +1310,7 @@ export async function openBacktestDialog(opts = {}) {
                 const desc = el('div', 'bt-meta');
                 const bits = [];
                 if (j.name) bits.push(j.name);
+                if (j.mode) bits.push(String(j.mode).toUpperCase());
                 if (j.warmup != null) bits.push(`WARMUP ${j.warmup}`);
                 if (j.bars_per_year) bits.push(`${j.bars_per_year}/yr`);
                 desc.textContent = bits.join(' · ');
@@ -1679,6 +1691,11 @@ export async function openBacktestDialog(opts = {}) {
     stratSel.addEventListener('change', () => {
         pendingParams = null;
         paintPresets();
+        paintParams();
+        refreshSummary();
+    });
+    engineSel.addEventListener('change', () => {
+        fillStrategies(stratSel.value);
         paintParams();
         refreshSummary();
     });
